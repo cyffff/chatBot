@@ -30,6 +30,24 @@ HOST=0.0.0.0 PUBLIC_BASE_URL=http://你的局域网IP:8787 npm start
 
 生产环境应在服务前增加 HTTPS，并将 `data/` 挂载到持久磁盘。
 
+### Docker
+
+```bash
+docker compose up -d --build
+```
+
+这会同时启动聊天服务和一个临时 Cloudflare Tunnel。聊天数据保存在 Docker 的
+`group-relay-data` 持久卷中。查看状态、获取公网地址或停止：
+
+```bash
+docker compose ps
+docker compose logs cloudflared
+docker compose down
+```
+
+日志中的 `https://*.trycloudflare.com` 地址即为公网入口。临时地址会在 Tunnel
+容器重建后变化；长期使用应创建命名 Tunnel 并绑定自己的域名。
+
 ## HTTP API
 
 所有群组内接口均使用：

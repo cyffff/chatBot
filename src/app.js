@@ -27,18 +27,23 @@ const joinSchema = z.object({
 
 export async function createApp(options = {}) {
   const dataDir = options.dataDir ?? process.env.GROUP_RELAY_DATA_DIR ?? "./data";
-  const publicBaseUrl = (options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+  const configuredPublicBaseUrl = options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL;
   const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
   const store = options.store ?? new FileStore(dataDir);
   await store.init();
 
   const app = express();
+  app.set("trust proxy", 1);
   const subscribers = new Map();
   const waiters = new Map();
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: maxFileSize, files: 10 }
   });
+
+  const publicBaseUrl = (req) => (
+    configuredPublicBaseUrl?.replace(/\/$/, "") ?? `${req.protocol}://${req.get("host")}`
+  );
 
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false }));
@@ -79,7 +84,7 @@ export async function createApp(options = {}) {
       res.status(201).json({
         group: result.group,
         member: result.owner,
-        inviteUrl: `${publicBaseUrl}/join/${result.group.inviteToken}`
+        inviteUrl: `${publicBaseUrl(req)}/join/${result.group.inviteToken}`
       });
     } catch (error) {
       next(error);
@@ -127,7 +132,7 @@ export async function createApp(options = {}) {
   app.post("/api/groups/:groupId/invites/rotate", requireMember, async (req, res, next) => {
     try {
       const inviteToken = await store.rotateInvite(req.params.groupId);
-      res.json({ inviteUrl: `${publicBaseUrl}/join/${inviteToken}` });
+      res.json({ inviteUrl: `${publicBaseUrl(req)}/join/${inviteToken}` });
     } catch (error) {
       next(error);
     }

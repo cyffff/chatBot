@@ -1,0 +1,22 @@
+services:
+  group-relay:
+    build:
+      context: .
+    container_name: group-relay
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - group-relay-data:/app/data
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.7.3
+    container_name: group-relay-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://group-relay:8787
+    depends_on:
+      group-relay:
+        condition: service_healthy
+
+volumes:
+  group-relay-data:
