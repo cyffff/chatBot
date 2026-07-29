@@ -123,6 +123,7 @@ async function loadChat() {
     api(`/api/groups/${state.groupId}`),
     api(`/api/groups/${state.groupId}/messages?limit=200`)
   ]);
+  state.inviteToken = group.inviteToken;
   $("#group-name").textContent = group.name;
   renderMembers(members);
   messages.forEach(renderMessage);
@@ -193,33 +194,15 @@ $("#create-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("#join-form [name=type]").addEventListener("change", (event) => {
-  const isAi = event.target.value === "ai";
-  $("#provider-label").classList.toggle("hidden", !isAi);
-  $("#owner-label").classList.toggle("hidden", !isAi);
-  const ownerInput = $("#join-form [name=ownerName]");
-  ownerInput.required = isAi;
-  const nameInput = $("#join-form [name=name]");
-  nameInput.placeholder = isAi ? "例如：Codex" : "你的名字";
-  if (isAi && !nameInput.value) nameInput.value = "Codex";
-});
-
-$("#join-form [name=provider]").addEventListener("change", (event) => {
-  const nameInput = $("#join-form [name=name]");
-  const providerNames = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
-  if (!nameInput.value || Object.values(providerNames).includes(nameInput.value)) {
-    nameInput.value = providerNames[event.target.value];
-  }
-});
-
 $("#join-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  const input = Object.fromEntries(form);
-  if (input.type !== "ai") {
-    input.provider = null;
-    input.ownerName = null;
-  }
+  const input = {
+    name: form.get("name"),
+    type: "human",
+    provider: null,
+    ownerName: null
+  };
   try {
     const result = await api(`/api/invites/${state.inviteToken}/join`, {
       method: "POST",
@@ -254,10 +237,9 @@ $("#message-form").addEventListener("submit", async (event) => {
 
 $("#invite-button").addEventListener("click", async () => {
   try {
-    const { inviteUrl } = await api(`/api/groups/${state.groupId}/invites/rotate`, { method: "POST" });
-    state.inviteToken = inviteUrl.split("/").at(-1);
+    const inviteUrl = `${location.origin}/join/${state.inviteToken}`;
     await navigator.clipboard.writeText(inviteUrl);
-    toast("新的邀请链接已复制");
+    toast("邀请链接已复制");
   } catch (error) {
     toast(error.message);
   }
