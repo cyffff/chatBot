@@ -57,6 +57,23 @@ button {
 }
 button:hover { background: #17573b; }
 button.secondary { color: #24573e; background: #e7f0e8; }
+.button-link {
+  display: block;
+  margin-top: 14px;
+  border-radius: 11px;
+  padding: 12px 18px;
+  background: #1f6848;
+  color: white;
+  font-weight: 750;
+  text-align: center;
+  text-decoration: none;
+}
+.button-link:hover { background: #17573b; }
+.secondary-link { color: #24573e; background: #e7f0e8; }
+.secondary-link:hover { background: #dce9de; }
+.known-groups { margin-top: 24px; color: #68736b; line-height: 1.5; }
+#known-group-links { display: grid; gap: 8px; }
+#known-group-links .button-link { margin-top: 0; }
 
 .chat { width: min(1180px, 100%); height: min(860px, calc(100vh - 64px)); overflow: hidden; }
 header {

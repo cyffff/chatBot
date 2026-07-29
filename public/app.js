@@ -8,7 +8,7 @@ const state = {
   realtimeStarted: false
 };
 
-const views = ["#create-view", "#join-view", "#chat-view"];
+const views = ["#create-view", "#join-view", "#invalid-view", "#chat-view"];
 function show(selector) {
   views.forEach((view) => $(view).classList.toggle("hidden", view !== selector));
 }
@@ -52,6 +52,9 @@ async function resumeSession(groupId, inviteToken = null) {
     await loadChat();
     history.replaceState({}, "", `/group/${state.groupId}`);
     saveSession();
+    if (inviteToken) {
+      localStorage.setItem(`relay-invite:${inviteToken}`, groupId);
+    }
     return true;
   } catch {
     localStorage.removeItem(`relay:${groupId}`);
@@ -61,6 +64,52 @@ async function resumeSession(groupId, inviteToken = null) {
     state.inviteToken = previous.inviteToken;
     return false;
   }
+}
+
+async function findKnownSessions() {
+  const sessions = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    const match = key?.match(/^relay:([0-9a-f-]{36})$/i);
+    if (!match) continue;
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || "null");
+      if (!saved?.token) continue;
+      const response = await fetch(`/api/groups/${match[1]}`, {
+        headers: { Authorization: `Bearer ${saved.token}` }
+      });
+      if (!response.ok) continue;
+      const { group } = await response.json();
+      sessions.push({ id: group.id, name: group.name });
+    } catch {
+      // Ignore stale sessions while looking for a recoverable membership.
+    }
+  }
+  return sessions;
+}
+
+function showInvalidInvite(sessions = []) {
+  const container = $("#known-groups");
+  const links = $("#known-group-links");
+  links.innerHTML = "";
+  for (const session of sessions) {
+    const link = document.createElement("a");
+    link.className = "button-link";
+    link.href = `/group/${session.id}`;
+    link.textContent = `返回「${session.name}」`;
+    links.append(link);
+  }
+  container.classList.toggle("hidden", sessions.length === 0);
+  show("#invalid-view");
+}
+
+async function recoverLegacySession(inviteToken) {
+  const sessions = await findKnownSessions();
+  if (sessions.length === 1 && await resumeSession(sessions[0].id, inviteToken)) {
+    return true;
+  }
+  showInvalidInvite(sessions);
+  return false;
 }
 
 function memberLabel(member) {
@@ -243,6 +292,10 @@ $("#join-form").addEventListener("submit", async (event) => {
     history.replaceState({}, "", `/group/${state.groupId}`);
     await loadChat();
   } catch (error) {
+    if (error.message === "invite not found") {
+      await recoverLegacySession(state.inviteToken);
+      return;
+    }
     toast(error.message);
   }
 });
@@ -286,7 +339,11 @@ async function boot() {
       $("#join-title").textContent = `加入「${group.name}」`;
       show("#join-view");
     } catch (error) {
-      show("#join-view");
+      if (error.message === "invite not found") {
+        await recoverLegacySession(state.inviteToken);
+        return;
+      }
+      showInvalidInvite();
       toast(error.message);
     }
     return;
