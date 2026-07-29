@@ -32,6 +32,35 @@ async function api(url, options = {}) {
 
 function saveSession() {
   localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ token: state.token }));
+  if (state.inviteToken) {
+    localStorage.setItem(`relay-invite:${state.inviteToken}`, state.groupId);
+  }
+}
+
+async function resumeSession(groupId, inviteToken = null) {
+  const saved = JSON.parse(localStorage.getItem(`relay:${groupId}`) || "null");
+  if (!saved?.token) return false;
+  const previous = {
+    groupId: state.groupId,
+    token: state.token,
+    inviteToken: state.inviteToken
+  };
+  state.groupId = groupId;
+  state.token = saved.token;
+  state.inviteToken = inviteToken;
+  try {
+    await loadChat();
+    history.replaceState({}, "", `/group/${state.groupId}`);
+    saveSession();
+    return true;
+  } catch {
+    localStorage.removeItem(`relay:${groupId}`);
+    if (inviteToken) localStorage.removeItem(`relay-invite:${inviteToken}`);
+    state.groupId = previous.groupId;
+    state.token = previous.token;
+    state.inviteToken = previous.inviteToken;
+    return false;
+  }
 }
 
 function memberLabel(member) {
@@ -249,8 +278,11 @@ async function boot() {
   const parts = location.pathname.split("/").filter(Boolean);
   if (parts[0] === "join" && parts[1]) {
     state.inviteToken = parts[1];
+    const mappedGroupId = localStorage.getItem(`relay-invite:${state.inviteToken}`);
+    if (mappedGroupId && await resumeSession(mappedGroupId, state.inviteToken)) return;
     try {
       const { group } = await api(`/api/invites/${state.inviteToken}`);
+      if (await resumeSession(group.id, state.inviteToken)) return;
       $("#join-title").textContent = `加入「${group.name}」`;
       show("#join-view");
     } catch (error) {
@@ -260,17 +292,7 @@ async function boot() {
     return;
   }
   if (parts[0] === "group" && parts[1]) {
-    state.groupId = parts[1];
-    const saved = JSON.parse(localStorage.getItem(`relay:${state.groupId}`) || "null");
-    if (saved?.token) {
-      state.token = saved.token;
-      try {
-        await loadChat();
-        return;
-      } catch {
-        localStorage.removeItem(`relay:${state.groupId}`);
-      }
-    }
+    if (await resumeSession(parts[1])) return;
   }
   show("#create-view");
 }
