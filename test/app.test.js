@@ -72,6 +72,34 @@ test("rejects unauthenticated history access", async (t) => {
   assert.equal(response.status, 401);
 });
 
+test("long polling delivers a new message without refreshing", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Realtime", ownerName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const token = created.body.member.token;
+  const waitRequest = fetch(`${base}/api/groups/${groupId}/messages/wait?timeoutMs=2000`, {
+    headers: { Authorization: `Bearer ${token}` }
+  }).then(async (response) => ({ response, body: await response.json() }));
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const form = new FormData();
+  form.set("text", "live message");
+  const sent = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form
+  });
+  assert.equal(sent.status, 201);
+
+  const waited = await waitRequest;
+  assert.equal(waited.response.status, 200);
+  assert.equal(waited.body.messages.length, 1);
+  assert.equal(waited.body.messages[0].text, "live message");
+});
+
 test("compresses message logs from previous days and can still read them", async (t) => {
   const { store } = await fixture(t);
   const { group, owner } = await store.createGroup({ name: "Archive", ownerName: "Owner" });

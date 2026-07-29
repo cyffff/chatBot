@@ -70,7 +70,7 @@ export async function createApp(options = {}) {
     for (const response of subscribers.get(groupId) ?? []) {
       response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
     }
-    const pending = waiters.get(groupId) ?? [];
+    const pending = waiters.get(groupId) ?? new Set();
     waiters.delete(groupId);
     for (const waiter of pending) waiter(payload);
   }
@@ -159,13 +159,19 @@ export async function createApp(options = {}) {
       if (existing.length) return res.json({ messages: existing, cursor: existing.at(-1).id });
       const timeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
       const message = await new Promise((resolve) => {
-        const groupWaiters = waiters.get(req.params.groupId) ?? [];
-        const timeout = setTimeout(() => resolve(null), timeoutMs);
-        groupWaiters.push((value) => {
+        const groupId = req.params.groupId;
+        const groupWaiters = waiters.get(groupId) ?? new Set();
+        const finish = (value) => {
           clearTimeout(timeout);
+          groupWaiters.delete(finish);
+          if (!groupWaiters.size && waiters.get(groupId) === groupWaiters) {
+            waiters.delete(groupId);
+          }
           resolve(value);
-        });
-        waiters.set(req.params.groupId, groupWaiters);
+        };
+        const timeout = setTimeout(() => finish(null), timeoutMs);
+        groupWaiters.add(finish);
+        waiters.set(groupId, groupWaiters);
       });
       res.json({
         messages: message ? [message] : [],

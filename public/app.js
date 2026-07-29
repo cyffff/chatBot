@@ -4,7 +4,8 @@ const state = {
   token: null,
   inviteToken: null,
   cursor: null,
-  rendered: new Set()
+  rendered: new Set(),
+  realtimeStarted: false
 };
 
 const views = ["#create-view", "#join-view", "#chat-view"];
@@ -120,24 +121,48 @@ async function loadChat() {
   messages.forEach(renderMessage);
   state.cursor = cursor;
   show("#chat-view");
+  startRealtime();
+}
+
+function markConnected() {
+  $("#connection").textContent = "实时连接";
+  $("#connection").classList.add("online");
+}
+
+function startRealtime() {
+  if (state.realtimeStarted) return;
+  state.realtimeStarted = true;
   connectEvents();
+  pollMessages();
 }
 
 function connectEvents() {
   const events = new EventSource(`/api/groups/${state.groupId}/events?token=${encodeURIComponent(state.token)}`);
-  events.addEventListener("ready", () => {
-    $("#connection").textContent = "实时连接";
-    $("#connection").classList.add("online");
-  });
+  events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
   events.addEventListener("member_joined", async () => {
     const { members } = await api(`/api/groups/${state.groupId}`);
     renderMembers(members);
   });
   events.onerror = () => {
-    $("#connection").textContent = "正在重连";
-    $("#connection").classList.remove("online");
+    $("#connection").textContent = "备用连接";
   };
+}
+
+async function pollMessages() {
+  while (state.groupId && state.token) {
+    try {
+      const query = new URLSearchParams({ timeoutMs: "25000", limit: "200" });
+      if (state.cursor) query.set("after", state.cursor);
+      const { messages } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
+      messages.forEach(renderMessage);
+      markConnected();
+    } catch {
+      $("#connection").textContent = "正在重连";
+      $("#connection").classList.remove("online");
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+  }
 }
 
 $("#create-form").addEventListener("submit", async (event) => {
@@ -193,7 +218,8 @@ $("#message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   try {
-    await api(`/api/groups/${state.groupId}/messages`, { method: "POST", body: form });
+    const { message } = await api(`/api/groups/${state.groupId}/messages`, { method: "POST", body: form });
+    renderMessage(message);
     event.currentTarget.reset();
     $("#file-count").textContent = "";
   } catch (error) {
