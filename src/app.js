@@ -51,7 +51,13 @@ export async function createApp(options = {}) {
 
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false }));
-  app.use(express.static(publicDir));
+  app.use(express.static(publicDir, {
+    etag: false,
+    lastModified: false,
+    setHeaders(response) {
+      response.set("Cache-Control", "no-store");
+    }
+  }));
 
   const tokenFrom = (req) => {
     const authorization = req.get("authorization");
