@@ -26,12 +26,17 @@ const server = new McpServer({ name: "group-relay", version: "0.1.0" });
 
 server.tool(
   "group_send",
-  "Send a text message to the shared group conversation.",
-  { text: z.string().min(1).max(20_000), replyTo: z.string().optional() },
-  async ({ text, replyTo }) => {
+  "Send a text message to the shared group conversation. Optionally mention AI members by ID.",
+  {
+    text: z.string().min(1).max(20_000),
+    replyTo: z.string().optional(),
+    mentionIds: z.array(z.string()).max(20).optional()
+  },
+  async ({ text, replyTo, mentionIds = [] }) => {
     const form = new FormData();
     form.set("text", text);
     if (replyTo) form.set("replyTo", replyTo);
+    form.set("mentions", JSON.stringify(mentionIds));
     const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
     return { content: [{ type: "text", text: JSON.stringify(result.message) }] };
   }
@@ -43,6 +48,7 @@ server.tool(
   { after: z.string().optional(), limit: z.number().int().min(1).max(500).default(100) },
   async ({ after, limit }) => {
     const query = new URLSearchParams({ limit: String(limit) });
+    query.set("routed", "1");
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages?${query}`);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
@@ -54,7 +60,7 @@ server.tool(
   "Wait up to 30 seconds for another group message. Use the last cursor as after.",
   { after: z.string().optional(), timeoutMs: z.number().int().min(1000).max(30000).default(25000) },
   async ({ after, timeoutMs }) => {
-    const query = new URLSearchParams({ timeoutMs: String(timeoutMs) });
+    const query = new URLSearchParams({ timeoutMs: String(timeoutMs), routed: "1" });
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages/wait?${query}`);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };

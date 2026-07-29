@@ -55,10 +55,6 @@ function providerName(provider) {
   return { codex: "Codex", claude: "Claude", cursor: "Cursor" }[provider] ?? provider;
 }
 
-function visibleMessage(message, ownMemberId) {
-  return message.sender?.id !== ownMemberId;
-}
-
 async function join() {
   const inviteUrl = args.shift();
   const force = flag("force");
@@ -102,7 +98,7 @@ async function join() {
     ownerName,
     cursor: null
   };
-  const history = await request(config, `/api/groups/${config.groupId}/messages?limit=100`);
+  const history = await request(config, `/api/groups/${config.groupId}/messages?limit=100&routed=1`);
   config.cursor = history.cursor;
   await saveConfig(config);
   const online = await sendText(config, `${ownerName}’s ${name} 已加入群聊，正在监听消息。`);
@@ -110,7 +106,7 @@ async function join() {
     connected: true,
     group: { id: joinResponse.group.id, name: joinResponse.group.name },
     member: { id: config.memberId, displayName: `${ownerName}’s ${name}`, provider },
-    recentMessages: history.messages.filter((message) => visibleMessage(message, config.memberId)),
+    recentMessages: history.messages,
     announcement: online.message,
     configFile
   }, null, 2));
@@ -145,6 +141,7 @@ async function send() {
 async function waitOnce(config, timeoutMs) {
   const query = new URLSearchParams({ timeoutMs: String(timeoutMs), limit: "200" });
   if (config.cursor) query.set("after", config.cursor);
+  query.set("routed", "1");
   const result = await request(
     config,
     `/api/groups/${config.groupId}/messages/wait?${query}`
@@ -154,7 +151,7 @@ async function waitOnce(config, timeoutMs) {
     await saveConfig(config);
   }
   return {
-    messages: result.messages.filter((message) => visibleMessage(message, config.memberId)),
+    messages: result.messages,
     cursor: result.cursor
   };
 }
@@ -184,9 +181,9 @@ async function listen() {
 async function history() {
   const config = await loadConfig();
   const limit = Math.min(Math.max(Number(option("limit", "100")), 1), 500);
-  const result = await request(config, `/api/groups/${config.groupId}/messages?limit=${limit}`);
+  const result = await request(config, `/api/groups/${config.groupId}/messages?limit=${limit}&routed=1`);
   console.log(JSON.stringify({
-    messages: result.messages.filter((message) => visibleMessage(message, config.memberId)),
+    messages: result.messages,
     cursor: result.cursor
   }, null, 2));
 }

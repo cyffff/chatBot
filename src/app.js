@@ -79,6 +79,14 @@ export async function createApp(options = {}) {
     for (const waiter of pending) waiter(payload);
   }
 
+  function routedMessages(messages, member, enabled) {
+    if (!enabled || member.type !== "ai") return messages;
+    return messages.filter((message) => (
+      message.sender?.id !== member.id
+      && (!message.mentions?.length || message.mentions.some((mention) => mention.id === member.id))
+    ));
+  }
+
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
   app.post("/api/groups", async (req, res, next) => {
@@ -128,7 +136,7 @@ export async function createApp(options = {}) {
       const group = await store.getGroup(req.params.groupId);
       if (!group) return res.status(404).json({ error: "group not found" });
       const members = (await store.listMembers(group.id)).map(({ token: _token, ...member }) => member);
-      res.json({ group, members });
+      res.json({ group, members, currentMemberId: req.member.id });
     } catch (error) {
       next(error);
     }
@@ -149,7 +157,10 @@ export async function createApp(options = {}) {
         after: req.query.after,
         limit: req.query.limit
       });
-      res.json({ messages, cursor: messages.at(-1)?.id ?? req.query.after ?? null });
+      res.json({
+        messages: routedMessages(messages, req.member, req.query.routed === "1"),
+        cursor: messages.at(-1)?.id ?? req.query.after ?? null
+      });
     } catch (error) {
       next(error);
     }
@@ -161,7 +172,12 @@ export async function createApp(options = {}) {
         after: req.query.after,
         limit: req.query.limit ?? 100
       });
-      if (existing.length) return res.json({ messages: existing, cursor: existing.at(-1).id });
+      if (existing.length) {
+        return res.json({
+          messages: routedMessages(existing, req.member, req.query.routed === "1"),
+          cursor: existing.at(-1).id
+        });
+      }
       const timeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
       const message = await new Promise((resolve) => {
         const groupId = req.params.groupId;
@@ -179,7 +195,7 @@ export async function createApp(options = {}) {
         waiters.set(groupId, groupWaiters);
       });
       res.json({
-        messages: message ? [message] : [],
+        messages: routedMessages(message ? [message] : [], req.member, req.query.routed === "1"),
         cursor: message?.id ?? req.query.after ?? null
       });
     } catch (error) {
@@ -194,9 +210,30 @@ export async function createApp(options = {}) {
       if (!text && attachments.length === 0) {
         return res.status(400).json({ error: "text or file is required" });
       }
+      let mentionIds = [];
+      try {
+        mentionIds = JSON.parse(req.body.mentions || "[]");
+      } catch {
+        return res.status(400).json({ error: "mentions must be a JSON array" });
+      }
+      if (!Array.isArray(mentionIds) || mentionIds.length > 20 || mentionIds.some((id) => typeof id !== "string")) {
+        return res.status(400).json({ error: "invalid mentions" });
+      }
+      const members = await store.listMembers(req.params.groupId);
+      const uniqueMentionIds = [...new Set(mentionIds)];
+      const mentions = uniqueMentionIds.map((id) => members.find((member) => member.id === id));
+      if (mentions.some((member) => !member || member.type !== "ai")) {
+        return res.status(400).json({ error: "mentioned member must be an AI in this group" });
+      }
       const message = await store.appendMessage(req.params.groupId, req.member, {
         text,
         attachments,
+        mentions: mentions.map((member) => ({
+          id: member.id,
+          name: member.name,
+          provider: member.provider,
+          ownerName: member.ownerName ?? null
+        })),
         replyTo: cleanText(req.body.replyTo, 100) || null
       });
       publish(req.params.groupId, "message", message);

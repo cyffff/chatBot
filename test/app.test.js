@@ -113,6 +113,61 @@ test("long polling delivers a new message without refreshing", async (t) => {
   assert.equal(waited.body.messages[0].text, "live message");
 });
 
+test("routes @AI messages only to the mentioned AI", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Mentions", ownerName: "Owner" })
+  });
+  const inviteToken = created.body.group.inviteToken;
+  const codex = await json(base, `/api/invites/${inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+  const claude = await json(base, `/api/invites/${inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Claude",
+      type: "ai",
+      provider: "claude",
+      ownerName: "Zoe"
+    })
+  });
+
+  const form = new FormData();
+  form.set("text", "@Yunfei’s Codex 请回答这个问题");
+  form.set("mentions", JSON.stringify([codex.body.member.id]));
+  const sentResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: form
+  });
+  assert.equal(sentResponse.status, 201);
+  const sent = await sentResponse.json();
+  assert.equal(sent.message.mentions[0].id, codex.body.member.id);
+
+  const forCodex = await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages?routed=1`,
+    { headers: { Authorization: `Bearer ${codex.body.member.token}` } }
+  );
+  assert.equal(forCodex.body.messages.length, 1);
+  assert.equal(forCodex.body.messages[0].text, "@Yunfei’s Codex 请回答这个问题");
+
+  const forClaude = await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages?routed=1`,
+    { headers: { Authorization: `Bearer ${claude.body.member.token}` } }
+  );
+  assert.equal(forClaude.body.messages.length, 0);
+  assert.equal(forClaude.body.cursor, sent.message.id);
+});
+
 test("AI relay client joins, persists identity, receives and sends messages", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {

@@ -158,7 +158,7 @@ export class FileStore {
     );
   }
 
-  async appendMessage(groupId, member, { text, attachments, replyTo }) {
+  async appendMessage(groupId, member, { text, attachments, replyTo, mentions = [] }) {
     const createdAt = new Date().toISOString();
     const message = {
       id: id(),
@@ -172,6 +172,7 @@ export class FileStore {
       },
       text: text || "",
       attachments,
+      mentions,
       replyTo: replyTo || null,
       createdAt
     };

@@ -5,7 +5,9 @@ const state = {
   inviteToken: null,
   cursor: null,
   rendered: new Set(),
-  realtimeStarted: false
+  realtimeStarted: false,
+  memberId: null,
+  members: []
 };
 
 const views = ["#create-view", "#join-view", "#invalid-view", "#chat-view"];
@@ -124,6 +126,7 @@ function displayName(member) {
 }
 
 function renderMembers(members) {
+  state.members = members;
   $("#member-list").innerHTML = "";
   for (const member of members) {
     const item = document.createElement("li");
@@ -163,6 +166,9 @@ function renderMessage(message) {
   state.cursor = message.id;
   const item = document.createElement("li");
   item.className = "message";
+  if (message.mentions?.some((mention) => mention.id === state.memberId)) {
+    item.classList.add("mentions-me");
+  }
   const head = document.createElement("div");
   head.className = "message-head";
   const sender = document.createElement("span");
@@ -197,11 +203,12 @@ function renderMessage(message) {
 }
 
 async function loadChat() {
-  const [{ group, members }, { messages, cursor }] = await Promise.all([
+  const [{ group, members, currentMemberId }, { messages, cursor }] = await Promise.all([
     api(`/api/groups/${state.groupId}`),
     api(`/api/groups/${state.groupId}/messages?limit=200`)
   ]);
   state.inviteToken = group.inviteToken;
+  state.memberId = currentMemberId;
   $("#group-name").textContent = group.name;
   renderMembers(members);
   messages.forEach(renderMessage);
@@ -304,13 +311,55 @@ $("#message-form [name=files]").addEventListener("change", (event) => {
   $("#file-count").textContent = event.target.files.length ? `${event.target.files.length} 个文件` : "";
 });
 
+function matchingAiMembers(text) {
+  const match = text.match(/(?:^|\s)@([^@\n]*)$/);
+  if (!match) return [];
+  const query = match[1].trim().toLocaleLowerCase();
+  return state.members.filter((member) => (
+    member.type === "ai" && displayName(member).toLocaleLowerCase().includes(query)
+  ));
+}
+
+function renderMentionMenu() {
+  const textarea = $("#message-form [name=text]");
+  const menu = $("#mention-menu");
+  const members = matchingAiMembers(textarea.value);
+  menu.innerHTML = "";
+  for (const member of members) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mention-option";
+    button.setAttribute("role", "option");
+    button.textContent = `@${displayName(member)}`;
+    button.addEventListener("click", () => {
+      textarea.value = textarea.value.replace(/(^|\s)@[^@\n]*$/, `$1@${displayName(member)} `);
+      menu.classList.add("hidden");
+      textarea.focus();
+    });
+    menu.append(button);
+  }
+  menu.classList.toggle("hidden", members.length === 0);
+}
+
+$("#message-form [name=text]").addEventListener("input", renderMentionMenu);
+$("#message-form [name=text]").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") $("#mention-menu").classList.add("hidden");
+});
+
 $("#message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  const text = String(form.get("text") || "");
+  const mentionIds = state.members
+    .filter((member) => member.type === "ai" && text.includes(`@${displayName(member)}`))
+    .map((member) => member.id);
+  form.set("mentions", JSON.stringify(mentionIds));
   try {
     const { message } = await api(`/api/groups/${state.groupId}/messages`, { method: "POST", body: form });
     renderMessage(message);
-    event.currentTarget.reset();
+    formElement.reset();
+    $("#mention-menu").classList.add("hidden");
     $("#file-count").textContent = "";
   } catch (error) {
     toast(error.message);
