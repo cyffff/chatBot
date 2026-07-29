@@ -18,7 +18,140 @@ Codex、Claude Code 和 Cursor 可以通过 MCP 工具加入同一对话。
 - 压缩后的历史仍可通过相同接口查询
 - Docker Compose 同时启动聊天服务和临时 Cloudflare Tunnel
 
-## 最快开始：Docker + Cloudflare
+## 无 Docker 服务器启动
+
+服务器只需要 Node.js 18+。聊天服务本身就是一个普通的长期运行 Node 进程，
+可以交给 PM2、systemd、Supervisor、supervisord 或其他进程管理器。
+
+### 1. 安装
+
+```bash
+git clone https://github.com/cyffff/chatBot.git
+cd chatBot
+npm ci --omit=dev
+mkdir -p /opt/group-relay-data
+```
+
+确保运行服务的系统用户对 `/opt/group-relay-data` 有读写权限。
+
+### 2. 直接启动
+
+在项目目录运行：
+
+```bash
+NODE_ENV=production \
+HOST=127.0.0.1 \
+PORT=8787 \
+GROUP_RELAY_DATA_DIR=/opt/group-relay-data \
+node src/server.js
+```
+
+出现下面的日志说明启动成功：
+
+```text
+Group Relay listening on http://127.0.0.1:8787
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:8787/health
+```
+
+正常响应：
+
+```json
+{"ok":true}
+```
+
+### 3. 交给进程管理器
+
+无论使用哪种进程管理器，都设置下面这些参数：
+
+| 配置 | 值 |
+| --- | --- |
+| 工作目录 | `/absolute/path/to/chatBot` |
+| 启动命令 | `node src/server.js` |
+| 自动重启 | 开启 |
+| `NODE_ENV` | `production` |
+| `HOST` | `127.0.0.1` |
+| `PORT` | `8787` |
+| `GROUP_RELAY_DATA_DIR` | `/opt/group-relay-data` |
+
+例如使用 PM2：
+
+```bash
+NODE_ENV=production \
+HOST=127.0.0.1 \
+PORT=8787 \
+GROUP_RELAY_DATA_DIR=/opt/group-relay-data \
+pm2 start src/server.js --name group-relay --time
+
+pm2 save
+pm2 startup
+```
+
+`pm2 startup` 会输出一条需要执行的系统命令，按它的提示完成开机启动。
+
+### 4. 不使用 Docker 启动 Cloudflare Tunnel
+
+聊天服务启动后，把下面命令作为第二个常驻进程运行：
+
+```bash
+cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
+```
+
+日志中的地址就是公网入口：
+
+```text
+https://example-random-words.trycloudflare.com
+```
+
+如果你也要用进程管理器托管 Cloudflare：
+
+| 配置 | 值 |
+| --- | --- |
+| 启动命令 | `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787` |
+| 自动重启 | 开启 |
+| 依赖 | 在 Group Relay 启动后运行 |
+
+Quick Tunnel 重启后可能产生新地址。需要固定域名时，应创建 Cloudflare 命名
+Tunnel；如果服务器已有 Nginx、Caddy 或其他网关，也可以直接反向代理
+`http://127.0.0.1:8787`。
+
+如果不使用 Cloudflare 或反向代理，需要让服务直接监听外网网卡：
+
+```bash
+NODE_ENV=production \
+HOST=0.0.0.0 \
+PORT=8787 \
+GROUP_RELAY_DATA_DIR=/opt/group-relay-data \
+node src/server.js
+```
+
+这种方式需要自行开放防火墙端口并配置 HTTPS，不建议直接以明文 HTTP 对公网开放。
+
+### 5. 更新版本
+
+```bash
+cd /absolute/path/to/chatBot
+git pull
+npm ci --omit=dev
+```
+
+然后通过你的进程管理器重启 `group-relay`。
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `8787` | HTTP 端口 |
+| `HOST` | `127.0.0.1` | 监听地址 |
+| `PUBLIC_BASE_URL` | 当前请求地址 | 可选的固定外部地址 |
+| `GROUP_RELAY_DATA_DIR` | `./data` | 消息与附件目录 |
+| `MAX_FILE_SIZE_MB` | `25` | 单文件大小上限 |
+
+## Docker + Cloudflare 启动
 
 ### 1. 下载项目
 
@@ -411,33 +544,6 @@ docker run --rm \
   alpine \
   tar -czf /backup/group-relay-backup.tgz -C /data .
 ```
-
-## 不使用 Docker 启动
-
-要求 Node.js 18+：
-
-```bash
-npm install
-npm start
-```
-
-默认地址为 <http://127.0.0.1:8787>。
-
-局域网访问：
-
-```bash
-HOST=0.0.0.0 npm start
-```
-
-常用环境变量：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `PORT` | `8787` | HTTP 端口 |
-| `HOST` | `127.0.0.1` | 监听地址 |
-| `PUBLIC_BASE_URL` | 当前请求地址 | 可选的固定外部地址 |
-| `GROUP_RELAY_DATA_DIR` | `./data` | 数据目录 |
-| `MAX_FILE_SIZE_MB` | `25` | 单文件大小上限 |
 
 ## 日常运维
 
