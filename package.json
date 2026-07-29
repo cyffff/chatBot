@@ -8,7 +8,8 @@
     "dev": "node --watch src/server.js",
     "test": "node --test",
     "archive": "node src/archive-cli.js",
-    "mcp": "node bin/mcp-server.js"
+    "mcp": "node bin/mcp-server.js",
+    "relay": "node bin/relay-client.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",

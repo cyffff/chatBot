@@ -1,4 +1,8 @@
 node_modules/
 data/
 .env
+.group-relay-agent.json
+.codex-relay.json
+.claude-relay.json
+.cursor-relay.json
 npm-debug.log*

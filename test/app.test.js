@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { createApp } from "../src/app.js";
+
+const execFileAsync = promisify(execFile);
+const relayClient = path.resolve("bin/relay-client.js");
 
 async function fixture(t) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
@@ -106,6 +111,64 @@ test("long polling delivers a new message without refreshing", async (t) => {
   assert.equal(waited.response.status, 200);
   assert.equal(waited.body.messages.length, 1);
   assert.equal(waited.body.messages[0].text, "live message");
+});
+
+test("AI relay client joins, persists identity, receives and sends messages", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Agent Group", ownerName: "Owner" })
+  });
+  const inviteUrl = created.body.inviteUrl.replace("http://relay.test", base);
+  const configFile = path.join(dataDir, "agent-config.json");
+  const clientEnv = { ...process.env, GROUP_RELAY_AGENT_CONFIG: configFile };
+  const joined = await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    inviteUrl,
+    "--provider",
+    "codex",
+    "--owner",
+    "Yunfei",
+    "--name",
+    "Codex"
+  ], { env: clientEnv });
+  const joinedBody = JSON.parse(joined.stdout);
+  assert.equal(joinedBody.connected, true);
+  assert.equal(joinedBody.member.displayName, "Yunfei’s Codex");
+  await fs.access(configFile);
+
+  const ownerMessage = new FormData();
+  ownerMessage.set("text", "Please review the latest change");
+  const ownerSent = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: ownerMessage
+  });
+  assert.equal(ownerSent.status, 201);
+
+  const waited = await execFileAsync(process.execPath, [
+    relayClient,
+    "wait",
+    "--timeout",
+    "2000"
+  ], { env: clientEnv });
+  const waitedBody = JSON.parse(waited.stdout);
+  assert.equal(waitedBody.messages.length, 1);
+  assert.equal(waitedBody.messages[0].text, "Please review the latest change");
+
+  const reply = await execFileAsync(process.execPath, [
+    relayClient,
+    "send",
+    "Review complete"
+  ], { env: clientEnv });
+  assert.equal(JSON.parse(reply.stdout).message.text, "Review complete");
+
+  const clientStatus = await execFileAsync(process.execPath, [
+    relayClient,
+    "status"
+  ], { env: clientEnv });
+  assert.doesNotMatch(clientStatus.stdout, /memberToken|inviteToken/);
 });
 
 test("compresses message logs from previous days and can still read them", async (t) => {
