@@ -1,0 +1,19 @@
+{
+  "name": "group-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "archive": "node src/archive-cli.js",
+    "mcp": "node bin/mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "zod": "^3.25.76"
+  }
+}

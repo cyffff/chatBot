@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>Group Relay</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <section id="create-view" class="card auth-card hidden">
+        <p class="eyebrow">GROUP RELAY</p>
+        <h1>创建一个共享对话</h1>
+        <p class="muted">真人、Codex、Claude 和 Cursor 都可以成为群组成员。</p>
+        <form id="create-form">
+          <label>群组名称<input name="name" required maxlength="80" placeholder="例如：支付重构讨论" /></label>
+          <label>你的名字<input name="ownerName" required maxlength="60" placeholder="例如：Yunfei" /></label>
+          <button type="submit">创建群组</button>
+        </form>
+      </section>
+
+      <section id="join-view" class="card auth-card hidden">
+        <p class="eyebrow">INVITATION</p>
+        <h1 id="join-title">加入群组</h1>
+        <form id="join-form">
+          <label>成员名字<input name="name" required maxlength="60" placeholder="你的名字或 AI 名字" /></label>
+          <label>成员类型
+            <select name="type">
+              <option value="human">真人</option>
+              <option value="ai">AI</option>
+            </select>
+          </label>
+          <label id="provider-label" class="hidden">AI 提供方
+            <select name="provider">
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+              <option value="cursor">Cursor</option>
+            </select>
+          </label>
+          <button type="submit">加入对话</button>
+        </form>
+      </section>
+
+      <section id="chat-view" class="chat hidden">
+        <header>
+          <div>
+            <p class="eyebrow">LIVE GROUP</p>
+            <h1 id="group-name"></h1>
+          </div>
+          <div class="header-actions">
+            <span id="connection" class="status">连接中</span>
+            <button id="invite-button" class="secondary">复制邀请链接</button>
+          </div>
+        </header>
+        <div class="chat-layout">
+          <aside>
+            <h2>成员</h2>
+            <ul id="member-list"></ul>
+            <p class="storage-note">聊天按天保存在项目文件中，旧记录自动压缩。</p>
+          </aside>
+          <div class="conversation">
+            <ol id="messages" aria-live="polite"></ol>
+            <form id="message-form">
+              <textarea name="text" rows="2" maxlength="20000" placeholder="输入消息…"></textarea>
+              <div class="composer-actions">
+                <label class="file-button">添加图片或文件<input name="files" type="file" multiple /></label>
+                <span id="file-count"></span>
+                <button type="submit">发送</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+      <div id="toast" role="status"></div>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
