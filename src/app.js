@@ -18,10 +18,14 @@ const createGroupSchema = z.object({
 const joinSchema = z.object({
   name: z.string().trim().min(1).max(60),
   type: z.enum(["human", "ai"]).default("human"),
-  provider: z.enum(["codex", "claude", "cursor"]).nullable().optional()
+  provider: z.enum(["codex", "claude", "cursor"]).nullable().optional(),
+  ownerName: z.string().trim().max(60).nullable().optional()
 }).superRefine((value, ctx) => {
   if (value.type === "ai" && !value.provider) {
     ctx.addIssue({ code: "custom", path: ["provider"], message: "AI member requires a provider" });
+  }
+  if (value.type === "ai" && !value.ownerName) {
+    ctx.addIssue({ code: "custom", path: ["ownerName"], message: "AI member requires an owner name" });
   }
 });
 
@@ -110,7 +114,8 @@ export async function createApp(options = {}) {
         id: result.member.id,
         name: result.member.name,
         type: result.member.type,
-        provider: result.member.provider
+        provider: result.member.provider,
+        ownerName: result.member.ownerName
       });
       res.status(201).json(result);
     } catch (error) {

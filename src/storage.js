@@ -106,7 +106,7 @@ export class FileStore {
     return (await this.listMembers(groupId)).find((member) => member.token === token) ?? null;
   }
 
-  async joinGroup(inviteToken, { name, type, provider }) {
+  async joinGroup(inviteToken, { name, type, provider, ownerName }) {
     const group = await this.groupFromInvite(inviteToken);
     if (!group) return null;
     const member = {
@@ -114,6 +114,7 @@ export class FileStore {
       name,
       type,
       provider: type === "ai" ? provider : null,
+      ownerName: type === "ai" ? ownerName : null,
       token: secret(),
       joinedAt: new Date().toISOString()
     };
@@ -166,7 +167,8 @@ export class FileStore {
         id: member.id,
         name: member.name,
         type: member.type,
-        provider: member.provider
+        provider: member.provider,
+        ownerName: member.ownerName ?? null
       },
       text: text || "",
       attachments,

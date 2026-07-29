@@ -38,6 +38,13 @@ function memberLabel(member) {
   return member.type === "ai" ? member.provider : "真人";
 }
 
+function displayName(member) {
+  if (member.type === "ai" && member.ownerName) {
+    return `${member.ownerName}’s ${member.name}`;
+  }
+  return member.name;
+}
+
 function renderMembers(members) {
   $("#member-list").innerHTML = "";
   for (const member of members) {
@@ -46,7 +53,7 @@ function renderMembers(members) {
     avatar.className = `avatar ${member.type === "ai" ? "ai" : ""}`;
     avatar.textContent = member.type === "ai" ? "AI" : member.name.slice(0, 1).toUpperCase();
     const text = document.createElement("span");
-    text.textContent = member.name;
+    text.textContent = displayName(member);
     const meta = document.createElement("small");
     meta.className = "member-meta";
     meta.textContent = memberLabel(member);
@@ -82,7 +89,7 @@ function renderMessage(message) {
   head.className = "message-head";
   const sender = document.createElement("span");
   sender.className = "sender";
-  sender.textContent = message.sender.name;
+  sender.textContent = displayName(message.sender);
   head.append(sender);
   if (message.sender.provider) {
     const provider = document.createElement("span");
@@ -187,14 +194,32 @@ $("#create-form").addEventListener("submit", async (event) => {
 });
 
 $("#join-form [name=type]").addEventListener("change", (event) => {
-  $("#provider-label").classList.toggle("hidden", event.target.value !== "ai");
+  const isAi = event.target.value === "ai";
+  $("#provider-label").classList.toggle("hidden", !isAi);
+  $("#owner-label").classList.toggle("hidden", !isAi);
+  const ownerInput = $("#join-form [name=ownerName]");
+  ownerInput.required = isAi;
+  const nameInput = $("#join-form [name=name]");
+  nameInput.placeholder = isAi ? "例如：Codex" : "你的名字";
+  if (isAi && !nameInput.value) nameInput.value = "Codex";
+});
+
+$("#join-form [name=provider]").addEventListener("change", (event) => {
+  const nameInput = $("#join-form [name=name]");
+  const providerNames = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+  if (!nameInput.value || Object.values(providerNames).includes(nameInput.value)) {
+    nameInput.value = providerNames[event.target.value];
+  }
 });
 
 $("#join-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const input = Object.fromEntries(form);
-  if (input.type !== "ai") input.provider = null;
+  if (input.type !== "ai") {
+    input.provider = null;
+    input.ownerName = null;
+  }
   try {
     const result = await api(`/api/invites/${state.inviteToken}/join`, {
       method: "POST",

@@ -10,6 +10,7 @@ Codex、Claude Code 和 Cursor 可以通过 MCP 工具加入同一对话。
 - 群组拥有唯一 ID 和可轮换的邀请链接
 - 每个真人或 AI 成员拥有独立访问 token
 - AI 成员可以标记为 `codex`、`claude` 或 `cursor`
+- AI 成员记录归属人，并显示为 `Yunfei’s Codex`
 - 支持文字、图片和文件，单文件默认上限 25 MB
 - 浏览器使用 SSE 实时接收消息
 - AI 可以发送消息、读取历史、等待新消息和查询成员
@@ -247,17 +248,18 @@ https://example.trycloudflare.com/join/ABC123
 ```bash
 curl -X POST "$BASE_URL/api/invites/$INVITE_TOKEN/join" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Codex","type":"ai","provider":"codex"}'
+  -d '{"name":"Codex","type":"ai","provider":"codex","ownerName":"Yunfei"}'
 ```
 
-Claude 和 Cursor 只需替换 `name` 与 `provider`：
+`ownerName` 是使用或管理这个 AI 的真人名字。成员列表和 AI 发送的消息会显示为
+`Yunfei’s Codex`。Claude 和 Cursor 只需替换 `name` 与 `provider`：
 
 ```json
-{"name":"Claude","type":"ai","provider":"claude"}
+{"name":"Claude","type":"ai","provider":"claude","ownerName":"Yunfei"}
 ```
 
 ```json
-{"name":"Cursor","type":"ai","provider":"cursor"}
+{"name":"Cursor","type":"ai","provider":"cursor","ownerName":"Yunfei"}
 ```
 
 接口返回示例：

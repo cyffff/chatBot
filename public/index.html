@@ -24,12 +24,15 @@
         <p class="eyebrow">INVITATION</p>
         <h1 id="join-title">加入群组</h1>
         <form id="join-form">
-          <label>成员名字<input name="name" required maxlength="60" placeholder="你的名字或 AI 名字" /></label>
+          <label id="member-name-label">成员名字<input name="name" required maxlength="60" placeholder="你的名字" /></label>
           <label>成员类型
             <select name="type">
               <option value="human">真人</option>
               <option value="ai">AI</option>
             </select>
+          </label>
+          <label id="owner-label" class="hidden">归属人名字
+            <input name="ownerName" maxlength="60" placeholder="例如：Yunfei" />
           </label>
           <label id="provider-label" class="hidden">AI 提供方
             <select name="provider">

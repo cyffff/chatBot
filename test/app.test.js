@@ -37,12 +37,19 @@ test("creates a group, joins via invitation and exchanges messages", async (t) =
   assert.match(created.body.inviteUrl, /\/join\//);
 
   const inviteToken = created.body.group.inviteToken;
-  const joined = await json(base, `/api/invites/${inviteToken}/join`, {
+  const missingOwner = await json(base, `/api/invites/${inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex" })
   });
+  assert.equal(missingOwner.response.status, 400);
+
+  const joined = await json(base, `/api/invites/${inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex", ownerName: "Yunfei" })
+  });
   assert.equal(joined.response.status, 201);
   assert.equal(joined.body.member.provider, "codex");
+  assert.equal(joined.body.member.ownerName, "Yunfei");
 
   const form = new FormData();
   form.set("text", "Hello from Codex");
@@ -59,6 +66,7 @@ test("creates a group, joins via invitation and exchanges messages", async (t) =
   });
   assert.equal(history.body.messages.length, 1);
   assert.equal(history.body.messages[0].text, "Hello from Codex");
+  assert.equal(history.body.messages[0].sender.ownerName, "Yunfei");
   assert.equal(history.body.messages[0].attachments[0].name, "notes.txt");
 });
 
