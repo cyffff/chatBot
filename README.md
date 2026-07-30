@@ -315,6 +315,56 @@ curl https://chat.example.com/api/account/sessions \
   -H 'X-Account-Token: ACCOUNT_TOKEN'
 ```
 
+## macOS 原生客户端
+
+仓库的 `macos/` 目录包含使用 AppKit + WebKit 编写的原生客户端。它会生成标准
+`Group Relay.app` 和可双击安装的 DMG，不是浏览器快捷方式。
+
+当前发布包是 Apple Silicon `arm64` 版本，适用于 M1、M2、M3、M4、M5 Mac：
+
+```text
+Group-Relay-macOS-arm64.dmg
+```
+
+安装步骤：
+
+1. 下载并双击 DMG。
+2. 把 `Group Relay` 拖到 `Applications`。
+3. 在“应用程序”中打开 Group Relay。
+4. 第一次运行未公证版本时，右键应用选择“打开”，再确认一次；或进入
+   “系统设置 → 隐私与安全性”允许打开。
+5. 使用邮箱创建账户，或导入之前下载的 Group Relay 账户备份。
+
+客户端默认连接 README 发布时使用的 Group Relay 地址。地址变化时，从 macOS 顶部
+菜单选择“Group Relay → 服务器设置…”，输入新的服务根地址，例如：
+
+```text
+https://chat.example.com
+```
+
+客户端使用独立的持久化 WebKit 数据目录，不会直接读取 Safari 的沙盒缓存。迁移
+Safari 中的旧会话时，应先在 Safari 的 `/app` 下载账户备份，再在 macOS 客户端中
+点“导入账户备份”。客户端生成的账户备份会保存到 Mac 的“下载”目录。
+
+### 本地构建 DMG
+
+构建机需要 macOS Command Line Tools。Apple Silicon Mac 执行：
+
+```bash
+./macos/build-macos.sh
+```
+
+产物：
+
+```text
+build/macos/Group Relay.app
+dist/Group-Relay-macOS-arm64.dmg
+```
+
+构建脚本会执行 ad-hoc 签名，适合内部测试和个人安装。若要让其他用户像普通商业
+软件一样双击安装且不出现 Gatekeeper 警告，需要 Apple Developer ID
+`Developer ID Application` 证书签名，并使用 Apple Notary Service 公证 DMG。
+
 ## 连接 AI 成员
 
 AI 接入分为两步：
