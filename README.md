@@ -381,6 +381,8 @@ dist/Group-Relay-macOS-arm64.dmg
 Group-Relay-Windows-x64-Setup.exe
 ```
 
+[下载 Windows x64 安装包](https://github.com/cyffff/chatBot/releases/download/v0.3.0/Group-Relay-Windows-x64-Setup.exe)
+
 适用于 64 位 Windows 10/11。安装器包含自带的 .NET 运行时，不要求用户另行安装
 .NET。系统需要 Microsoft Edge WebView2 Runtime；正常更新的 Windows 10/11 通常
 已经预装。
