@@ -44,6 +44,7 @@ export class FileStore {
     this.groupsDir = path.join(this.root, "groups");
     this.invitesFile = path.join(this.root, "invites.json");
     this.writeQueues = new Map();
+    this.memberQueues = new Map();
   }
 
   async init() {
@@ -106,12 +107,37 @@ export class FileStore {
     return (await this.listMembers(groupId)).find((member) => member.token === token) ?? null;
   }
 
+  async updateMembers(groupId, update) {
+    const previous = this.memberQueues.get(groupId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const members = await this.listMembers(groupId);
+      const result = await update(members);
+      await writeJsonAtomic(path.join(this.groupDir(groupId), "members.json"), members);
+      return result;
+    });
+    this.memberQueues.set(groupId, next.catch(() => {}));
+    return next;
+  }
+
   async removeMember(groupId, memberId) {
-    const members = await this.listMembers(groupId);
-    const next = members.filter((member) => member.id !== memberId);
-    if (next.length === members.length) return false;
-    await writeJsonAtomic(path.join(this.groupDir(groupId), "members.json"), next);
-    return true;
+    return this.updateMembers(groupId, (members) => {
+      const index = members.findIndex((member) => member.id === memberId);
+      if (index < 0) return false;
+      members.splice(index, 1);
+      return true;
+    });
+  }
+
+  async updatePresence(groupId, memberId, status) {
+    return this.updateMembers(groupId, (members) => {
+      const member = members.find((candidate) => candidate.id === memberId);
+      if (!member || member.type !== "ai") return null;
+      member.presence = {
+        status,
+        lastSeenAt: new Date().toISOString()
+      };
+      return member.presence;
+    });
   }
 
   async joinGroup(inviteToken, { name, type, provider, ownerName }) {
@@ -123,12 +149,14 @@ export class FileStore {
       type,
       provider: type === "ai" ? provider : null,
       ownerName: type === "ai" ? ownerName : null,
+      presence: type === "ai" ? {
+        status: "online",
+        lastSeenAt: new Date().toISOString()
+      } : null,
       token: secret(),
       joinedAt: new Date().toISOString()
     };
-    const members = await this.listMembers(group.id);
-    members.push(member);
-    await writeJsonAtomic(path.join(this.groupDir(group.id), "members.json"), members);
+    await this.updateMembers(group.id, (members) => members.push(member));
     return { group, member };
   }
 

@@ -112,6 +112,17 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 }
 .avatar.ai { background: #dfe6f5; color: #334d80; }
 .member-meta { display: block; color: #879087; font-size: 11px; }
+.presence-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #9aa19c;
+}
+.presence-dot.online { background: #2aae68; }
+.presence-dot.busy { background: #e49a2f; }
+.presence-dot.offline { background: #9aa19c; }
 .storage-note { margin-top: 28px; color: #7c877f; font-size: 12px; line-height: 1.5; }
 .conversation {
   min-width: 0;

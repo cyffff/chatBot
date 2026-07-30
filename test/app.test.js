@@ -10,11 +10,12 @@ import { createApp } from "../src/app.js";
 const execFileAsync = promisify(execFile);
 const relayClient = path.resolve("bin/relay-client.js");
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
   const { app, store } = await createApp({
     dataDir,
-    publicBaseUrl: "http://relay.test"
+    publicBaseUrl: "http://relay.test",
+    ...options
   });
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
@@ -168,6 +169,44 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   assert.equal(forClaude.body.cursor, sent.message.id);
 });
 
+test("AI presence changes from busy to offline when heartbeats expire", async (t) => {
+  const { base } = await fixture(t, { presenceTimeoutMs: 30 });
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Presence", ownerName: "Owner" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+  const busy = await json(
+    base,
+    `/api/groups/${created.body.group.id}/members/me/presence`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${joined.body.member.token}` },
+      body: JSON.stringify({ status: "busy" })
+    }
+  );
+  assert.equal(busy.body.presence.status, "busy");
+
+  const active = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(active.body.members.find((member) => member.type === "ai").presence.status, "busy");
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  const expired = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(expired.body.members.find((member) => member.type === "ai").presence.status, "offline");
+});
+
 test("AI relay client joins, persists identity, receives and sends messages", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
@@ -211,6 +250,10 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   const waitedBody = JSON.parse(waited.stdout);
   assert.equal(waitedBody.messages.length, 1);
   assert.equal(waitedBody.messages[0].text, "Please review the latest change");
+  const busyState = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(busyState.body.members.find((member) => member.type === "ai").presence.status, "busy");
 
   const reply = await execFileAsync(process.execPath, [
     relayClient,
@@ -218,6 +261,10 @@ test("AI relay client joins, persists identity, receives and sends messages", as
     "Review complete"
   ], { env: clientEnv });
   assert.equal(JSON.parse(reply.stdout).message.text, "Review complete");
+  const onlineState = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(onlineState.body.members.find((member) => member.type === "ai").presence.status, "online");
 
   const clientStatus = await execFileAsync(process.execPath, [
     relayClient,

@@ -9,6 +9,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(here, "../public");
 
 const cleanText = (value, max) => String(value ?? "").trim().slice(0, max);
+const presenceSchema = z.object({
+  status: z.enum(["online", "busy"])
+});
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -32,6 +35,7 @@ const joinSchema = z.object({
 export async function createApp(options = {}) {
   const dataDir = options.dataDir ?? process.env.GROUP_RELAY_DATA_DIR ?? "./data";
   const configuredPublicBaseUrl = options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL;
+  const presenceTimeoutMs = Number(options.presenceTimeoutMs ?? 90_000);
   const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
   const store = options.store ?? new FileStore(dataDir);
   await store.init();
@@ -93,6 +97,20 @@ export async function createApp(options = {}) {
     ));
   }
 
+  function publicMember(member) {
+    const { token: _token, ...safe } = member;
+    if (member.type !== "ai") return safe;
+    const lastSeen = Date.parse(member.presence?.lastSeenAt ?? "");
+    const active = Number.isFinite(lastSeen) && Date.now() - lastSeen <= presenceTimeoutMs;
+    return {
+      ...safe,
+      presence: {
+        status: active ? member.presence.status : "offline",
+        lastSeenAt: member.presence?.lastSeenAt ?? null
+      }
+    };
+  }
+
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
   app.post("/api/groups", async (req, res, next) => {
@@ -141,7 +159,7 @@ export async function createApp(options = {}) {
     try {
       const group = await store.getGroup(req.params.groupId);
       if (!group) return res.status(404).json({ error: "group not found" });
-      const members = (await store.listMembers(group.id)).map(({ token: _token, ...member }) => member);
+      const members = (await store.listMembers(group.id)).map(publicMember);
       res.json({ group, members, currentMemberId: req.member.id });
     } catch (error) {
       next(error);
@@ -156,6 +174,24 @@ export async function createApp(options = {}) {
       await store.removeMember(req.params.groupId, req.member.id);
       publish(req.params.groupId, "member_left", { id: req.member.id });
       res.json({ disconnected: true, memberId: req.member.id });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/groups/:groupId/members/me/presence", requireMember, async (req, res, next) => {
+    try {
+      if (req.member.type !== "ai") {
+        return res.status(403).json({ error: "only AI members report presence" });
+      }
+      const { status } = presenceSchema.parse(req.body);
+      const presence = await store.updatePresence(req.params.groupId, req.member.id, status);
+      if (!presence) return res.status(404).json({ error: "member not found" });
+      publish(req.params.groupId, "member_presence", {
+        id: req.member.id,
+        presence
+      });
+      res.json({ presence });
     } catch (error) {
       next(error);
     }

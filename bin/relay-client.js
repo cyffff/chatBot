@@ -19,6 +19,7 @@ const configFile = path.resolve(
   process.env.GROUP_RELAY_AGENT_CONFIG
     ?? (safeSessionId ? `.group-relay-sessions/${safeSessionId}.json` : ".group-relay-agent.json")
 );
+const presenceFile = `${configFile}.presence`;
 
 function option(name, fallback) {
   const index = args.indexOf(`--${name}`);
@@ -52,6 +53,27 @@ async function saveConfig(config) {
   await fs.writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   await fs.rename(temp, configFile);
   await fs.chmod(configFile, 0o600);
+}
+
+async function readPresenceStatus() {
+  try {
+    const value = (await fs.readFile(presenceFile, "utf8")).trim();
+    return value === "busy" ? "busy" : "online";
+  } catch (error) {
+    if (error.code === "ENOENT") return "online";
+    throw error;
+  }
+}
+
+async function reportPresence(config, status, { persist = true } = {}) {
+  if (persist) {
+    await fs.mkdir(path.dirname(presenceFile), { recursive: true });
+    await fs.writeFile(presenceFile, `${status}\n`, { mode: 0o600 });
+  }
+  return request(config, `/api/groups/${config.groupId}/members/me/presence`, {
+    method: "POST",
+    body: JSON.stringify({ status })
+  });
 }
 
 async function request(config, pathname, options = {}) {
@@ -151,6 +173,7 @@ async function join() {
   config.cursor = history.cursor;
   await saveConfig(config);
   const online = await sendText(config, `${ownerName}’s ${name} 已加入群聊，正在监听消息。`);
+  await reportPresence(config, "online");
   console.log(JSON.stringify({
     connected: true,
     sessionId,
@@ -187,7 +210,9 @@ async function send() {
     args.splice(index, 2);
   }
   const text = args.join(" ").trim();
-  console.log(JSON.stringify(await sendText(config, text, files), null, 2));
+  const result = await sendText(config, text, files);
+  await reportPresence(config, "online");
+  console.log(JSON.stringify(result, null, 2));
 }
 
 async function waitOnce(config, timeoutMs) {
@@ -202,6 +227,7 @@ async function waitOnce(config, timeoutMs) {
     config.cursor = result.cursor;
     await saveConfig(config);
   }
+  if (result.messages.length) await reportPresence(config, "busy");
   return {
     messages: result.messages,
     cursor: result.cursor
@@ -211,27 +237,49 @@ async function waitOnce(config, timeoutMs) {
 async function wait() {
   const config = await loadConfig();
   const timeoutMs = Math.min(Math.max(Number(option("timeout", "25000")), 1000), 30000);
+  await reportPresence(config, await readPresenceStatus(), { persist: false });
   console.log(JSON.stringify(await waitOnce(config, timeoutMs), null, 2));
 }
 
 async function listen() {
   const config = await loadConfig();
-  console.error(`Listening as ${config.ownerName}’s ${config.memberName}...`);
-  while (true) {
+  await reportPresence(config, "online");
+  const heartbeat = setInterval(async () => {
     try {
-      const result = await waitOnce(config, 25000);
-      for (const message of result.messages) {
-        process.stdout.write(`${JSON.stringify(message)}\n`);
-      }
+      await reportPresence(config, await readPresenceStatus(), { persist: false });
     } catch (error) {
-      if (error.message === "invalid member token") {
-        console.error("This session was disconnected because it joined another group.");
-        return;
-      }
-      console.error(`Listen error: ${error.message}; retrying...`);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      console.error(`Heartbeat error: ${error.message}; retrying next minute...`);
     }
+  }, 60_000);
+  console.error(`Listening as ${config.ownerName}’s ${config.memberName}...`);
+  try {
+    while (true) {
+      try {
+        const result = await waitOnce(config, 25000);
+        for (const message of result.messages) {
+          process.stdout.write(`${JSON.stringify(message)}\n`);
+        }
+      } catch (error) {
+        if (error.message === "invalid member token") {
+          console.error("This session was disconnected because it joined another group.");
+          return;
+        }
+        console.error(`Listen error: ${error.message}; retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    }
+  } finally {
+    clearInterval(heartbeat);
   }
+}
+
+async function presence() {
+  const config = await loadConfig();
+  const status = option("status", "online");
+  if (!["online", "busy"].includes(status)) {
+    throw new Error("Presence status must be online or busy");
+  }
+  console.log(JSON.stringify(await reportPresence(config, status), null, 2));
 }
 
 async function history() {
@@ -262,7 +310,7 @@ async function status() {
   }, null, 2));
 }
 
-const commands = { join, send, wait, listen, history, status };
+const commands = { join, send, wait, listen, history, status, presence };
 
 if (!commands[command]) {
   console.error(`Usage:
@@ -271,6 +319,7 @@ if (!commands[command]) {
   npm run relay -- history --session <session-id> [--limit 100]
   npm run relay -- wait --session <session-id> [--timeout 25000]
   npm run relay -- listen --session <session-id>
+  npm run relay -- presence --session <session-id> --status online|busy
   npm run relay -- send --session <session-id> <message> [--file <path>]`);
   process.exit(1);
 }

@@ -23,6 +23,15 @@ async function relay(path, options = {}) {
 }
 
 const server = new McpServer({ name: "group-relay", version: "0.1.0" });
+let presenceStatus = "online";
+
+async function reportPresence(status = presenceStatus) {
+  presenceStatus = status;
+  return relay(`/api/groups/${groupId}/members/me/presence`, {
+    method: "POST",
+    body: JSON.stringify({ status })
+  });
+}
 
 server.tool(
   "group_send",
@@ -38,6 +47,7 @@ server.tool(
     if (replyTo) form.set("replyTo", replyTo);
     form.set("mentions", JSON.stringify(mentionIds));
     const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
+    await reportPresence("online");
     return { content: [{ type: "text", text: JSON.stringify(result.message) }] };
   }
 );
@@ -51,6 +61,7 @@ server.tool(
     query.set("routed", "1");
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages?${query}`);
+    if (result.messages.length) await reportPresence("busy");
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -63,6 +74,7 @@ server.tool(
     const query = new URLSearchParams({ timeoutMs: String(timeoutMs), routed: "1" });
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages/wait?${query}`);
+    if (result.messages.length) await reportPresence("busy");
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 );
@@ -71,5 +83,20 @@ server.tool("group_members", "List members in the shared group.", {}, async () =
   const result = await relay(`/api/groups/${groupId}`);
   return { content: [{ type: "text", text: JSON.stringify(result.members) }] };
 });
+
+server.tool(
+  "group_presence",
+  "Set this AI member's presence to online or busy.",
+  { status: z.enum(["online", "busy"]) },
+  async ({ status }) => {
+    const result = await reportPresence(status);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+await reportPresence("online");
+setInterval(() => {
+  reportPresence().catch((error) => console.error(`Heartbeat error: ${error.message}`));
+}, 60_000).unref();
 
 await server.connect(new StdioServerTransport());

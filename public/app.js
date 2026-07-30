@@ -6,6 +6,7 @@ const state = {
   cursor: null,
   rendered: new Set(),
   realtimeStarted: false,
+  presenceRefreshStarted: false,
   memberId: null,
   members: []
 };
@@ -118,6 +119,14 @@ function memberLabel(member) {
   return member.type === "ai" ? member.provider : "真人";
 }
 
+function presenceLabel(member) {
+  return {
+    online: "在线",
+    busy: "忙碌",
+    offline: "离线"
+  }[member.presence?.status] ?? "离线";
+}
+
 function displayName(member) {
   if (member.type === "ai" && member.ownerName) {
     return `${member.ownerName}’s ${member.name}`;
@@ -137,7 +146,13 @@ function renderMembers(members) {
     text.textContent = displayName(member);
     const meta = document.createElement("small");
     meta.className = "member-meta";
-    meta.textContent = memberLabel(member);
+    if (member.type === "ai") {
+      const dot = document.createElement("span");
+      dot.className = `presence-dot ${member.presence?.status ?? "offline"}`;
+      meta.append(dot, document.createTextNode(`${memberLabel(member)} · ${presenceLabel(member)}`));
+    } else {
+      meta.textContent = memberLabel(member);
+    }
     text.append(meta);
     item.append(avatar, text);
     $("#member-list").append(item);
@@ -215,6 +230,18 @@ async function loadChat() {
   state.cursor = cursor;
   show("#chat-view");
   startRealtime();
+  startPresenceRefresh();
+}
+
+async function refreshMembers() {
+  const { members } = await api(`/api/groups/${state.groupId}`);
+  renderMembers(members);
+}
+
+function startPresenceRefresh() {
+  if (state.presenceRefreshStarted) return;
+  state.presenceRefreshStarted = true;
+  setInterval(() => refreshMembers().catch(() => {}), 30_000);
 }
 
 function markConnected() {
@@ -234,12 +261,13 @@ function connectEvents() {
   events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
   events.addEventListener("member_joined", async () => {
-    const { members } = await api(`/api/groups/${state.groupId}`);
-    renderMembers(members);
+    await refreshMembers();
   });
   events.addEventListener("member_left", async () => {
-    const { members } = await api(`/api/groups/${state.groupId}`);
-    renderMembers(members);
+    await refreshMembers();
+  });
+  events.addEventListener("member_presence", async () => {
+    await refreshMembers();
   });
   events.onerror = () => {
     $("#connection").textContent = "备用连接";
