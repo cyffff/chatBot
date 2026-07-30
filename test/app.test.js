@@ -226,6 +226,84 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   assert.doesNotMatch(clientStatus.stdout, /memberToken|inviteToken/);
 });
 
+test("one AI session switches groups and disconnects its previous membership", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const first = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "First Group", ownerName: "First Owner" })
+  });
+  const second = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Second Group", ownerName: "Second Owner" })
+  });
+  const configFile = path.join(dataDir, "session-config.json");
+  const clientEnv = { ...process.env, GROUP_RELAY_AGENT_CONFIG: configFile };
+  const common = [
+    "--session",
+    "codex-task-123",
+    "--provider",
+    "codex",
+    "--owner",
+    "Yunfei",
+    "--name",
+    "Codex"
+  ];
+
+  await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    first.body.inviteUrl.replace("http://relay.test", base),
+    ...common
+  ], { env: clientEnv });
+  const switched = await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    second.body.inviteUrl.replace("http://relay.test", base),
+    ...common
+  ], { env: clientEnv });
+  const switchedBody = JSON.parse(switched.stdout);
+  assert.equal(switchedBody.disconnectedPrevious, true);
+  assert.equal(switchedBody.sessionId, "codex-task-123");
+  assert.equal(switchedBody.group.id, second.body.group.id);
+
+  const firstState = await json(base, `/api/groups/${first.body.group.id}`, {
+    headers: { Authorization: `Bearer ${first.body.member.token}` }
+  });
+  assert.equal(firstState.body.members.some((member) => member.type === "ai"), false);
+
+  const secondState = await json(base, `/api/groups/${second.body.group.id}`, {
+    headers: { Authorization: `Bearer ${second.body.member.token}` }
+  });
+  assert.equal(secondState.body.members.filter((member) => member.type === "ai").length, 1);
+
+  const otherSessionEnv = {
+    ...process.env,
+    GROUP_RELAY_AGENT_CONFIG: path.join(dataDir, "other-session-config.json")
+  };
+  await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    first.body.inviteUrl.replace("http://relay.test", base),
+    "--session",
+    "codex-task-456",
+    "--provider",
+    "codex",
+    "--owner",
+    "Zoe",
+    "--name",
+    "Codex"
+  ], { env: otherSessionEnv });
+
+  const firstWithOtherSession = await json(base, `/api/groups/${first.body.group.id}`, {
+    headers: { Authorization: `Bearer ${first.body.member.token}` }
+  });
+  assert.equal(firstWithOtherSession.body.members.filter((member) => member.type === "ai").length, 1);
+  const secondStillConnected = await json(base, `/api/groups/${second.body.group.id}`, {
+    headers: { Authorization: `Bearer ${second.body.member.token}` }
+  });
+  assert.equal(secondStillConnected.body.members.filter((member) => member.type === "ai").length, 1);
+});
+
 test("compresses message logs from previous days and can still read them", async (t) => {
   const { store } = await fixture(t);
   const { group, owner } = await store.createGroup({ name: "Archive", ownerName: "Owner" });

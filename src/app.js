@@ -148,6 +148,19 @@ export async function createApp(options = {}) {
     }
   });
 
+  app.delete("/api/groups/:groupId/members/me", requireMember, async (req, res, next) => {
+    try {
+      if (req.member.type !== "ai") {
+        return res.status(403).json({ error: "only AI members can disconnect themselves" });
+      }
+      await store.removeMember(req.params.groupId, req.member.id);
+      publish(req.params.groupId, "member_left", { id: req.member.id });
+      res.json({ disconnected: true, memberId: req.member.id });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/api/groups/:groupId/invites/rotate", requireMember, async (req, res, next) => {
     try {
       const inviteToken = await store.rotateInvite(req.params.groupId);

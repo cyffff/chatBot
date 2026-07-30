@@ -2,11 +2,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-const configFile = path.resolve(
-  process.env.GROUP_RELAY_AGENT_CONFIG ?? ".group-relay-agent.json"
-);
 const args = process.argv.slice(2);
 const command = args.shift();
+
+function globalOption(name) {
+  const index = args.indexOf(`--${name}`);
+  if (index < 0) return null;
+  const value = args[index + 1];
+  args.splice(index, 2);
+  return value;
+}
+
+const sessionId = globalOption("session") ?? process.env.GROUP_RELAY_SESSION_ID ?? null;
+const safeSessionId = sessionId?.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+const configFile = path.resolve(
+  process.env.GROUP_RELAY_AGENT_CONFIG
+    ?? (safeSessionId ? `.group-relay-sessions/${safeSessionId}.json` : ".group-relay-agent.json")
+);
 
 function option(name, fallback) {
   const index = args.indexOf(`--${name}`);
@@ -36,6 +48,7 @@ async function loadConfig() {
 
 async function saveConfig(config) {
   const temp = `${configFile}.tmp`;
+  await fs.mkdir(path.dirname(configFile), { recursive: true });
   await fs.writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   await fs.rename(temp, configFile);
   await fs.chmod(configFile, 0o600);
@@ -63,23 +76,44 @@ async function join() {
   const name = option("name", providerName(provider));
   if (!inviteUrl || !provider || !ownerName || !["codex", "claude", "cursor"].includes(provider)) {
     throw new Error(
-      "Usage: npm run relay -- join <invite-url> --provider codex|claude|cursor --owner <name> [--name <AI name>]"
+      "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>]"
     );
-  }
-  if (!force) {
-    try {
-      await fs.access(configFile);
-      throw new Error(
-        `Agent config already exists at ${configFile}. Run "npm run relay -- status" or add --force to replace it.`
-      );
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
   }
   const url = new URL(inviteUrl);
   const match = url.pathname.match(/^\/join\/([^/]+)$/);
   if (!match) throw new Error("Invite URL must end with /join/<invite-token>");
   const baseUrl = url.origin;
+  const target = await request(
+    { baseUrl },
+    `/api/invites/${encodeURIComponent(match[1])}`
+  );
+  let previous = null;
+  try {
+    previous = await loadConfig();
+  } catch (error) {
+    if (!error.message.startsWith("No agent config found")) throw error;
+  }
+  if (previous && !force && previous.baseUrl === baseUrl && previous.groupId === target.group.id) {
+    try {
+      const group = await request(previous, `/api/groups/${previous.groupId}`);
+      console.log(JSON.stringify({
+        connected: true,
+        reused: true,
+        sessionId: previous.sessionId ?? sessionId,
+        group: { id: group.group.id, name: group.group.name },
+        member: {
+          id: previous.memberId,
+          displayName: `${previous.ownerName}’s ${previous.memberName}`,
+          provider: previous.provider
+        },
+        configFile
+      }, null, 2));
+      return;
+    } catch (error) {
+      if (error.message !== "invalid member token") throw error;
+      previous = null;
+    }
+  }
   const joinResponse = await request(
     { baseUrl },
     `/api/invites/${encodeURIComponent(match[1])}/join`,
@@ -96,14 +130,32 @@ async function join() {
     memberName: name,
     provider,
     ownerName,
+    sessionId,
     cursor: null
   };
+  let disconnectedPrevious = false;
+  let disconnectWarning = null;
+  if (previous) {
+    try {
+      await request(previous, `/api/groups/${previous.groupId}/members/me`, { method: "DELETE" });
+      disconnectedPrevious = true;
+    } catch (error) {
+      if (error.message === "invalid member token" || error.message === "group not found") {
+        disconnectedPrevious = true;
+      } else {
+        disconnectWarning = `Could not notify the previous relay: ${error.message}`;
+      }
+    }
+  }
   const history = await request(config, `/api/groups/${config.groupId}/messages?limit=100&routed=1`);
   config.cursor = history.cursor;
   await saveConfig(config);
   const online = await sendText(config, `${ownerName}’s ${name} 已加入群聊，正在监听消息。`);
   console.log(JSON.stringify({
     connected: true,
+    sessionId,
+    disconnectedPrevious,
+    disconnectWarning,
     group: { id: joinResponse.group.id, name: joinResponse.group.name },
     member: { id: config.memberId, displayName: `${ownerName}’s ${name}`, provider },
     recentMessages: history.messages,
@@ -172,6 +224,10 @@ async function listen() {
         process.stdout.write(`${JSON.stringify(message)}\n`);
       }
     } catch (error) {
+      if (error.message === "invalid member token") {
+        console.error("This session was disconnected because it joined another group.");
+        return;
+      }
       console.error(`Listen error: ${error.message}; retrying...`);
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
@@ -194,6 +250,7 @@ async function status() {
   const { inviteToken: _inviteToken, ...safeGroup } = group.group;
   console.log(JSON.stringify({
     connected: true,
+    sessionId: config.sessionId ?? sessionId,
     baseUrl: config.baseUrl,
     group: safeGroup,
     member: {
@@ -209,12 +266,12 @@ const commands = { join, send, wait, listen, history, status };
 
 if (!commands[command]) {
   console.error(`Usage:
-  npm run relay -- join <invite-url> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--force]
-  npm run relay -- status
-  npm run relay -- history [--limit 100]
-  npm run relay -- wait [--timeout 25000]
-  npm run relay -- listen
-  npm run relay -- send <message> [--file <path>]`);
+  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--force]
+  npm run relay -- status --session <session-id>
+  npm run relay -- history --session <session-id> [--limit 100]
+  npm run relay -- wait --session <session-id> [--timeout 25000]
+  npm run relay -- listen --session <session-id>
+  npm run relay -- send --session <session-id> <message> [--file <path>]`);
   process.exit(1);
 }
 

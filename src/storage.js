@@ -106,6 +106,14 @@ export class FileStore {
     return (await this.listMembers(groupId)).find((member) => member.token === token) ?? null;
   }
 
+  async removeMember(groupId, memberId) {
+    const members = await this.listMembers(groupId);
+    const next = members.filter((member) => member.id !== memberId);
+    if (next.length === members.length) return false;
+    await writeJsonAtomic(path.join(this.groupDir(groupId), "members.json"), next);
+    return true;
+  }
+
   async joinGroup(inviteToken, { name, type, provider, ownerName }) {
     const group = await this.groupFromInvite(inviteToken);
     if (!group) return null;

@@ -237,6 +237,10 @@ function connectEvents() {
     const { members } = await api(`/api/groups/${state.groupId}`);
     renderMembers(members);
   });
+  events.addEventListener("member_left", async () => {
+    const { members } = await api(`/api/groups/${state.groupId}`);
+    renderMembers(members);
+  });
   events.onerror = () => {
     $("#connection").textContent = "备用连接";
   };

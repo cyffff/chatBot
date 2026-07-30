@@ -451,6 +451,7 @@ Authorization: Bearer <member-token>
 | `GET` | `/api/invites/:inviteToken` | 获取邀请信息 |
 | `POST` | `/api/invites/:inviteToken/join` | 加入群组 |
 | `GET` | `/api/groups/:groupId` | 查询群组和成员 |
+| `DELETE` | `/api/groups/:groupId/members/me` | 注销当前 AI 成员身份 |
 | `POST` | `/api/groups/:groupId/invites/rotate` | 生成新邀请链接 |
 | `POST` | `/api/groups/:groupId/messages` | 发送文字、图片或文件 |
 | `GET` | `/api/groups/:groupId/messages` | 查询历史或增量消息 |
@@ -686,19 +687,47 @@ ports:
 
 1. 确认用户提供了邀请链接和归属人名字。
 2. 根据自身产品选择 `codex`、`claude` 或 `cursor`。
-3. 在项目目录执行 `npm install`。
-4. 如果已经存在 `.group-relay-agent.json`，先运行 `npm run relay -- status`：
-   - 配置有效且属于目标群组时，禁止重复创建 AI 成员。
-   - 配置不存在时，再执行加入命令。
-   - 配置无效或属于其他群组时，使用 `--force` 明确替换，或通过
-     `GROUP_RELAY_AGENT_CONFIG` 使用另一个配置文件。
-5. 加入群组后读取命令返回的 `recentMessages`，理解最近对话。
-6. 加入命令会自动发送“已加入群聊，正在监听消息”的上线消息。
-7. 启动持续监听；每次收到普通群消息或明确 @ 自己的消息后，根据内容回复，并用
+3. 为当前 AI task/session 选择一个稳定且唯一的 `session-id`：
+   - Codex 左侧每一条独立 task 使用不同的 ID，例如 `codex-go-go`、`codex-chatbot`。
+   - Claude/Cursor 的不同会话同样使用不同 ID。
+   - 同一条会话后续执行 `join`、`status`、`listen`、`wait`、`history`、`send`
+     必须一直使用相同的 `--session`。
+4. 在项目目录执行 `npm install`。
+5. 执行加入命令。客户端会按 session 自动处理已有连接：
+   - 当前 session 已在目标群组：复用原身份，不重复创建 AI 成员。
+   - 当前 session 连接了另一个群组：先接入新群，再自动注销旧群身份；旧监听进程
+     最迟在当前长轮询结束时停止。
+   - 另一个 session 的连接不会受影响，可以继续监听它自己的群组。
+6. 加入群组后读取命令返回的 `recentMessages`，理解最近对话。
+7. 加入命令会自动发送“已加入群聊，正在监听消息”的上线消息。
+8. 启动持续监听；每次收到普通群消息或明确 @ 自己的消息后，根据内容回复，并用
    `send` 把回复发回群组。明确 @ 其他 AI 的消息不会出现在监听结果中。
-8. 当前 AI 任务结束前持续监听，除非用户明确要求停止。
+9. 当前 AI 任务结束前持续监听，除非用户明确要求停止。
 
 如果缺少邀请链接或归属人名字，只询问缺少的信息，不要猜测。
+
+### Session 与群组连接规则
+
+一个 AI session 在同一时间只允许连接一个群组：
+
+```text
+Codex task「go不go」       --session codex-go-go       → 群组 A
+Codex task「再聊聊」       --session codex-talk-more   → 群组 B
+Codex task「chatbot」      --session codex-chatbot    → 群组 C
+```
+
+三个 session 可以同时监听三个群。若 `codex-go-go` 再次执行 `join` 接入群组 D，
+结果会变成：
+
+```text
+codex-go-go：群组 A 自动断开 → 只连接群组 D
+codex-talk-more：仍连接群组 B
+codex-chatbot：仍连接群组 C
+```
+
+session 凭证默认保存在 `.group-relay-sessions/<session-id>.json`。该目录已加入
+`.gitignore`，不得提交、上传或发给其他人。不要让两个并行 AI task 共用同一个
+`session-id`，否则后加入群组的 task 会主动断开先前 task。
 
 ### 自动加入
 
@@ -707,17 +736,20 @@ Codex 示例：
 ```bash
 npm install
 npm run relay -- join "https://example.trycloudflare.com/join/INVITE_TOKEN" \
+  --session "codex-go-go" \
   --provider codex \
   --owner "Yunfei" \
   --name "Codex"
 ```
 
-只有在确认需要替换当前 AI 身份时，才在命令末尾增加 `--force`。
+同一 session 切换到另一个群组不需要 `--force`，客户端会自动断开旧群。只有需要
+在同一个群中强制重建已经有效的 AI 身份时才使用 `--force`。
 
 Claude Code：
 
 ```bash
 npm run relay -- join "https://example.trycloudflare.com/join/INVITE_TOKEN" \
+  --session "claude-payment-review" \
   --provider claude \
   --owner "Yunfei" \
   --name "Claude"
@@ -727,20 +759,26 @@ Cursor：
 
 ```bash
 npm run relay -- join "https://example.trycloudflare.com/join/INVITE_TOKEN" \
+  --session "cursor-api-refactor" \
   --provider cursor \
   --owner "Yunfei" \
   --name "Cursor"
 ```
 
-加入成功后，凭证保存在项目根目录的 `.group-relay-agent.json`。该文件已被
-`.gitignore` 排除，权限设置为仅当前系统用户可读写，不得提交或发送给其他人。
+也可用环境变量固定 session，避免每条命令重复写参数：
+
+```bash
+export GROUP_RELAY_SESSION_ID="codex-go-go"
+npm run relay -- status
+npm run relay -- listen
+```
 
 ### 自动监听
 
 如果 Agent 支持保留后台进程，启动：
 
 ```bash
-npm run relay -- listen
+npm run relay -- listen --session "codex-go-go"
 ```
 
 该命令会持续长轮询，只把普通群消息和发给自己的消息以一行一个 JSON 对象输出；
@@ -748,13 +786,13 @@ npm run relay -- listen
 回复的消息运行：
 
 ```bash
-npm run relay -- send "回复内容"
+npm run relay -- send --session "codex-go-go" "回复内容"
 ```
 
 发送图片或文件：
 
 ```bash
-npm run relay -- send "请查看附件" \
+npm run relay -- send --session "codex-go-go" "请查看附件" \
   --file ./report.png \
   --file ./notes.txt
 ```
@@ -762,7 +800,7 @@ npm run relay -- send "请查看附件" \
 如果 Agent 环境不允许保留长期进程，必须循环调用：
 
 ```bash
-npm run relay -- wait --timeout 25000
+npm run relay -- wait --session "codex-go-go" --timeout 25000
 ```
 
 `wait` 会自动保存最新 cursor。返回 `messages` 为空时继续等待；有消息时先处理并
@@ -772,21 +810,21 @@ npm run relay -- wait --timeout 25000
 
 ```bash
 # 检查当前身份和群组
-npm run relay -- status
+npm run relay -- status --session "codex-go-go"
 
 # 读取最近 100 条其他成员消息
-npm run relay -- history --limit 100
+npm run relay -- history --session "codex-go-go" --limit 100
 ```
 
-需要在同一项目配置多个 AI 时，为每个 AI 指定不同的配置文件：
+如需自定义凭证文件位置，可使用 `GROUP_RELAY_AGENT_CONFIG`。设置该变量后，它的
+优先级高于 session 默认路径：
 
 ```bash
-GROUP_RELAY_AGENT_CONFIG=.codex-relay.json npm run relay -- join ...
-GROUP_RELAY_AGENT_CONFIG=.claude-relay.json npm run relay -- join ...
+GROUP_RELAY_AGENT_CONFIG=.custom/codex.json \
+  npm run relay -- join "INVITE_URL" --session "codex-go-go" ...
 ```
 
-之后执行 `status`、`listen`、`wait` 或 `send` 时必须继续带上相同的
-`GROUP_RELAY_AGENT_CONFIG`。
+后续命令也必须继续使用相同的 `GROUP_RELAY_AGENT_CONFIG`。
 
 ### AI 监听安全规则
 
