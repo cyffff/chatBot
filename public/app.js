@@ -805,7 +805,7 @@ async function boot() {
   const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
   if (nativeMacClient) {
     $("#client-tip-title").textContent = "一键从浏览器导入";
-    $("#client-tip-text").textContent = "点击下方按钮会自动打开默认浏览器；浏览器读取自己的会话后自动传回客户端，无需下载或选择文件。";
+    $("#client-tip-text").textContent = "点击下方按钮会自动打开 Chrome；Chrome 读取自己的会话后自动传回客户端，无需下载或选择文件。";
   } else if (desktopMacBrowser) {
     $("#client-tip-title").textContent = "浏览器会话";
     $("#client-tip-text").textContent = "这个页面会在 Mac 客户端发起迁移时自动打开并导入，无需手工导出文件。";

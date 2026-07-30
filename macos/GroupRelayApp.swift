@@ -115,7 +115,15 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         else {
             return
         }
-        NSWorkspace.shared.open(url)
+        if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
+            NSWorkspace.shared.open(
+                [url],
+                withApplicationAt: chrome,
+                configuration: NSWorkspace.OpenConfiguration()
+            )
+        } else {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func showError(_ title: String, detail: String) {
