@@ -292,6 +292,83 @@ test("AI polling renews presence and routed work marks it busy", async (t) => {
   assert.equal(busy.body.members.find((member) => member.type === "ai").presence.status, "busy");
 });
 
+test("AI processing placeholders stay busy and are updated in place", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Processing", ownerName: "Owner" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+  const placeholderForm = new FormData();
+  placeholderForm.set("text", "正在处理这个问题，请稍等…");
+  placeholderForm.set("status", "processing");
+  const placeholderResponse = await fetch(
+    `${base}/api/groups/${created.body.group.id}/messages`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${joined.body.member.token}` },
+      body: placeholderForm
+    }
+  );
+  const placeholder = await placeholderResponse.json();
+  assert.equal(placeholder.message.status, "processing");
+
+  const attemptedOnline = await json(base, `/api/groups/${created.body.group.id}/members/me/presence`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    body: JSON.stringify({ status: "online" })
+  });
+  assert.equal(attemptedOnline.body.presence.status, "busy");
+  const stillBusy = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(stillBusy.body.members.find((member) => member.type === "ai").presence.status, "busy");
+
+  const waitForUpdate = json(
+    base,
+    `/api/groups/${created.body.group.id}/messages/wait?after=${placeholder.message.id}&timeoutMs=2000`,
+    { headers: { Authorization: `Bearer ${created.body.member.token}` } }
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const completed = await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages/${placeholder.message.id}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${joined.body.member.token}` },
+      body: JSON.stringify({
+        text: "这是完整答案",
+        status: "complete",
+        expectedGroupId: created.body.group.id
+      })
+    }
+  );
+  assert.equal(completed.body.message.id, placeholder.message.id);
+
+  const updateEvent = await waitForUpdate;
+  assert.equal(updateEvent.body.event, "message_updated");
+  assert.equal(updateEvent.body.eventPayload.text, "这是完整答案");
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(history.body.messages.length, 1);
+  assert.equal(history.body.messages[0].text, "这是完整答案");
+  assert.equal(history.body.messages[0].status, "complete");
+  const online = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(online.body.members.find((member) => member.type === "ai").presence.status, "online");
+});
+
 test("AI relay client joins, persists identity, receives and sends messages", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
@@ -462,6 +539,7 @@ exit 1
   });
   assert.equal(history.body.messages.at(-1).text, "常驻 Worker 已自动回复");
   assert.equal(history.body.messages.at(-1).sender.id, aiMemberId);
+  assert.equal(history.body.messages.at(-1).status, "complete");
 });
 
 test("MCP send rejects a mismatched expected group ID", async (t) => {

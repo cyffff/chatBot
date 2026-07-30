@@ -180,6 +180,22 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 }
 .mention-option:hover { background: #dce4f5; }
 .message.mentions-me .bubble { border-color: #7893ca; background: #f5f7fd; }
+.message-status {
+  color: #b17418;
+  font-size: 11px;
+}
+.message.processing .bubble {
+  color: #6f776f;
+  border-style: dashed;
+  background: linear-gradient(90deg, #f7f9f5 25%, #eef3ec 50%, #f7f9f5 75%);
+  background-size: 200% 100%;
+  animation: processing-shimmer 1.5s linear infinite;
+}
+.message.failed .bubble { border-color: #d69696; background: #fff7f7; }
+@keyframes processing-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
 .composer-actions { display: flex; align-items: center; gap: 12px; }
 .composer-actions button { margin-left: auto; }
 .file-button { display: inline-block; width: auto; padding: 8px 10px; border-radius: 8px; background: #edf2ed; cursor: pointer; }

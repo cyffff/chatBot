@@ -133,7 +133,23 @@ export class FileStore {
       const member = members.find((candidate) => candidate.id === memberId);
       if (!member || member.type !== "ai") return null;
       member.presence = {
-        status,
+        status: status === "online" && member.activeMessageIds?.length ? "busy" : status,
+        lastSeenAt: new Date().toISOString()
+      };
+      return member.presence;
+    });
+  }
+
+  async setMessageActivity(groupId, memberId, messageId, processing) {
+    return this.updateMembers(groupId, (members) => {
+      const member = members.find((candidate) => candidate.id === memberId);
+      if (!member || member.type !== "ai") return null;
+      const active = new Set(member.activeMessageIds ?? []);
+      if (processing) active.add(messageId);
+      else active.delete(messageId);
+      member.activeMessageIds = [...active];
+      member.presence = {
+        status: member.activeMessageIds.length ? "busy" : "online",
         lastSeenAt: new Date().toISOString()
       };
       return member.presence;
@@ -194,7 +210,7 @@ export class FileStore {
     );
   }
 
-  async appendMessage(groupId, member, { text, attachments, replyTo, mentions = [] }) {
+  async appendMessage(groupId, member, { text, attachments, replyTo, mentions = [], status = "complete" }) {
     const createdAt = new Date().toISOString();
     const message = {
       id: id(),
@@ -210,6 +226,7 @@ export class FileStore {
       attachments,
       mentions,
       replyTo: replyTo || null,
+      status,
       createdAt
     };
     const file = path.join(this.groupDir(groupId), "messages", `${dayOf(createdAt)}.jsonl`);
@@ -218,6 +235,29 @@ export class FileStore {
     this.writeQueues.set(groupId, next.catch(() => {}));
     await next;
     return message;
+  }
+
+  async updateMessage(groupId, messageId, memberId, { text, status }) {
+    const previous = this.writeQueues.get(groupId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const files = (await this.messageFiles(groupId)).filter((file) => !file.endsWith(".gz")).reverse();
+      for (const file of files) {
+        const messages = parseJsonl(await fs.readFile(file, "utf8"));
+        const message = messages.find((candidate) => candidate.id === messageId);
+        if (!message) continue;
+        if (message.sender?.id !== memberId) return { forbidden: true };
+        if (typeof text === "string") message.text = text;
+        message.status = status;
+        message.updatedAt = new Date().toISOString();
+        const temp = `${file}.${id()}.tmp`;
+        await fs.writeFile(temp, `${messages.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+        await fs.rename(temp, file);
+        return { message };
+      }
+      return null;
+    });
+    this.writeQueues.set(groupId, next.catch(() => {}));
+    return next;
   }
 
   async messageFiles(groupId) {

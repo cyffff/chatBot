@@ -78,17 +78,40 @@ server.tool(
   {
     text: z.string().min(1).max(20_000),
     expectedGroupId: z.string().uuid(),
+    status: z.enum(["processing", "complete", "failed"]).default("complete"),
     replyTo: z.string().optional(),
     mentionIds: z.array(z.string()).max(20).optional()
   },
-  async ({ text, expectedGroupId, replyTo, mentionIds = [] }) => {
+  async ({ text, expectedGroupId, status, replyTo, mentionIds = [] }) => {
     const group = await assertExpectedGroup(expectedGroupId);
     const form = new FormData();
     form.set("text", text);
+    form.set("status", status);
     if (replyTo) form.set("replyTo", replyTo);
     form.set("mentions", JSON.stringify(mentionIds));
     const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
-    await reportPresence("online");
+    await reportPresence(status === "processing" ? "busy" : "online");
+    return { content: [{ type: "text", text: JSON.stringify({ group, message: result.message }) }] };
+  }
+);
+
+server.tool(
+  "group_update",
+  "Replace this AI's existing placeholder message with progress, a completed answer, or a failure.",
+  {
+    messageId: z.string().uuid(),
+    text: z.string().min(1).max(20_000),
+    status: z.enum(["processing", "complete", "failed"]).default("complete"),
+    expectedGroupId: z.string().uuid()
+  },
+  async ({ messageId, text, status, expectedGroupId }) => {
+    const group = await assertExpectedGroup(expectedGroupId);
+    const result = await relay(`/api/groups/${groupId}/messages/${messageId}`, {
+      method: "PATCH",
+      retryNetwork: true,
+      body: JSON.stringify({ text, status, expectedGroupId })
+    });
+    await reportPresence(status === "processing" ? "busy" : "online");
     return { content: [{ type: "text", text: JSON.stringify({ group, message: result.message }) }] };
   }
 );

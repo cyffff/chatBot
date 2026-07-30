@@ -240,10 +240,12 @@ async function join() {
   }, null, 2));
 }
 
-async function sendText(config, text, files = []) {
+async function sendText(config, text, files = [], { status = "complete", replyTo } = {}) {
   if (!text && files.length === 0) throw new Error("A message or file is required");
   const form = new FormData();
   if (text) form.set("text", text);
+  form.set("status", status);
+  if (replyTo) form.set("replyTo", replyTo);
   for (const file of files) {
     const buffer = await fs.readFile(file);
     form.append("files", new Blob([buffer]), path.basename(file));
@@ -257,6 +259,11 @@ async function sendText(config, text, files = []) {
 async function send() {
   const config = await loadConfig();
   const expectedGroupId = option("expected-group");
+  const status = option("status", "complete");
+  const replyTo = option("reply-to");
+  if (!["processing", "complete", "failed"].includes(status)) {
+    throw new Error("--status must be processing, complete or failed.");
+  }
   if (connectionName && !expectedGroupId) {
     throw new Error("--expected-group is required when sending through a named connection.");
   }
@@ -273,8 +280,41 @@ async function send() {
     args.splice(index, 2);
   }
   const text = args.join(" ").trim();
-  const result = await sendText(config, text, files);
-  await reportPresence(config, "online", { persist: !connectionName });
+  const result = await sendText(config, text, files, { status, replyTo });
+  await reportPresence(config, status === "processing" ? "busy" : "online", {
+    persist: !connectionName
+  });
+  console.log(JSON.stringify(result, null, 2));
+}
+
+async function update() {
+  const config = await loadConfig();
+  const messageId = option("message");
+  const expectedGroupId = option("expected-group");
+  const status = option("status", "complete");
+  if (!messageId) throw new Error("--message is required.");
+  if (connectionName && !expectedGroupId) {
+    throw new Error("--expected-group is required when updating through a named connection.");
+  }
+  if (expectedGroupId && expectedGroupId !== config.groupId) {
+    throw new Error(
+      `Refusing to update: connection "${connectionName ?? sessionId ?? "default"}" targets `
+      + `${config.groupId}, not expected group ${expectedGroupId}.`
+    );
+  }
+  if (!["processing", "complete", "failed"].includes(status)) {
+    throw new Error("--status must be processing, complete or failed.");
+  }
+  const text = args.join(" ").trim();
+  if (!text) throw new Error("Updated message text is required.");
+  const result = await request(config, `/api/groups/${config.groupId}/messages/${messageId}`, {
+    method: "PATCH",
+    retryNetwork: true,
+    body: JSON.stringify({ text, status, expectedGroupId })
+  });
+  await reportPresence(config, status === "processing" ? "busy" : "online", {
+    persist: !connectionName
+  });
   console.log(JSON.stringify(result, null, 2));
 }
 
@@ -342,7 +382,7 @@ async function presence() {
   if (!["online", "busy"].includes(status)) {
     throw new Error("Presence status must be online or busy");
   }
-  console.log(JSON.stringify(await reportPresence(config, status), null, 2));
+  console.log(JSON.stringify(await reportPresence(config, status, { persist: !connectionName }), null, 2));
 }
 
 async function history() {
@@ -381,7 +421,7 @@ async function status() {
   }, null, 2));
 }
 
-const commands = { join, send, wait, listen, history, status, presence };
+const commands = { join, send, update, wait, listen, history, status, presence };
 
 if (!commands[command]) {
   console.error(`Usage:
@@ -391,9 +431,11 @@ if (!commands[command]) {
   npm run relay -- wait --session <session-id> [--timeout 25000]
   npm run relay -- listen --session <session-id>
   npm run relay -- presence --session <session-id> --status online|busy
-  npm run relay -- send --session <session-id> <message> [--file <path>]
+  npm run relay -- send --session <session-id> [--status processing|complete|failed] <message> [--file <path>]
+  npm run relay -- update --session <session-id> --message <message-id> [--status processing|complete|failed] <message>
   npm run relay -- history --connection <mcp-name> [--after <message-id>] [--limit 100]
-  npm run relay -- send --connection <mcp-name> --expected-group <group-id> <message> [--file <path>]`);
+  npm run relay -- send --connection <mcp-name> --expected-group <group-id> [--status processing|complete|failed] <message> [--file <path>]
+  npm run relay -- update --connection <mcp-name> --expected-group <group-id> --message <message-id> [--status processing|complete|failed] <message>`);
   process.exit(1);
 }
 

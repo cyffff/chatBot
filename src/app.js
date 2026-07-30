@@ -12,6 +12,11 @@ const cleanText = (value, max) => String(value ?? "").trim().slice(0, max);
 const presenceSchema = z.object({
   status: z.enum(["online", "busy"])
 });
+const messageUpdateSchema = z.object({
+  text: z.string().trim().min(1).max(20_000),
+  status: z.enum(["processing", "complete", "failed"]),
+  expectedGroupId: z.string().uuid().optional()
+});
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -101,14 +106,14 @@ export async function createApp(options = {}) {
   }
 
   function publicMember(member) {
-    const { token: _token, ...safe } = member;
+    const { token: _token, activeMessageIds = [], ...safe } = member;
     if (member.type !== "ai") return safe;
     const lastSeen = Date.parse(member.presence?.lastSeenAt ?? "");
     const active = Number.isFinite(lastSeen) && Date.now() - lastSeen <= presenceTimeoutMs;
     return {
       ...safe,
       presence: {
-        status: active ? member.presence.status : "offline",
+        status: active ? (activeMessageIds.length ? "busy" : member.presence.status) : "offline",
         lastSeenAt: member.presence?.lastSeenAt ?? null
       }
     };
@@ -293,6 +298,9 @@ export async function createApp(options = {}) {
   app.post("/api/groups/:groupId/messages", requireMember, upload.array("files", 10), async (req, res, next) => {
     try {
       const text = cleanText(req.body.text, 20_000);
+      const status = req.member.type === "ai" && ["processing", "complete", "failed"].includes(req.body.status)
+        ? req.body.status
+        : "complete";
       const attachments = await store.saveAttachments(req.params.groupId, req.files ?? []);
       if (!text && attachments.length === 0) {
         return res.status(400).json({ error: "text or file is required" });
@@ -321,11 +329,51 @@ export async function createApp(options = {}) {
           provider: member.provider,
           ownerName: member.ownerName ?? null
         })),
-        replyTo: cleanText(req.body.replyTo, 100) || null
+        replyTo: cleanText(req.body.replyTo, 100) || null,
+        status
       });
-      await reportActivity(req, "online");
+      if (req.member.type === "ai") {
+        await store.setMessageActivity(
+          req.params.groupId,
+          req.member.id,
+          message.id,
+          status === "processing"
+        );
+      }
       publish(req.params.groupId, "message", message);
+      await reportActivity(req, status === "processing" ? "busy" : "online");
       res.status(201).json({ message });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch("/api/groups/:groupId/messages/:messageId", requireMember, async (req, res, next) => {
+    try {
+      if (req.member.type !== "ai") {
+        return res.status(403).json({ error: "only AI members can update their messages" });
+      }
+      const input = messageUpdateSchema.parse(req.body);
+      if (input.expectedGroupId && input.expectedGroupId !== req.params.groupId) {
+        return res.status(409).json({ error: "expected group does not match request group" });
+      }
+      const result = await store.updateMessage(
+        req.params.groupId,
+        req.params.messageId,
+        req.member.id,
+        input
+      );
+      if (!result) return res.status(404).json({ error: "message not found" });
+      if (result.forbidden) return res.status(403).json({ error: "message belongs to another member" });
+      await store.setMessageActivity(
+        req.params.groupId,
+        req.member.id,
+        result.message.id,
+        input.status === "processing"
+      );
+      publish(req.params.groupId, "message_updated", result.message);
+      await reportActivity(req, input.status === "processing" ? "busy" : "online");
+      res.json({ message: result.message });
     } catch (error) {
       next(error);
     }

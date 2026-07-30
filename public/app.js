@@ -185,6 +185,52 @@ function scrollMessagesToBottom() {
   messages.scrollTop = messages.scrollHeight;
 }
 
+function updateMessageNode(item, message) {
+  let bubble = item.querySelector(".bubble");
+  if (message.text) {
+    if (!bubble) {
+      bubble = document.createElement("div");
+      bubble.className = "bubble";
+      item.append(bubble);
+    }
+    bubble.textContent = message.text;
+  } else {
+    bubble?.remove();
+  }
+  item.classList.toggle("processing", message.status === "processing");
+  item.classList.toggle("failed", message.status === "failed");
+  let status = item.querySelector(".message-status");
+  if (message.status === "processing") {
+    if (!status) {
+      status = document.createElement("span");
+      status.className = "message-status";
+      item.querySelector(".message-head")?.append(status);
+    }
+    status.textContent = "正在处理";
+  } else if (message.status === "failed") {
+    if (!status) {
+      status = document.createElement("span");
+      status.className = "message-status";
+      item.querySelector(".message-head")?.append(status);
+    }
+    status.textContent = "处理失败";
+  } else {
+    status?.remove();
+  }
+}
+
+function updateRenderedMessage(message) {
+  const item = [...$("#messages").children]
+    .find((candidate) => candidate.dataset.messageId === message.id);
+  if (!item) {
+    renderMessage(message);
+    return;
+  }
+  const shouldFollow = messagesAreNearBottom();
+  updateMessageNode(item, message);
+  if (shouldFollow) requestAnimationFrame(scrollMessagesToBottom);
+}
+
 function attachmentNode(attachment) {
   const link = document.createElement("a");
   link.className = "attachment";
@@ -208,6 +254,7 @@ function renderMessage(message) {
   state.cursor = message.id;
   const item = document.createElement("li");
   item.className = "message";
+  item.dataset.messageId = message.id;
   if (message.mentions?.some((mention) => mention.id === state.memberId)) {
     item.classList.add("mentions-me");
   }
@@ -228,12 +275,7 @@ function renderMessage(message) {
   time.textContent = new Date(message.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
   head.append(time);
   item.append(head);
-  if (message.text) {
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    bubble.textContent = message.text;
-    item.append(bubble);
-  }
+  updateMessageNode(item, message);
   if (message.attachments?.length) {
     const attachments = document.createElement("div");
     attachments.className = "attachments";
@@ -296,6 +338,7 @@ function connectEvents() {
   const events = new EventSource(`/api/groups/${state.groupId}/events?token=${encodeURIComponent(state.token)}`);
   events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
+  events.addEventListener("message_updated", (event) => updateRenderedMessage(JSON.parse(event.data)));
   for (const eventName of ["member_joined", "member_left", "member_presence"]) {
     events.addEventListener(eventName, (event) => {
       applyMemberEvent(eventName, JSON.parse(event.data)).catch(() => {});
@@ -313,7 +356,9 @@ async function pollMessages() {
       if (state.cursor) query.set("after", state.cursor);
       const { messages, event, eventPayload } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
       messages.forEach(renderMessage);
-      if (event && event !== "message" && eventPayload) {
+      if (event === "message_updated" && eventPayload) {
+        updateRenderedMessage(eventPayload);
+      } else if (event && event !== "message" && eventPayload) {
         await applyMemberEvent(event, eventPayload);
       }
       markConnected();

@@ -164,13 +164,25 @@ async function askCodex(config, messages) {
   }
 }
 
-async function sendReply(config, text, replyTo) {
+async function sendReply(config, text, replyTo, status = "complete") {
   const form = new FormData();
   form.set("text", text);
+  form.set("status", status);
   if (replyTo) form.set("replyTo", replyTo);
   return relay(config, `/api/groups/${config.groupId}/messages`, {
     method: "POST",
     body: form
+  });
+}
+
+async function updateReply(config, messageId, text, status = "complete") {
+  return relay(config, `/api/groups/${config.groupId}/messages/${messageId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      text,
+      status,
+      expectedGroupId: config.groupId
+    })
   });
 }
 
@@ -197,10 +209,29 @@ async function main() {
         if (!messages.length) continue;
         currentStatus = "busy";
         await presence(config, "busy");
-        const reply = await askCodex(config, messages);
-        if (reply) {
-          await sendReply(config, reply, messages.at(-1)?.id);
+        const placeholder = await sendReply(
+          config,
+          "正在处理这个问题，请稍等…",
+          messages.at(-1)?.id,
+          "processing"
+        );
+        let reply;
+        try {
+          reply = await askCodex(config, messages);
+          if (reply) {
+            await updateReply(config, placeholder.message.id, reply, "complete");
+          } else {
+            await updateReply(config, placeholder.message.id, "暂时没有生成有效回复，请稍后再试。", "failed");
+          }
           console.log(JSON.stringify({ repliedTo: messages.map((message) => message.id), reply }));
+        } catch (error) {
+          await updateReply(
+            config,
+            placeholder.message.id,
+            `处理失败：${error.message}`,
+            "failed"
+          ).catch(() => {});
+          throw error;
         }
         currentStatus = "online";
         await presence(config, "online");
