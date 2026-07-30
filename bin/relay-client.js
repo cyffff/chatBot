@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 const args = process.argv.slice(2);
@@ -14,6 +15,7 @@ function globalOption(name) {
 }
 
 const sessionId = globalOption("session") ?? process.env.GROUP_RELAY_SESSION_ID ?? null;
+const connectionName = globalOption("connection") ?? null;
 const safeSessionId = sessionId?.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
 const configFile = path.resolve(
   process.env.GROUP_RELAY_AGENT_CONFIG
@@ -37,6 +39,7 @@ function flag(name) {
 }
 
 async function loadConfig() {
+  if (connectionName) return loadCodexConnection(connectionName);
   try {
     return JSON.parse(await fs.readFile(configFile, "utf8"));
   } catch (error) {
@@ -45,6 +48,37 @@ async function loadConfig() {
     }
     throw error;
   }
+}
+
+async function loadCodexConnection(name) {
+  const codexHome = process.env.CODEX_HOME
+    ? path.resolve(process.env.CODEX_HOME)
+    : path.join(os.homedir(), ".codex");
+  const source = await fs.readFile(path.join(codexHome, "config.toml"), "utf8");
+  const lines = source.split("\n");
+  const marker = `[mcp_servers.${name}]`;
+  const start = lines.indexOf(marker);
+  if (start < 0) throw new Error(`Codex MCP connection "${name}" was not found.`);
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (lines[index].startsWith("[") && !lines[index].startsWith(`[mcp_servers.${name}.`)) {
+      end = index;
+      break;
+    }
+  }
+  const section = lines.slice(start, end).join("\n");
+  const value = (key) => section.match(new RegExp(`${key}\\s*=\\s*"([^"]+)"`))?.[1];
+  const config = {
+    baseUrl: value("GROUP_RELAY_URL")?.replace(/\/$/, ""),
+    groupId: value("GROUP_RELAY_GROUP_ID"),
+    memberToken: value("GROUP_RELAY_MEMBER_TOKEN"),
+    connectionName: name,
+    cursor: null
+  };
+  if (!config.baseUrl || !config.groupId || !config.memberToken) {
+    throw new Error(`Codex MCP connection "${name}" is missing Group Relay settings.`);
+  }
+  return config;
 }
 
 async function saveConfig(config) {
@@ -222,6 +256,16 @@ async function sendText(config, text, files = []) {
 
 async function send() {
   const config = await loadConfig();
+  const expectedGroupId = option("expected-group");
+  if (connectionName && !expectedGroupId) {
+    throw new Error("--expected-group is required when sending through a named connection.");
+  }
+  if (expectedGroupId && expectedGroupId !== config.groupId) {
+    throw new Error(
+      `Refusing to send: connection "${connectionName ?? sessionId ?? "default"}" targets `
+      + `${config.groupId}, not expected group ${expectedGroupId}.`
+    );
+  }
   const files = [];
   while (args.includes("--file")) {
     const index = args.indexOf("--file");
@@ -230,7 +274,7 @@ async function send() {
   }
   const text = args.join(" ").trim();
   const result = await sendText(config, text, files);
-  await reportPresence(config, "online");
+  await reportPresence(config, "online", { persist: !connectionName });
   console.log(JSON.stringify(result, null, 2));
 }
 
@@ -304,8 +348,16 @@ async function presence() {
 async function history() {
   const config = await loadConfig();
   const limit = Math.min(Math.max(Number(option("limit", "100")), 1), 500);
-  const result = await request(config, `/api/groups/${config.groupId}/messages?limit=${limit}&routed=1`);
+  const after = option("after");
+  const query = new URLSearchParams({ limit: String(limit), routed: "1" });
+  if (after) query.set("after", after);
+  const [result, groupResult] = await Promise.all([
+    request(config, `/api/groups/${config.groupId}/messages?${query}`),
+    request(config, `/api/groups/${config.groupId}`)
+  ]);
   console.log(JSON.stringify({
+    connection: connectionName,
+    group: { id: groupResult.group.id, name: groupResult.group.name },
     messages: result.messages,
     cursor: result.cursor
   }, null, 2));
@@ -335,11 +387,13 @@ if (!commands[command]) {
   console.error(`Usage:
   npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--force]
   npm run relay -- status --session <session-id>
-  npm run relay -- history --session <session-id> [--limit 100]
+  npm run relay -- history --session <session-id> [--after <message-id>] [--limit 100]
   npm run relay -- wait --session <session-id> [--timeout 25000]
   npm run relay -- listen --session <session-id>
   npm run relay -- presence --session <session-id> --status online|busy
-  npm run relay -- send --session <session-id> <message> [--file <path>]`);
+  npm run relay -- send --session <session-id> <message> [--file <path>]
+  npm run relay -- history --connection <mcp-name> [--after <message-id>] [--limit 100]
+  npm run relay -- send --connection <mcp-name> --expected-group <group-id> <message> [--file <path>]`);
   process.exit(1);
 }
 

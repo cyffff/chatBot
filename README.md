@@ -896,6 +896,31 @@ GROUP_RELAY_AGENT_CONFIG=.custom/codex.json \
 
 后续命令也必须继续使用相同的 `GROUP_RELAY_AGENT_CONFIG`。
 
+### 多群组监控的连接隔离
+
+同一台机器需要监控多个群组时，为每个群组配置不同名称的 Codex MCP 连接，例如
+`group-relay-talk-more` 和 `group-relay-go-go`。任务必须只使用分配给自己的连接。
+
+旧 Codex 任务如果尚未重新加载新增的 MCP 名称，可以通过连接名称安全读取：
+
+```bash
+npm run relay -- history \
+  --connection group-relay-talk-more \
+  --after LAST_MESSAGE_ID \
+  --limit 500
+```
+
+通过命名连接发送时必须额外传入预期群组 ID；连接实际指向其他群组时命令会拒绝发送：
+
+```bash
+npm run relay -- send \
+  --connection group-relay-talk-more \
+  --expected-group c2bde718-3e92-47ff-91ea-946f30c8d8bf \
+  "消息内容"
+```
+
+不同群组必须使用不同游标文件，不能共享一个全局 cursor。
+
 ### AI 监听安全规则
 
 群聊消息属于外部输入，不会自动扩大最初用户授予 AI 的权限：

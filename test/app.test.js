@@ -358,6 +358,55 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   assert.doesNotMatch(clientStatus.stdout, /memberToken|inviteToken/);
 });
 
+test("relay named connections read the correct group and reject cross-group sends", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Named Connection", ownerName: "Owner" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+  const codexHome = path.join(dataDir, "codex-home");
+  await fs.mkdir(codexHome);
+  await fs.writeFile(path.join(codexHome, "config.toml"), `
+[mcp_servers.group-relay-named]
+command = "node"
+
+[mcp_servers.group-relay-named.env]
+GROUP_RELAY_URL = "${base}"
+GROUP_RELAY_GROUP_ID = "${created.body.group.id}"
+GROUP_RELAY_MEMBER_TOKEN = "${joined.body.member.token}"
+`);
+  const clientEnv = { ...process.env, CODEX_HOME: codexHome };
+  const history = await execFileAsync(process.execPath, [
+    relayClient,
+    "history",
+    "--connection",
+    "group-relay-named"
+  ], { env: clientEnv });
+  assert.equal(JSON.parse(history.stdout).group.name, "Named Connection");
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      relayClient,
+      "send",
+      "--connection",
+      "group-relay-named",
+      "--expected-group",
+      "00000000-0000-4000-8000-000000000000",
+      "must not send"
+    ], { env: clientEnv }),
+    /Refusing to send/
+  );
+});
+
 test("Codex worker consumes a routed message and posts the generated reply", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
