@@ -112,6 +112,7 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .account-actions .file-button { padding: 12px 14px; }
 .compact { margin: 10px 0; font-size: 13px; }
 .import-block { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e1e8e1; }
+.import-block .export-browser-sessions { margin-top: 10px; }
 .centered { width: fit-content; }
 .session-list { display: grid; gap: 10px; margin-top: 18px; }
 .session-card {

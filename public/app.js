@@ -100,6 +100,49 @@ async function linkCurrentSessionToAccount() {
   await importSessions([{ groupId: state.groupId, memberToken: state.token }]);
 }
 
+function downloadJson(value, filename) {
+  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportBrowserSessions() {
+  const sessions = localBrowserSessionCredentials();
+  if (!sessions.length) {
+    toast("当前浏览器没有找到群组会话");
+    return;
+  }
+  const enriched = await Promise.all(sessions.map(async (session) => {
+    try {
+      const response = await fetch(`/api/groups/${session.groupId}`, {
+        headers: { Authorization: `Bearer ${session.memberToken}` }
+      });
+      if (!response.ok) return { ...session, valid: false };
+      const { group } = await response.json();
+      return { ...session, groupName: group.name, valid: true };
+    } catch {
+      return { ...session, valid: false };
+    }
+  }));
+  const validSessions = enriched.filter((session) => session.valid).map(({ valid: _valid, ...session }) => session);
+  if (!validSessions.length) {
+    toast("浏览器中的会话已经失效");
+    return;
+  }
+  downloadJson({
+    format: "group-relay-browser-sessions",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    source: navigator.userAgent,
+    sessions: validSessions
+  }, `group-relay-browser-sessions-${new Date().toISOString().slice(0, 10)}.json`);
+  toast(`已导出 ${validSessions.length} 个浏览器会话`);
+}
+
 function saveSession() {
   localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ token: state.token }));
   if (state.inviteToken) {
@@ -517,8 +560,7 @@ async function showAccountView() {
   }
 }
 
-async function restoreAccountBackup(file) {
-  const backup = JSON.parse(await file.text());
+async function restoreAccountBackup(backup) {
   const accountToken = backup.accountToken ?? backup.account?.accountToken;
   if (!accountToken || !Array.isArray(backup.sessions)) {
     throw new Error("不是有效的 Group Relay 账户备份");
@@ -549,7 +591,27 @@ async function handleBackupInput(event) {
   event.target.value = "";
   if (!file) return;
   try {
-    await restoreAccountBackup(file);
+    const backup = JSON.parse(await file.text());
+    const hasAccount = Boolean(backup.accountToken ?? backup.account?.accountToken);
+    if (hasAccount) {
+      await restoreAccountBackup(backup);
+      return;
+    }
+    if (!Array.isArray(backup.sessions)) {
+      throw new Error("不是有效的 Group Relay 备份");
+    }
+    if (!state.accountToken && !loadAccountCredential()) {
+      throw new Error("请先在客户端创建或恢复邮箱账户");
+    }
+    const sessions = backup.sessions.map((session) => ({
+      groupId: session.groupId ?? session.group?.id,
+      memberToken: session.memberToken
+    })).filter((session) => session.groupId && session.memberToken);
+    if (!sessions.length) throw new Error("备份中没有有效会话");
+    const result = await importSessions(sessions);
+    await loadAccountDashboard();
+    $("#import-result").textContent = `浏览器备份已导入 ${result.imported} 个会话${result.rejected.length ? `，${result.rejected.length} 个已失效` : ""}。`;
+    toast(`已导入 ${result.imported} 个浏览器会话`);
   } catch (error) {
     toast(error.message);
   }
@@ -618,6 +680,9 @@ $("#export-account").addEventListener("click", async () => {
 
 $("#restore-account-file").addEventListener("change", handleBackupInput);
 $("#import-account-file").addEventListener("change", handleBackupInput);
+for (const button of document.querySelectorAll(".export-browser-sessions")) {
+  button.addEventListener("click", () => exportBrowserSessions().catch((error) => toast(error.message)));
+}
 
 $("#account-logout").addEventListener("click", () => {
   localStorage.removeItem(accountStorageKey);
@@ -749,6 +814,15 @@ $("#invite-button").addEventListener("click", async () => {
 });
 
 async function boot() {
+  const nativeMacClient = navigator.userAgent.includes("GroupRelayMac/");
+  const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
+  if (nativeMacClient) {
+    $("#client-tip-title").textContent = "从 Chrome 或 Safari 导入";
+    $("#client-tip-text").textContent = "macOS 会隔离不同应用的缓存。请在原浏览器导出当前浏览器会话，再回到这里点“导入 Chrome/Safari 或账户备份”。";
+  } else if (desktopMacBrowser) {
+    $("#client-tip-title").textContent = "迁移到 Mac 客户端";
+    $("#client-tip-text").textContent = "点击“导出当前浏览器会话”下载 JSON，然后在 Group Relay Mac 客户端中导入。";
+  }
   const parts = location.pathname.split("/").filter(Boolean);
   if (parts[0] === "app") {
     await showAccountView();

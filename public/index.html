@@ -58,8 +58,9 @@
             <button type="submit">创建本机账户</button>
           </form>
           <div class="import-block">
-            <p class="muted">已有账户？导入之前下载的账户备份恢复身份。</p>
+            <p class="muted">已有账户？导入账户备份恢复身份。要把 Chrome/Safari 会话带到 Mac 客户端，可先导出当前浏览器会话。</p>
             <label class="file-button centered">导入账户备份<input id="restore-account-file" type="file" accept="application/json,.json" /></label>
+            <button class="secondary export-browser-sessions" type="button">导出当前浏览器会话</button>
           </div>
         </div>
 
@@ -73,13 +74,14 @@
             <button id="account-logout" class="text-button" type="button">退出本机</button>
           </div>
           <div class="install-tip">
-            <strong>安装到 iPhone</strong>
-            <span>在 Safari 点“分享”，选择“添加到主屏幕”。请使用固定域名，临时 Cloudflare 地址变化后已安装客户端会失效。</span>
+            <strong id="client-tip-title">安装到 iPhone</strong>
+            <span id="client-tip-text">在 Safari 点“分享”，选择“添加到主屏幕”。请使用固定域名，临时 Cloudflare 地址变化后已安装客户端会失效。</span>
           </div>
           <div class="account-actions">
-            <button id="import-browser-sessions" type="button">导入本浏览器会话</button>
+            <button id="import-browser-sessions" type="button">扫描当前客户端缓存</button>
+            <button class="secondary export-browser-sessions" type="button">导出当前浏览器会话</button>
             <button id="export-account" class="secondary" type="button">下载账户备份</button>
-            <label class="file-button">导入备份<input id="import-account-file" type="file" accept="application/json,.json" /></label>
+            <label class="file-button">导入 Chrome/Safari 或账户备份<input id="import-account-file" type="file" accept="application/json,.json" /></label>
           </div>
           <p id="import-result" class="muted compact"></p>
           <div id="session-list" class="session-list"></div>
