@@ -146,6 +146,55 @@ test("email accounts import validated browser sessions and list joined groups", 
   assert.equal(unauthorized.response.status, 401);
 });
 
+test("one-click browser transfer imports sessions into the current account", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Chrome session", ownerName: "Yunfei" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "one-click@example.com" })
+  });
+  const transfer = await json(base, "/api/account/browser-transfers", {
+    method: "POST",
+    headers: { "X-Account-Token": account.body.accountToken },
+    body: "{}"
+  });
+  assert.equal(transfer.response.status, 201);
+  assert.match(transfer.body.transferUrl, /\/transfer\//);
+
+  const imported = await json(base, `/api/browser-transfers/${transfer.body.transferToken}/import`, {
+    method: "POST",
+    body: JSON.stringify({
+      sessions: [{
+        groupId: created.body.group.id,
+        memberToken: created.body.member.token
+      }]
+    })
+  });
+  assert.equal(imported.response.status, 200);
+  assert.equal(imported.body.status, "completed");
+  assert.equal(imported.body.imported, 1);
+
+  const status = await json(base, `/api/account/browser-transfers/${transfer.body.transferToken}`, {
+    headers: { "X-Account-Token": account.body.accountToken }
+  });
+  assert.equal(status.body.status, "completed");
+
+  const reused = await json(base, `/api/browser-transfers/${transfer.body.transferToken}/import`, {
+    method: "POST",
+    body: JSON.stringify({ sessions: [] })
+  });
+  assert.equal(reused.response.status, 409);
+
+  const sessions = await json(base, "/api/account/sessions", {
+    headers: { "X-Account-Token": account.body.accountToken }
+  });
+  assert.equal(sessions.body.sessions.length, 1);
+  assert.equal(sessions.body.sessions[0].group.name, "Chrome session");
+});
+
 test("long polling delivers a new message without refreshing", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

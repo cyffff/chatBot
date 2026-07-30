@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express from "express";
 import multer from "multer";
 import path from "node:path";
@@ -34,6 +35,13 @@ const sessionImportSchema = z.object({
   })).min(1).max(200)
 });
 
+const browserTransferImportSchema = z.object({
+  sessions: z.array(z.object({
+    groupId: z.string().uuid(),
+    memberToken: z.string().min(1).max(200)
+  })).max(200)
+});
+
 const joinSchema = z.object({
   name: z.string().trim().min(1).max(60),
   type: z.enum(["human", "ai"]).default("human"),
@@ -60,6 +68,7 @@ export async function createApp(options = {}) {
   app.set("trust proxy", 1);
   const subscribers = new Map();
   const waiters = new Map();
+  const browserTransfers = new Map();
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: maxFileSize, files: 10 }
@@ -141,6 +150,15 @@ export async function createApp(options = {}) {
       });
     }
     return sessions;
+  }
+
+  function activeBrowserTransfer(token) {
+    const transfer = browserTransfers.get(token);
+    if (!transfer) return null;
+    if (Date.now() > transfer.expiresAt) {
+      transfer.status = "expired";
+    }
+    return transfer;
   }
 
   function publish(groupId, event, payload) {
@@ -256,6 +274,75 @@ export async function createApp(options = {}) {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const removed = await store.unlinkAccountMembership(req.account.id, groupId);
       res.json({ removed });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/account/browser-transfers", requireAccount, (req, res) => {
+    const transferToken = crypto.randomBytes(24).toString("base64url");
+    const transfer = {
+      token: transferToken,
+      accountId: req.account.id,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      expiresAt: Date.now() + 5 * 60_000,
+      imported: 0,
+      rejected: []
+    };
+    browserTransfers.set(transferToken, transfer);
+    res.status(201).json({
+      transferToken,
+      transferUrl: `${publicBaseUrl(req)}/transfer/${transferToken}`,
+      expiresAt: new Date(transfer.expiresAt).toISOString()
+    });
+  });
+
+  app.get("/api/account/browser-transfers/:transferToken", requireAccount, (req, res) => {
+    const transfer = activeBrowserTransfer(req.params.transferToken);
+    if (!transfer || transfer.accountId !== req.account.id) {
+      return res.status(404).json({ error: "browser transfer not found" });
+    }
+    res.json({
+      status: transfer.status,
+      imported: transfer.imported,
+      rejected: transfer.rejected,
+      expiresAt: new Date(transfer.expiresAt).toISOString()
+    });
+  });
+
+  app.post("/api/browser-transfers/:transferToken/import", async (req, res, next) => {
+    try {
+      const transfer = activeBrowserTransfer(req.params.transferToken);
+      if (!transfer) return res.status(404).json({ error: "browser transfer not found" });
+      if (transfer.status === "expired") return res.status(410).json({ error: "browser transfer expired" });
+      if (transfer.status !== "pending") return res.status(409).json({ error: "browser transfer already used" });
+      const { sessions } = browserTransferImportSchema.parse(req.body);
+      const account = (await store.accounts())[transfer.accountId];
+      if (!account) return res.status(404).json({ error: "account not found" });
+      const accepted = [];
+      const rejected = [];
+      for (const session of sessions) {
+        const member = await store.authenticate(session.groupId, session.memberToken).catch(() => null);
+        if (!member) {
+          rejected.push({ groupId: session.groupId, reason: "invalid group or member token" });
+          continue;
+        }
+        accepted.push({
+          groupId: session.groupId,
+          memberId: member.id,
+          memberToken: session.memberToken
+        });
+      }
+      if (accepted.length) await store.linkAccountMemberships(account.id, accepted);
+      transfer.status = accepted.length ? "completed" : "failed";
+      transfer.imported = accepted.length;
+      transfer.rejected = rejected;
+      res.json({
+        status: transfer.status,
+        imported: transfer.imported,
+        rejected
+      });
     } catch (error) {
       next(error);
     }
@@ -547,6 +634,7 @@ export async function createApp(options = {}) {
   app.get("/join/:inviteToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/group/:groupId", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/app", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
+  app.get("/transfer/:transferToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
 
   app.use((error, _req, res, _next) => {
     if (error instanceof z.ZodError) {

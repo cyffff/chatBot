@@ -3,7 +3,7 @@ import WebKit
 
 private let serverPreferenceKey = "GroupRelayServerURL"
 
-final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKDownloadDelegate {
+final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     private let webView: WKWebView
     private var serverURL: URL
 
@@ -31,6 +31,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         super.init(window: window)
         window.delegate = self
         webView.navigationDelegate = self
+        configuration.userContentController.add(self, name: "relayNative")
         webView.customUserAgent = "\(webView.value(forKey: "userAgent") ?? "") GroupRelayMac/1.0"
     }
 
@@ -99,6 +100,22 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         serverURL = url
         UserDefaults.standard.set(url.absoluteString, forKey: serverPreferenceKey)
         loadClient()
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard
+            message.name == "relayNative",
+            let body = message.body as? [String: Any],
+            body["action"] as? String == "openExternal",
+            let rawURL = body["url"] as? String,
+            let url = URL(string: rawURL),
+            ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+            url.host == serverURL.host,
+            url.path.hasPrefix("/transfer/")
+        else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func showError(_ title: String, detail: String) {

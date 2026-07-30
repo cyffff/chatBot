@@ -14,7 +14,7 @@ const state = {
 };
 
 const accountStorageKey = "relay-account-v1";
-const views = ["#create-view", "#join-view", "#invalid-view", "#account-view", "#chat-view"];
+const views = ["#create-view", "#join-view", "#invalid-view", "#account-view", "#transfer-view", "#chat-view"];
 function show(selector) {
   views.forEach((view) => $(view).classList.toggle("hidden", view !== selector));
 }
@@ -98,49 +98,6 @@ async function importSessions(sessions) {
 async function linkCurrentSessionToAccount() {
   if (!loadAccountCredential() || !state.groupId || !state.token) return;
   await importSessions([{ groupId: state.groupId, memberToken: state.token }]);
-}
-
-function downloadJson(value, filename) {
-  const blob = new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-async function exportBrowserSessions() {
-  const sessions = localBrowserSessionCredentials();
-  if (!sessions.length) {
-    toast("当前浏览器没有找到群组会话");
-    return;
-  }
-  const enriched = await Promise.all(sessions.map(async (session) => {
-    try {
-      const response = await fetch(`/api/groups/${session.groupId}`, {
-        headers: { Authorization: `Bearer ${session.memberToken}` }
-      });
-      if (!response.ok) return { ...session, valid: false };
-      const { group } = await response.json();
-      return { ...session, groupName: group.name, valid: true };
-    } catch {
-      return { ...session, valid: false };
-    }
-  }));
-  const validSessions = enriched.filter((session) => session.valid).map(({ valid: _valid, ...session }) => session);
-  if (!validSessions.length) {
-    toast("浏览器中的会话已经失效");
-    return;
-  }
-  downloadJson({
-    format: "group-relay-browser-sessions",
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    source: navigator.userAgent,
-    sessions: validSessions
-  }, `group-relay-browser-sessions-${new Date().toISOString().slice(0, 10)}.json`);
-  toast(`已导出 ${validSessions.length} 个浏览器会话`);
 }
 
 function saveSession() {
@@ -635,18 +592,51 @@ $("#account-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("#import-browser-sessions").addEventListener("click", async () => {
-  try {
-    const sessions = localBrowserSessionCredentials();
-    if (!sessions.length) {
-      $("#import-result").textContent = "当前域名下没有找到可导入的浏览器会话。可在原浏览器下载账户备份，再在这里导入。";
+async function waitForBrowserTransfer(transferToken) {
+  const deadline = Date.now() + 5 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const result = await accountApi(`/api/account/browser-transfers/${transferToken}`);
+    if (result.status === "pending") continue;
+    if (result.status === "completed") {
+      $("#import-result").textContent = `已从浏览器自动导入 ${result.imported} 个会话。`;
+      await loadAccountDashboard();
+      toast(`已导入 ${result.imported} 个会话`);
       return;
     }
-    const result = await importSessions(sessions);
-    $("#import-result").textContent = `已导入 ${result.imported} 个会话${result.rejected.length ? `，${result.rejected.length} 个已失效` : ""}。`;
-    await loadAccountDashboard();
+    throw new Error(result.status === "expired" ? "浏览器导入已超时，请重试" : "浏览器中没有可导入的有效会话");
+  }
+  throw new Error("浏览器导入已超时，请重试");
+}
+
+$("#start-browser-transfer").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  $("#import-result").textContent = "正在打开浏览器…";
+  let browserWindow = null;
+  const nativeBridge = window.webkit?.messageHandlers?.relayNative;
+  if (!nativeBridge) browserWindow = window.open("about:blank", "_blank");
+  try {
+    const transfer = await accountApi("/api/account/browser-transfers", {
+      method: "POST",
+      body: "{}"
+    });
+    if (nativeBridge) {
+      nativeBridge.postMessage({ action: "openExternal", url: transfer.transferUrl });
+    } else if (browserWindow) {
+      browserWindow.location = transfer.transferUrl;
+    } else {
+      location.href = transfer.transferUrl;
+      return;
+    }
+    $("#import-result").textContent = "浏览器已打开，正在等待自动导入…";
+    await waitForBrowserTransfer(transfer.transferToken);
   } catch (error) {
+    browserWindow?.close();
+    $("#import-result").textContent = error.message;
     toast(error.message);
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -680,9 +670,6 @@ $("#export-account").addEventListener("click", async () => {
 
 $("#restore-account-file").addEventListener("change", handleBackupInput);
 $("#import-account-file").addEventListener("change", handleBackupInput);
-for (const button of document.querySelectorAll(".export-browser-sessions")) {
-  button.addEventListener("click", () => exportBrowserSessions().catch((error) => toast(error.message)));
-}
 
 $("#account-logout").addEventListener("click", () => {
   localStorage.removeItem(accountStorageKey);
@@ -817,13 +804,39 @@ async function boot() {
   const nativeMacClient = navigator.userAgent.includes("GroupRelayMac/");
   const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
   if (nativeMacClient) {
-    $("#client-tip-title").textContent = "从 Chrome 或 Safari 导入";
-    $("#client-tip-text").textContent = "macOS 会隔离不同应用的缓存。请在原浏览器导出当前浏览器会话，再回到这里点“导入 Chrome/Safari 或账户备份”。";
+    $("#client-tip-title").textContent = "一键从浏览器导入";
+    $("#client-tip-text").textContent = "点击下方按钮会自动打开默认浏览器；浏览器读取自己的会话后自动传回客户端，无需下载或选择文件。";
   } else if (desktopMacBrowser) {
-    $("#client-tip-title").textContent = "迁移到 Mac 客户端";
-    $("#client-tip-text").textContent = "点击“导出当前浏览器会话”下载 JSON，然后在 Group Relay Mac 客户端中导入。";
+    $("#client-tip-title").textContent = "浏览器会话";
+    $("#client-tip-text").textContent = "这个页面会在 Mac 客户端发起迁移时自动打开并导入，无需手工导出文件。";
   }
   const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] === "transfer" && parts[1]) {
+    show("#transfer-view");
+    try {
+      const sessions = localBrowserSessionCredentials();
+      const response = await fetch(`/api/browser-transfers/${encodeURIComponent(parts[1])}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessions })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "浏览器会话导入失败");
+      if (result.status === "completed") {
+        $("#transfer-title").textContent = "会话已自动导入";
+        $("#transfer-message").textContent = `已成功导入 ${result.imported} 个会话。即将返回 Group Relay 客户端。`;
+        $(".transfer-loader").classList.add("complete");
+        setTimeout(() => window.close(), 1500);
+      } else {
+        throw new Error("这个浏览器没有可导入的有效会话");
+      }
+    } catch (error) {
+      $("#transfer-title").textContent = "无法导入会话";
+      $("#transfer-message").textContent = error.message;
+      $(".transfer-loader").classList.add("failed");
+    }
+    return;
+  }
   if (parts[0] === "app") {
     await showAccountView();
     return;
