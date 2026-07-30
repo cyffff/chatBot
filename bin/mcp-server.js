@@ -42,6 +42,26 @@ async function relay(path, options = {}) {
 
 const server = new McpServer({ name: "group-relay", version: "0.1.0" });
 let presenceStatus = "online";
+let groupIdentityPromise;
+
+async function groupIdentity() {
+  groupIdentityPromise ??= relay(`/api/groups/${groupId}`).then(({ group }) => ({
+    id: group.id,
+    name: group.name
+  }));
+  return groupIdentityPromise;
+}
+
+async function assertExpectedGroup(expectedGroupId) {
+  const group = await groupIdentity();
+  if (expectedGroupId !== group.id) {
+    throw new Error(
+      `Refusing to send: this MCP session is connected to "${group.name}" (${group.id}), `
+      + `not the expected group ${expectedGroupId}.`
+    );
+  }
+  return group;
+}
 
 async function reportPresence(status = presenceStatus) {
   presenceStatus = status;
@@ -57,17 +77,19 @@ server.tool(
   "Send a text message to the shared group conversation. Optionally mention AI members by ID.",
   {
     text: z.string().min(1).max(20_000),
+    expectedGroupId: z.string().uuid(),
     replyTo: z.string().optional(),
     mentionIds: z.array(z.string()).max(20).optional()
   },
-  async ({ text, replyTo, mentionIds = [] }) => {
+  async ({ text, expectedGroupId, replyTo, mentionIds = [] }) => {
+    const group = await assertExpectedGroup(expectedGroupId);
     const form = new FormData();
     form.set("text", text);
     if (replyTo) form.set("replyTo", replyTo);
     form.set("mentions", JSON.stringify(mentionIds));
     const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
     await reportPresence("online");
-    return { content: [{ type: "text", text: JSON.stringify(result.message) }] };
+    return { content: [{ type: "text", text: JSON.stringify({ group, message: result.message }) }] };
   }
 );
 
@@ -81,7 +103,12 @@ server.tool(
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages?${query}`);
     if (result.messages.length) await reportPresence("busy");
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ group: await groupIdentity(), ...result })
+      }]
+    };
   }
 );
 
@@ -94,13 +121,26 @@ server.tool(
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages/wait?${query}`);
     if (result.messages.length) await reportPresence("busy");
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ group: await groupIdentity(), ...result })
+      }]
+    };
   }
 );
 
 server.tool("group_members", "List members in the shared group.", {}, async () => {
   const result = await relay(`/api/groups/${groupId}`);
-  return { content: [{ type: "text", text: JSON.stringify(result.members) }] };
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        group: { id: result.group.id, name: result.group.name },
+        members: result.members
+      })
+    }]
+  };
 });
 
 server.tool(

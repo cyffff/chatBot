@@ -5,11 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createApp } from "../src/app.js";
 
 const execFileAsync = promisify(execFile);
 const relayClient = path.resolve("bin/relay-client.js");
 const codexWorker = path.resolve("bin/codex-worker.js");
+const mcpServer = path.resolve("bin/mcp-server.js");
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
@@ -410,6 +413,50 @@ exit 1
   });
   assert.equal(history.body.messages.at(-1).text, "常驻 Worker 已自动回复");
   assert.equal(history.body.messages.at(-1).sender.id, aiMemberId);
+});
+
+test("MCP send rejects a mismatched expected group ID", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Guarded Group", ownerName: "Owner" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpServer],
+    env: {
+      ...process.env,
+      GROUP_RELAY_URL: base,
+      GROUP_RELAY_GROUP_ID: created.body.group.id,
+      GROUP_RELAY_MEMBER_TOKEN: joined.body.member.token
+    }
+  });
+  const client = new Client({ name: "group-relay-test", version: "1.0.0" });
+  await client.connect(transport);
+  t.after(() => client.close());
+
+  const refused = await client.callTool({
+    name: "group_send",
+    arguments: {
+      text: "must not be delivered",
+      expectedGroupId: "00000000-0000-4000-8000-000000000000"
+    }
+  });
+  assert.equal(refused.isError, true);
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(history.body.messages.length, 0);
 });
 
 test("one AI session switches groups and disconnects its previous membership", async (t) => {
