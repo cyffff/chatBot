@@ -2,6 +2,7 @@ node_modules/
 data/
 build/
 dist/
+windows/publish/
 .env
 .group-relay-agent.json
 .group-relay-agent.json.presence

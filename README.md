@@ -372,6 +372,39 @@ dist/Group-Relay-macOS-arm64.dmg
 软件一样双击安装且不出现 Gatekeeper 警告，需要 Apple Developer ID
 `Developer ID Application` 证书签名，并使用 Apple Notary Service 公证 DMG。
 
+## Windows 原生客户端
+
+`windows/` 目录包含 .NET 8 WinForms + Microsoft WebView2 原生客户端和 Inno Setup
+安装器。发布产物是：
+
+```text
+Group-Relay-Windows-x64-Setup.exe
+```
+
+适用于 64 位 Windows 10/11。安装器包含自带的 .NET 运行时，不要求用户另行安装
+.NET。系统需要 Microsoft Edge WebView2 Runtime；正常更新的 Windows 10/11 通常
+已经预装。
+
+客户端支持：
+
+- 邮箱账户和已加入会话列表
+- 持久化的独立 WebView2 登录数据
+- 一个按钮自动打开 Google Chrome 并导入浏览器会话
+- Chrome 未安装时回退到系统默认浏览器
+- “Group Relay → 服务器设置…”切换服务地址
+- 当前用户目录安装，不要求管理员权限
+- 开始菜单和可选桌面快捷方式
+
+Windows 安装包由 GitHub Actions 的真实 `windows-latest` 构建机生成：
+
+```bash
+gh workflow run windows-client.yml --repo cyffff/chatBot
+```
+
+工作流执行 `dotnet publish --runtime win-x64 --self-contained true`，然后使用 Inno
+Setup 打包安装器并生成 SHA-256 校验文件。当前安装器未购买代码签名证书，Windows
+SmartScreen 可能提示“未知发布者”；确认安装包来自本仓库 Release 后可选择继续运行。
+
 ## 连接 AI 成员
 
 AI 接入分为两步：

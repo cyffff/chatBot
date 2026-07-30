@@ -614,7 +614,7 @@ $("#start-browser-transfer").addEventListener("click", async (event) => {
   button.disabled = true;
   $("#import-result").textContent = "正在打开浏览器…";
   let browserWindow = null;
-  const nativeBridge = window.webkit?.messageHandlers?.relayNative;
+  const nativeBridge = window.webkit?.messageHandlers?.relayNative ?? window.chrome?.webview;
   if (!nativeBridge) browserWindow = window.open("about:blank", "_blank");
   try {
     const transfer = await accountApi("/api/account/browser-transfers", {
@@ -802,8 +802,9 @@ $("#invite-button").addEventListener("click", async () => {
 
 async function boot() {
   const nativeMacClient = navigator.userAgent.includes("GroupRelayMac/");
+  const nativeWindowsClient = navigator.userAgent.includes("GroupRelayWindows/");
   const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
-  if (nativeMacClient) {
+  if (nativeMacClient || nativeWindowsClient) {
     $("#client-tip-title").textContent = "一键从浏览器导入";
     $("#client-tip-text").textContent = "点击下方按钮会自动打开 Chrome；Chrome 读取自己的会话后自动传回客户端，无需下载或选择文件。";
   } else if (desktopMacBrowser) {

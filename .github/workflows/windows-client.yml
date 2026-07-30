@@ -1,0 +1,57 @@
+name: Build Windows client
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish self-contained Windows x64 client
+        shell: pwsh
+        run: |
+          dotnet restore windows/GroupRelay.Windows.csproj
+          dotnet publish windows/GroupRelay.Windows.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output windows/publish `
+            -p:PublishReadyToRun=true
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $publishDir = (Resolve-Path "windows/publish").Path
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $compiler "/DSourceDir=$publishDir" "windows/Installer.iss"
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $installer = "windows/dist/Group-Relay-Windows-x64-Setup.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          "$hash  Group-Relay-Windows-x64-Setup.exe" |
+            Out-File "windows/dist/Group-Relay-Windows-x64-Setup.exe.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Group-Relay-Windows-x64
+          path: |
+            windows/dist/Group-Relay-Windows-x64-Setup.exe
+            windows/dist/Group-Relay-Windows-x64-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
