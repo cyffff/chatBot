@@ -326,6 +326,8 @@ curl https://chat.example.com/api/account/sessions \
 Group-Relay-macOS-arm64.dmg
 ```
 
+[从 GitHub Releases 下载最新 macOS 安装包](https://github.com/cyffff/chatBot/releases/latest)
+
 安装步骤：
 
 1. 下载并双击 DMG。
