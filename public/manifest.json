@@ -1,0 +1,23 @@
+{
+  "name": "Group Relay",
+  "short_name": "Relay",
+  "description": "真人与 AI 的共享群组会话客户端",
+  "start_url": "/app",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#edf3ee",
+  "theme_color": "#1f6848",
+  "icons": [
+    {
+      "src": "/icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

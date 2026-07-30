@@ -8,10 +8,13 @@ const state = {
   realtimeStarted: false,
   presenceRefreshStarted: false,
   memberId: null,
-  members: []
+  members: [],
+  account: null,
+  accountToken: null
 };
 
-const views = ["#create-view", "#join-view", "#invalid-view", "#chat-view"];
+const accountStorageKey = "relay-account-v1";
+const views = ["#create-view", "#join-view", "#invalid-view", "#account-view", "#chat-view"];
 function show(selector) {
   views.forEach((view) => $(view).classList.toggle("hidden", view !== selector));
 }
@@ -31,6 +34,70 @@ async function api(url, options = {}) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`);
   return body;
+}
+
+async function accountApi(url, options = {}) {
+  const headers = new Headers(options.headers);
+  if (state.accountToken) headers.set("X-Account-Token", state.accountToken);
+  if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
+  const response = await fetch(url, { ...options, headers });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`);
+  return body;
+}
+
+function loadAccountCredential() {
+  try {
+    const credential = JSON.parse(localStorage.getItem(accountStorageKey) || "null");
+    if (!credential?.accountToken) return false;
+    state.accountToken = credential.accountToken;
+    return true;
+  } catch {
+    localStorage.removeItem(accountStorageKey);
+    return false;
+  }
+}
+
+function saveAccountCredential(account, accountToken) {
+  state.account = account;
+  state.accountToken = accountToken;
+  localStorage.setItem(accountStorageKey, JSON.stringify({
+    email: account.email,
+    accountToken
+  }));
+}
+
+function localBrowserSessionCredentials() {
+  const sessions = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    const match = key?.match(/^relay:([0-9a-f-]{36})$/i);
+    if (!match) continue;
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || "null");
+      if (saved?.token) sessions.push({ groupId: match[1], memberToken: saved.token });
+    } catch {
+      // Ignore malformed legacy cache entries.
+    }
+  }
+  return sessions;
+}
+
+async function importSessions(sessions) {
+  if (!sessions.length) return { imported: 0, rejected: [], sessions: [] };
+  const result = await accountApi("/api/account/sessions/import", {
+    method: "POST",
+    body: JSON.stringify({ sessions })
+  });
+  for (const session of result.sessions) {
+    localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
+  }
+  return result;
+}
+
+async function linkCurrentSessionToAccount() {
+  if (!loadAccountCredential() || !state.groupId || !state.token) return;
+  await importSessions([{ groupId: state.groupId, memberToken: state.token }]);
 }
 
 function saveSession() {
@@ -370,6 +437,197 @@ async function pollMessages() {
   }
 }
 
+function renderAccountSessions(sessions) {
+  const list = $("#session-list");
+  list.innerHTML = "";
+  $("#empty-sessions").classList.toggle("hidden", sessions.length !== 0);
+  for (const session of sessions) {
+    const item = document.createElement("article");
+    item.className = "session-card";
+    const details = document.createElement("div");
+    const title = document.createElement("h2");
+    title.textContent = session.group.name;
+    const meta = document.createElement("p");
+    meta.textContent = `${displayName(session.member)} · 加入于 ${new Date(session.linkedAt).toLocaleDateString()}`;
+    details.append(title, meta);
+    const actions = document.createElement("div");
+    actions.className = "session-actions";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.textContent = "打开";
+    open.addEventListener("click", () => {
+      localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
+      location.href = `/group/${session.group.id}`;
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "text-button";
+    remove.textContent = "移出列表";
+    remove.addEventListener("click", async () => {
+      try {
+        await accountApi(`/api/account/sessions/${session.group.id}`, { method: "DELETE" });
+        await loadAccountDashboard();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+    actions.append(open, remove);
+    item.append(details, actions);
+    list.append(item);
+  }
+}
+
+async function loadAccountDashboard() {
+  const [{ account }, { sessions }] = await Promise.all([
+    accountApi("/api/account"),
+    accountApi("/api/account/sessions")
+  ]);
+  state.account = account;
+  $("#account-email").textContent = account.email;
+  for (const session of sessions) {
+    localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
+  }
+  renderAccountSessions(sessions);
+  $("#account-register").classList.add("hidden");
+  $("#account-dashboard").classList.remove("hidden");
+  show("#account-view");
+  return sessions;
+}
+
+async function showAccountView() {
+  show("#account-view");
+  if (!loadAccountCredential()) {
+    $("#account-register").classList.remove("hidden");
+    $("#account-dashboard").classList.add("hidden");
+    return;
+  }
+  try {
+    await loadAccountDashboard();
+  } catch (error) {
+    if (error.message === "invalid account token") {
+      localStorage.removeItem(accountStorageKey);
+      state.account = null;
+      state.accountToken = null;
+      $("#account-register").classList.remove("hidden");
+      $("#account-dashboard").classList.add("hidden");
+      toast("账户密钥已失效，请导入账户备份");
+      return;
+    }
+    toast(error.message);
+  }
+}
+
+async function restoreAccountBackup(file) {
+  const backup = JSON.parse(await file.text());
+  const accountToken = backup.accountToken ?? backup.account?.accountToken;
+  if (!accountToken || !Array.isArray(backup.sessions)) {
+    throw new Error("不是有效的 Group Relay 账户备份");
+  }
+  const previousToken = state.accountToken;
+  const previousAccount = state.account;
+  state.accountToken = accountToken;
+  let account;
+  try {
+    ({ account } = await accountApi("/api/account"));
+  } catch (error) {
+    state.accountToken = previousToken;
+    state.account = previousAccount;
+    throw error;
+  }
+  saveAccountCredential(account, accountToken);
+  const sessions = backup.sessions.map((session) => ({
+    groupId: session.groupId ?? session.group?.id,
+    memberToken: session.memberToken
+  })).filter((session) => session.groupId && session.memberToken);
+  if (sessions.length) await importSessions(sessions);
+  await loadAccountDashboard();
+  toast("账户和会话已恢复");
+}
+
+async function handleBackupInput(event) {
+  const [file] = event.target.files;
+  event.target.value = "";
+  if (!file) return;
+  try {
+    await restoreAccountBackup(file);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+$("#account-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = new FormData(event.currentTarget).get("email");
+  try {
+    const { account, accountToken } = await accountApi("/api/accounts", {
+      method: "POST",
+      body: JSON.stringify({ email })
+    });
+    saveAccountCredential(account, accountToken);
+    const cached = localBrowserSessionCredentials();
+    const imported = cached.length ? (await importSessions(cached)).imported : 0;
+    await loadAccountDashboard();
+    toast(imported ? `账户已创建，已导入 ${imported} 个会话` : "账户已创建");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#import-browser-sessions").addEventListener("click", async () => {
+  try {
+    const sessions = localBrowserSessionCredentials();
+    if (!sessions.length) {
+      $("#import-result").textContent = "当前域名下没有找到可导入的浏览器会话。可在原浏览器下载账户备份，再在这里导入。";
+      return;
+    }
+    const result = await importSessions(sessions);
+    $("#import-result").textContent = `已导入 ${result.imported} 个会话${result.rejected.length ? `，${result.rejected.length} 个已失效` : ""}。`;
+    await loadAccountDashboard();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#export-account").addEventListener("click", async () => {
+  try {
+    const { sessions } = await accountApi("/api/account/sessions");
+    const backup = {
+      format: "group-relay-account",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      email: state.account.email,
+      accountToken: state.accountToken,
+      sessions: sessions.map((session) => ({
+        groupId: session.group.id,
+        groupName: session.group.name,
+        memberToken: session.memberToken
+      }))
+    };
+    const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `group-relay-${state.account.email.replace(/[^a-z0-9._-]/gi, "_")}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("账户备份已下载，请安全保存");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#restore-account-file").addEventListener("change", handleBackupInput);
+$("#import-account-file").addEventListener("change", handleBackupInput);
+
+$("#account-logout").addEventListener("click", () => {
+  localStorage.removeItem(accountStorageKey);
+  state.account = null;
+  state.accountToken = null;
+  $("#account-dashboard").classList.add("hidden");
+  $("#account-register").classList.remove("hidden");
+  toast("已从这台设备退出");
+});
+
 $("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -382,6 +640,7 @@ $("#create-form").addEventListener("submit", async (event) => {
     state.token = result.member.token;
     state.inviteToken = result.group.inviteToken;
     saveSession();
+    await linkCurrentSessionToAccount().catch(() => {});
     history.replaceState({}, "", `/group/${state.groupId}`);
     await navigator.clipboard?.writeText(result.inviteUrl);
     await loadChat();
@@ -408,6 +667,7 @@ $("#join-form").addEventListener("submit", async (event) => {
     state.groupId = result.group.id;
     state.token = result.member.token;
     saveSession();
+    await linkCurrentSessionToAccount().catch(() => {});
     history.replaceState({}, "", `/group/${state.groupId}`);
     await loadChat();
   } catch (error) {
@@ -490,6 +750,10 @@ $("#invite-button").addEventListener("click", async () => {
 
 async function boot() {
   const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] === "app") {
+    await showAccountView();
+    return;
+  }
   if (parts[0] === "join" && parts[1]) {
     state.inviteToken = parts[1];
     const mappedGroupId = localStorage.getItem(`relay-invite:${state.inviteToken}`);
@@ -513,6 +777,12 @@ async function boot() {
     if (await resumeSession(parts[1])) return;
   }
   show("#create-view");
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+  });
 }
 
 boot();

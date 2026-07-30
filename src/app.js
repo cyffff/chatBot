@@ -23,6 +23,17 @@ const createGroupSchema = z.object({
   ownerName: z.string().trim().min(1).max(60)
 });
 
+const accountSchema = z.object({
+  email: z.string().trim().email().max(254)
+});
+
+const sessionImportSchema = z.object({
+  sessions: z.array(z.object({
+    groupId: z.string().uuid(),
+    memberToken: z.string().min(1).max(200)
+  })).min(1).max(200)
+});
+
 const joinSchema = z.object({
   name: z.string().trim().min(1).max(60),
   type: z.enum(["human", "ai"]).default("human"),
@@ -74,6 +85,12 @@ export async function createApp(options = {}) {
     return req.get("x-member-token") || req.query.token;
   };
 
+  const accountTokenFrom = (req) => {
+    const authorization = req.get("authorization");
+    if (authorization?.startsWith("Bearer ")) return authorization.slice(7);
+    return req.get("x-account-token");
+  };
+
   async function requireMember(req, res, next) {
     try {
       const member = await store.authenticate(req.params.groupId, tokenFrom(req));
@@ -83,6 +100,47 @@ export async function createApp(options = {}) {
     } catch (error) {
       next(error);
     }
+  }
+
+  async function requireAccount(req, res, next) {
+    try {
+      const account = await store.authenticateAccount(accountTokenFrom(req));
+      if (!account) return res.status(401).json({ error: "invalid account token" });
+      req.account = account;
+      next();
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  function publicAccount(account) {
+    return {
+      id: account.id,
+      email: account.email,
+      createdAt: account.createdAt
+    };
+  }
+
+  async function accountSessions(account) {
+    const sessions = [];
+    for (const membership of account.memberships ?? []) {
+      const [group, member] = await Promise.all([
+        store.getGroup(membership.groupId),
+        store.authenticate(membership.groupId, membership.memberToken).catch(() => null)
+      ]);
+      if (!group || !member || member.id !== membership.memberId) continue;
+      sessions.push({
+        group: {
+          id: group.id,
+          name: group.name,
+          createdAt: group.createdAt
+        },
+        member: publicMember(member),
+        memberToken: membership.memberToken,
+        linkedAt: membership.linkedAt
+      });
+    }
+    return sessions;
   }
 
   function publish(groupId, event, payload) {
@@ -132,6 +190,76 @@ export async function createApp(options = {}) {
   }
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
+
+  app.post("/api/accounts", async (req, res, next) => {
+    try {
+      const { email } = accountSchema.parse(req.body);
+      const account = await store.createAccount(email);
+      if (!account) {
+        return res.status(409).json({
+          error: "email already registered; restore this account with its account backup"
+        });
+      }
+      res.status(201).json({
+        account: publicAccount(account),
+        accountToken: account.token
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/account", requireAccount, (req, res) => {
+    res.json({ account: publicAccount(req.account) });
+  });
+
+  app.get("/api/account/sessions", requireAccount, async (req, res, next) => {
+    try {
+      res.json({ sessions: await accountSessions(req.account) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/account/sessions/import", requireAccount, async (req, res, next) => {
+    try {
+      const { sessions } = sessionImportSchema.parse(req.body);
+      const accepted = [];
+      const rejected = [];
+      for (const session of sessions) {
+        const member = await store.authenticate(session.groupId, session.memberToken).catch(() => null);
+        if (!member) {
+          rejected.push({ groupId: session.groupId, reason: "invalid group or member token" });
+          continue;
+        }
+        accepted.push({
+          groupId: session.groupId,
+          memberId: member.id,
+          memberToken: session.memberToken
+        });
+      }
+      if (accepted.length) {
+        req.account = await store.linkAccountMemberships(req.account.id, accepted);
+      }
+      res.json({
+        imported: accepted.length,
+        rejected,
+        sessions: await accountSessions(req.account)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete("/api/account/sessions/:groupId", requireAccount, async (req, res, next) => {
+    try {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const removed = await store.unlinkAccountMembership(req.account.id, groupId);
+      res.json({ removed });
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.post("/api/groups", async (req, res, next) => {
     try {
@@ -418,6 +546,7 @@ export async function createApp(options = {}) {
 
   app.get("/join/:inviteToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/group/:groupId", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
+  app.get("/app", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
 
   app.use((error, _req, res, _next) => {
     if (error instanceof z.ZodError) {

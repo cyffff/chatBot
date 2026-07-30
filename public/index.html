@@ -4,7 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#1f6848" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Group Relay" />
     <title>Group Relay</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
@@ -13,6 +19,7 @@
         <p class="eyebrow">GROUP RELAY</p>
         <h1>创建一个共享对话</h1>
         <p class="muted">真人、Codex、Claude 和 Cursor 都可以成为群组成员。</p>
+        <a class="button-link secondary-link" href="/app">打开我的会话</a>
         <form id="create-form">
           <label>群组名称<input name="name" required maxlength="80" placeholder="例如：支付重构讨论" /></label>
           <label>你的名字<input name="ownerName" required maxlength="60" placeholder="例如：Yunfei" /></label>
@@ -41,6 +48,49 @@
         <a class="button-link secondary-link" href="/">返回首页</a>
       </section>
 
+      <section id="account-view" class="card account-card hidden">
+        <div id="account-register">
+          <p class="eyebrow">GROUP RELAY APP</p>
+          <h1>你的会话客户端</h1>
+          <p class="muted">用邮箱作为唯一身份，在一个页面查看自己加入的全部会话。</p>
+          <form id="account-form">
+            <label>邮箱<input name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@example.com" /></label>
+            <button type="submit">创建本机账户</button>
+          </form>
+          <div class="import-block">
+            <p class="muted">已有账户？导入之前下载的账户备份恢复身份。</p>
+            <label class="file-button centered">导入账户备份<input id="restore-account-file" type="file" accept="application/json,.json" /></label>
+          </div>
+        </div>
+
+        <div id="account-dashboard" class="hidden">
+          <div class="account-heading">
+            <div>
+              <p class="eyebrow">MY SESSIONS</p>
+              <h1>我的会话</h1>
+              <p id="account-email" class="muted"></p>
+            </div>
+            <button id="account-logout" class="text-button" type="button">退出本机</button>
+          </div>
+          <div class="install-tip">
+            <strong>安装到 iPhone</strong>
+            <span>在 Safari 点“分享”，选择“添加到主屏幕”。请使用固定域名，临时 Cloudflare 地址变化后已安装客户端会失效。</span>
+          </div>
+          <div class="account-actions">
+            <button id="import-browser-sessions" type="button">导入本浏览器会话</button>
+            <button id="export-account" class="secondary" type="button">下载账户备份</button>
+            <label class="file-button">导入备份<input id="import-account-file" type="file" accept="application/json,.json" /></label>
+          </div>
+          <p id="import-result" class="muted compact"></p>
+          <div id="session-list" class="session-list"></div>
+          <div id="empty-sessions" class="empty-state hidden">
+            <p>还没有归入这个账户的会话。</p>
+            <p>先点“导入本浏览器会话”，或通过邀请链接加入新群组。</p>
+          </div>
+          <a class="button-link secondary-link" href="/">创建新群组</a>
+        </div>
+      </section>
+
       <section id="chat-view" class="chat hidden">
         <header>
           <div>
@@ -49,6 +99,7 @@
           </div>
           <div class="header-actions">
             <span id="connection" class="status">连接中</span>
+            <a class="header-link" href="/app">我的会话</a>
             <button id="invite-button" class="secondary">复制邀请链接</button>
           </div>
         </header>

@@ -43,13 +43,16 @@ export class FileStore {
     this.root = path.resolve(root);
     this.groupsDir = path.join(this.root, "groups");
     this.invitesFile = path.join(this.root, "invites.json");
+    this.accountsFile = path.join(this.root, "accounts.json");
     this.writeQueues = new Map();
     this.memberQueues = new Map();
+    this.accountQueue = Promise.resolve();
   }
 
   async init() {
     await fs.mkdir(this.groupsDir, { recursive: true });
     if (!(await exists(this.invitesFile))) await writeJsonAtomic(this.invitesFile, {});
+    if (!(await exists(this.accountsFile))) await writeJsonAtomic(this.accountsFile, {});
   }
 
   groupDir(groupId) {
@@ -105,6 +108,77 @@ export class FileStore {
   async authenticate(groupId, token) {
     if (!token) return null;
     return (await this.listMembers(groupId)).find((member) => member.token === token) ?? null;
+  }
+
+  async accounts() {
+    return readJson(this.accountsFile);
+  }
+
+  async updateAccounts(update) {
+    const next = this.accountQueue.then(async () => {
+      const accounts = await this.accounts();
+      const result = await update(accounts);
+      await writeJsonAtomic(this.accountsFile, accounts);
+      return result;
+    });
+    this.accountQueue = next.catch(() => {});
+    return next;
+  }
+
+  async createAccount(email) {
+    const normalizedEmail = email.trim().toLocaleLowerCase("en-US");
+    return this.updateAccounts((accounts) => {
+      if (Object.values(accounts).some((account) => account.normalizedEmail === normalizedEmail)) {
+        return null;
+      }
+      const account = {
+        id: id(),
+        email: normalizedEmail,
+        normalizedEmail,
+        token: secret(),
+        createdAt: new Date().toISOString(),
+        memberships: []
+      };
+      accounts[account.id] = account;
+      return account;
+    });
+  }
+
+  async authenticateAccount(token) {
+    if (!token) return null;
+    return Object.values(await this.accounts())
+      .find((account) => account.token === token) ?? null;
+  }
+
+  async linkAccountMemberships(accountId, memberships) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[accountId];
+      if (!account) return null;
+      for (const membership of memberships) {
+        const existing = account.memberships.find((item) => item.groupId === membership.groupId);
+        if (existing) {
+          existing.memberId = membership.memberId;
+          existing.memberToken = membership.memberToken;
+          existing.linkedAt = new Date().toISOString();
+        } else {
+          account.memberships.push({
+            ...membership,
+            linkedAt: new Date().toISOString()
+          });
+        }
+      }
+      return account;
+    });
+  }
+
+  async unlinkAccountMembership(accountId, groupId) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[accountId];
+      if (!account) return false;
+      const before = account.memberships.length;
+      account.memberships = account.memberships.filter((membership) => membership.groupId !== groupId);
+      return account.memberships.length !== before;
+    });
   }
 
   async updateMembers(groupId, update) {

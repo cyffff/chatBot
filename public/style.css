@@ -26,6 +26,7 @@ main {
 }
 
 .auth-card { width: min(100%, 480px); padding: 40px; }
+.account-card { width: min(100%, 760px); padding: 40px; }
 .eyebrow {
   margin: 0 0 8px;
   color: #2d7150;
@@ -57,6 +58,13 @@ button {
 }
 button:hover { background: #17573b; }
 button.secondary { color: #24573e; background: #e7f0e8; }
+.text-button {
+  padding: 7px 9px;
+  color: #657068;
+  background: transparent;
+  font-size: 13px;
+}
+.text-button:hover { color: #1f6848; background: #edf3ee; }
 .button-link {
   display: block;
   margin-top: 14px;
@@ -74,6 +82,60 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .known-groups { margin-top: 24px; color: #68736b; line-height: 1.5; }
 #known-group-links { display: grid; gap: 8px; }
 #known-group-links .button-link { margin-top: 0; }
+.header-link {
+  color: #24573e;
+  font-size: 13px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.account-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+.account-heading .muted { margin: 8px 0 0; }
+.install-tip {
+  display: grid;
+  gap: 5px;
+  margin: 24px 0 18px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #eaf2eb;
+  color: #4f5d53;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.install-tip strong { color: #24573e; }
+.account-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.account-actions .file-button { padding: 12px 14px; }
+.compact { margin: 10px 0; font-size: 13px; }
+.import-block { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e1e8e1; }
+.centered { width: fit-content; }
+.session-list { display: grid; gap: 10px; margin-top: 18px; }
+.session-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 16px;
+  border: 1px solid #dfe7df;
+  border-radius: 13px;
+  background: white;
+}
+.session-card h2 { margin: 0 0 4px; font-size: 16px; }
+.session-card p { margin: 0; color: #7a857d; font-size: 12px; }
+.session-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.empty-state {
+  margin-top: 18px;
+  padding: 22px;
+  border: 1px dashed #ccd8cf;
+  border-radius: 13px;
+  color: #68736b;
+  text-align: center;
+}
+.empty-state p { margin: 4px; }
 
 .chat { width: min(1180px, 100%); height: min(860px, calc(100vh - 64px)); overflow: hidden; }
 header {
@@ -209,13 +271,25 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 #toast.visible { opacity: 1; }
 
 @media (max-width: 720px) {
-  main { padding: 0; }
-  .chat { height: 100vh; border: 0; border-radius: 0; }
+  main { padding: 0; min-height: 100dvh; }
+  .chat { height: 100dvh; border: 0; border-radius: 0; }
   header { height: auto; min-height: 80px; padding: 14px 16px; }
   .status { display: none; }
+  .header-link { display: none; }
   .chat-layout { grid-template-columns: 1fr; height: calc(100% - 80px); }
   aside { display: none; }
   #messages { padding: 18px 16px; }
-  #message-form { padding: 12px; }
+  #message-form { padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
   .auth-card { min-height: 100vh; border: 0; border-radius: 0; padding: 36px 24px; }
+  .account-card {
+    width: 100%;
+    min-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+    padding: max(30px, env(safe-area-inset-top)) 20px max(30px, env(safe-area-inset-bottom));
+  }
+  .account-actions { display: grid; }
+  .account-actions > * { width: 100%; text-align: center; }
+  .session-card { align-items: flex-start; }
+  .session-actions { flex-direction: column; align-items: stretch; }
 }

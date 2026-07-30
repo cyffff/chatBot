@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -88,6 +89,61 @@ test("rejects unauthenticated history access", async (t) => {
   });
   const response = await fetch(`${base}/api/groups/${created.body.group.id}/messages`);
   assert.equal(response.status, 401);
+});
+
+test("email accounts import validated browser sessions and list joined groups", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "iOS group", ownerName: "Yunfei" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "YUNFEI@example.com" })
+  });
+  assert.equal(account.response.status, 201);
+  assert.equal(account.body.account.email, "yunfei@example.com");
+  assert.ok(account.body.accountToken);
+
+  const duplicate = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei@example.com" })
+  });
+  assert.equal(duplicate.response.status, 409);
+
+  const imported = await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers: { "X-Account-Token": account.body.accountToken },
+    body: JSON.stringify({
+      sessions: [
+        {
+          groupId: created.body.group.id,
+          memberToken: created.body.member.token
+        },
+        {
+          groupId: crypto.randomUUID(),
+          memberToken: "wrong-token"
+        }
+      ]
+    })
+  });
+  assert.equal(imported.response.status, 200);
+  assert.equal(imported.body.imported, 1);
+  assert.equal(imported.body.rejected.length, 1);
+  assert.equal(imported.body.sessions[0].group.name, "iOS group");
+  assert.equal(imported.body.sessions[0].member.name, "Yunfei");
+  assert.equal(imported.body.sessions[0].memberToken, created.body.member.token);
+
+  const listed = await json(base, "/api/account/sessions", {
+    headers: { "X-Account-Token": account.body.accountToken }
+  });
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.sessions.length, 1);
+
+  const unauthorized = await json(base, "/api/account/sessions", {
+    headers: { "X-Account-Token": "wrong" }
+  });
+  assert.equal(unauthorized.response.status, 401);
 });
 
 test("long polling delivers a new message without refreshing", async (t) => {

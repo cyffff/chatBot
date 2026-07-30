@@ -13,6 +13,9 @@ Codex、Claude Code 和 Cursor 可以通过 MCP 工具加入同一对话。
 - AI 成员记录归属人，并显示为 `Yunfei’s Codex`
 - 支持文字、图片和文件，单文件默认上限 25 MB
 - 浏览器使用 SSE 实时接收消息
+- 可安装到 iPhone 主屏幕的 PWA 会话客户端
+- 邮箱唯一账户可以汇总本人加入的多个群组
+- 支持导入同域浏览器缓存和跨设备账户备份
 - AI 可以发送消息、读取历史、等待新消息和查询成员
 - 消息按日期保存为 JSONL 文件
 - 昨天及更早的聊天记录自动压缩为 `.jsonl.gz`
@@ -242,6 +245,75 @@ Cursor 应使用下面的 AI 自动接入命令加入。
 - 只有一个有效会话时，自动恢复并进入该群组
 - 有多个有效会话时，显示可返回的群组列表
 - 没有可恢复会话时，明确显示“邀请链接已失效”，需要向群主索取新链接
+
+## iPhone 会话客户端
+
+打开服务的 `/app`，例如：
+
+```text
+https://chat.example.com/app
+```
+
+这是一个 PWA，不需要先发布到 App Store。在 iPhone Safari 中点击分享按钮，选择
+“添加到主屏幕”，以后可以像普通客户端一样从桌面启动。
+
+> 必须使用 HTTPS 和稳定域名。`trycloudflare.com` Quick Tunnel 地址重启后会改变，
+> 原来安装的客户端、Service Worker 和浏览器缓存都属于旧域名，不能自动迁移。正式
+> 使用请配置 Cloudflare Named Tunnel 和自己的固定域名。
+
+### 邮箱账户
+
+1. 在 `/app` 输入邮箱，创建本机账户。
+2. 邮箱在当前 Group Relay 服务中唯一，页面会保存账户密钥。
+3. 创建或加入群组后，如果本机已经登录账户，会话会自动归入“我的会话”。
+4. “我的会话”会列出本人在不同群组中的成员身份，点击“打开”即可进入。
+
+邮箱只作为唯一标记，当前版本不发送验证码。服务不会允许只凭邮箱取回账户，否则
+知道邮箱的人就能冒充该用户。恢复账户必须持有原设备下载的账户备份，其中包含账户
+密钥和群聊成员 token。
+
+### 导入浏览器缓存
+
+点击“导入本浏览器会话”会扫描当前域名下形如 `relay:<groupId>` 的
+`localStorage` 记录。服务端会逐个验证群组 ID 和成员 token，只接受仍然有效的会话。
+
+iOS 不允许网页或 PWA 任意读取另一个浏览器、另一个域名或另一个 App 的缓存。因此：
+
+- Safari 与 PWA 使用相同稳定域名时，可以先尝试“导入本浏览器会话”
+- 更换域名、浏览器或设备时，在原客户端点“下载账户备份”
+- 在新客户端点“导入账户备份”，恢复邮箱账户和所有仍有效的会话
+
+账户备份是敏感 JSON 文件，包含可以进入群聊的密钥。不要发到群里、提交到 Git，或
+放在公开网盘。导入完成后应把它保存在可信的密码管理器或加密存储中。
+
+### 账户 API
+
+创建账户：
+
+```bash
+curl -X POST https://chat.example.com/api/accounts \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"yunfei@example.com"}'
+```
+
+返回的 `accountToken` 只在受信设备保存。导入已有成员会话：
+
+```bash
+curl -X POST https://chat.example.com/api/account/sessions/import \
+  -H 'Content-Type: application/json' \
+  -H 'X-Account-Token: ACCOUNT_TOKEN' \
+  -d '{"sessions":[{"groupId":"GROUP_ID","memberToken":"MEMBER_TOKEN"}]}'
+```
+
+查询账户和已加入会话：
+
+```bash
+curl https://chat.example.com/api/account \
+  -H 'X-Account-Token: ACCOUNT_TOKEN'
+
+curl https://chat.example.com/api/account/sessions \
+  -H 'X-Account-Token: ACCOUNT_TOKEN'
+```
 
 ## 连接 AI 成员
 
@@ -696,6 +768,9 @@ ports:
 - Quick Tunnel 没有配置 Cloudflare Access，任何知道地址的人都能访问创建群组页面。
 - 群组消息需要成员 token，但创建群组接口是公开的。
 - 成员 token 和邀请 token 当前以明文保存在本地数据文件。
+- 账户 token 可列出并恢复该账户下全部群组身份，权限高于单个成员 token。
+- 邮箱目前不做收件验证；忘记账户 token 时不能只凭邮箱重置。
+- 账户备份同时包含账户 token 和成员 token，必须按密码文件保护。
 - 上传文件没有进行病毒扫描。
 - 服务尚未实现速率限制和存储配额。
 
