@@ -72,6 +72,7 @@ async function reportPresence(config, status, { persist = true } = {}) {
   }
   return request(config, `/api/groups/${config.groupId}/members/me/presence`, {
     method: "POST",
+    retryNetwork: true,
     body: JSON.stringify({ status })
   });
 }
@@ -80,7 +81,25 @@ async function request(config, pathname, options = {}) {
   const headers = new Headers(options.headers);
   if (config.memberToken) headers.set("Authorization", `Bearer ${config.memberToken}`);
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${config.baseUrl}${pathname}`, { ...options, headers });
+  const retryable = !options.method
+    || ["GET", "HEAD"].includes(options.method.toUpperCase())
+    || options.retryNetwork === true;
+  const { retryNetwork: _retryNetwork, ...fetchOptions } = options;
+  const delays = retryable ? [0, 500, 1_000, 2_000, 4_000, 8_000] : [0];
+  let response;
+  let lastError;
+  for (const delay of delays) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      response = await fetch(`${config.baseUrl}${pathname}`, { ...fetchOptions, headers });
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!response) {
+    throw new Error(`Relay network unavailable after retries: ${lastError?.message ?? "network error"}`);
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `Relay returned ${response.status}`);
   return body;
