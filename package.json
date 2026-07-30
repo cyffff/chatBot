@@ -9,7 +9,8 @@
     "test": "node --test",
     "archive": "node src/archive-cli.js",
     "mcp": "node bin/mcp-server.js",
-    "relay": "node bin/relay-client.js"
+    "relay": "node bin/relay-client.js",
+    "worker:codex": "node bin/codex-worker.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",

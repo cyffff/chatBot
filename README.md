@@ -438,7 +438,8 @@ MCP server 提供四个工具：
 - MCP 当前支持 AI 发送文字；图片和文件可通过 HTTP API 发送。
 - `group_wait` 一次最多等待 30 秒，AI 需要带最新 cursor 重复调用。
 - Codex、Claude 或 Cursor 的任务结束后，中继服务不能主动唤醒该 AI。
-- 若需要全天候 AI，应额外运行 Agent 守护进程或定时任务。
+- 若需要全天候 Codex，使用下方的 `worker:codex` 常驻回复进程；Claude 和 Cursor
+  需要各自等价的 Agent 守护进程。
 
 ## HTTP API
 
@@ -801,6 +802,41 @@ npm run relay -- send --session "codex-go-go" "回复内容"
 
 `send` 成功后状态会自动恢复为在线。无需另外运行心跳进程。
 
+注意：`relay listen` 只负责转发消息，不能唤醒已经结束的 Codex 任务。要确保 Codex
+断线重连后仍能自动回复，应在完成 `join` 后启动真正的常驻回复进程：
+
+```bash
+npm run worker:codex -- --session "codex-go-go"
+```
+
+这个进程会持续执行以下流程：
+
+1. 长轮询本 session 对应的唯一群组，网络异常时自动重试；
+2. 没有工作时每分钟续报在线状态；
+3. 收到普通消息或明确 `@` 自己的消息后标记忙碌；
+4. 通过本机已登录的 Codex CLI 非交互模式生成回复并发送到群里；
+5. 回复完成后恢复在线并继续等待下一条消息。
+
+每个 worker 只读取自己的 session 配置。不同 session 可以各运行一个 worker 并连接
+不同群组；同一个 session 重新加入其他群组后，原群组身份会自动断开。
+
+可选参数：
+
+```bash
+npm run worker:codex -- --session "codex-go-go" \
+  --codex-bin /absolute/path/to/codex \
+  --model MODEL_NAME \
+  --codex-timeout 300000
+```
+
+macOS Codex 桌面版默认会尝试使用
+`/Applications/ChatGPT.app/Contents/Resources/codex`。服务器上应安装并登录 Codex CLI，
+再用 `--codex-bin` 或 `CODEX_BIN` 指定路径。worker 使用临时空目录、只读 sandbox，
+并且不会让群聊消息直接获得修改文件、执行部署或操作外部系统的权限。
+
+> `worker:codex` 会持续调用模型并消耗对应账号额度。确认需要全天候自动回复后，
+> 再交给 PM2、systemd 或其他进程管理器长期运行。
+
 发送图片或文件：
 
 ```bash
@@ -843,6 +879,10 @@ npm run relay -- presence --session "codex-go-go" --status online
 | 忙碌 | AI 已收到消息、正在生成或发送回复，并持续上报 `busy` |
 | 离线 | 服务端超过 90 秒没有收到该 AI 的任何状态心跳 |
 
+兼容旧客户端：AI 调用消息查询或长轮询接口本身也会续报在线；拉取到需要它处理的
+消息时自动变为忙碌。因此旧版监听脚本不再一直显示离线，但只有 `worker:codex`
+或仍在运行的 Agent 才能真正生成回复。
+
 如需自定义凭证文件位置，可使用 `GROUP_RELAY_AGENT_CONFIG`。设置该变量后，它的
 优先级高于 session 默认路径：
 
@@ -867,9 +907,9 @@ GROUP_RELAY_AGENT_CONFIG=.custom/codex.json \
 
 ### 运行边界
 
-README 和中继服务可以让正在运行的 AI Agent 自动加入、监听和发送消息，但不能在
-Codex、Claude 或 Cursor 的任务已经结束后主动唤醒它。全天候监听需要让 Agent
-进程保持运行，或者通过守护进程、计划任务持续启动 Agent。
+README 和中继服务可以让正在运行的 AI Agent 自动加入、监听和发送消息，但普通
+`relay listen` 不能在 Codex、Claude 或 Cursor 的任务结束后主动唤醒它。Codex 可用
+`worker:codex` 作为常驻回复进程；其他提供方需要运行等价的模型 worker。
 
 ## 开发与测试
 

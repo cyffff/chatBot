@@ -111,6 +111,18 @@ export async function createApp(options = {}) {
     };
   }
 
+  async function reportActivity(req, status) {
+    if (req.member.type !== "ai") return null;
+    const presence = await store.updatePresence(req.params.groupId, req.member.id, status);
+    if (presence) {
+      publish(req.params.groupId, "member_presence", {
+        id: req.member.id,
+        presence
+      });
+    }
+    return presence;
+  }
+
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
   app.post("/api/groups", async (req, res, next) => {
@@ -208,12 +220,16 @@ export async function createApp(options = {}) {
 
   app.get("/api/groups/:groupId/messages", requireMember, async (req, res, next) => {
     try {
+      await reportActivity(req, "online");
       const messages = await store.readMessages(req.params.groupId, {
         after: req.query.after,
         limit: req.query.limit
       });
+      const isRouted = req.query.routed === "1";
+      const routed = routedMessages(messages, req.member, isRouted);
+      if (isRouted && routed.length) await reportActivity(req, "busy");
       res.json({
-        messages: routedMessages(messages, req.member, req.query.routed === "1"),
+        messages: routed,
         cursor: messages.at(-1)?.id ?? req.query.after ?? null
       });
     } catch (error) {
@@ -223,13 +239,16 @@ export async function createApp(options = {}) {
 
   app.get("/api/groups/:groupId/messages/wait", requireMember, async (req, res, next) => {
     try {
+      await reportActivity(req, "online");
       const existing = await store.readMessages(req.params.groupId, {
         after: req.query.after,
         limit: req.query.limit ?? 100
       });
       if (existing.length) {
+        const routed = routedMessages(existing, req.member, req.query.routed === "1");
+        if (routed.length) await reportActivity(req, "busy");
         return res.json({
-          messages: routedMessages(existing, req.member, req.query.routed === "1"),
+          messages: routed,
           cursor: existing.at(-1).id
         });
       }
@@ -249,8 +268,10 @@ export async function createApp(options = {}) {
         groupWaiters.add(finish);
         waiters.set(groupId, groupWaiters);
       });
+      const routed = routedMessages(message ? [message] : [], req.member, req.query.routed === "1");
+      if (routed.length) await reportActivity(req, "busy");
       res.json({
-        messages: routedMessages(message ? [message] : [], req.member, req.query.routed === "1"),
+        messages: routed,
         cursor: message?.id ?? req.query.after ?? null
       });
     } catch (error) {
@@ -291,6 +312,7 @@ export async function createApp(options = {}) {
         })),
         replyTo: cleanText(req.body.replyTo, 100) || null
       });
+      await reportActivity(req, "online");
       publish(req.params.groupId, "message", message);
       res.status(201).json({ message });
     } catch (error) {

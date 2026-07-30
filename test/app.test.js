@@ -9,6 +9,7 @@ import { createApp } from "../src/app.js";
 
 const execFileAsync = promisify(execFile);
 const relayClient = path.resolve("bin/relay-client.js");
+const codexWorker = path.resolve("bin/codex-worker.js");
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
@@ -207,6 +208,52 @@ test("AI presence changes from busy to offline when heartbeats expire", async (t
   assert.equal(expired.body.members.find((member) => member.type === "ai").presence.status, "offline");
 });
 
+test("AI polling renews presence and routed work marks it busy", async (t) => {
+  const { base } = await fixture(t, { presenceTimeoutMs: 1500 });
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Polling Presence", ownerName: "Owner" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 1600));
+  await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages/wait?timeoutMs=1000&routed=1`,
+    { headers: { Authorization: `Bearer ${joined.body.member.token}` } }
+  );
+  const online = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(online.body.members.find((member) => member.type === "ai").presence.status, "online");
+
+  const form = new FormData();
+  form.set("text", "@Codex are you there?");
+  form.set("mentions", JSON.stringify([joined.body.member.id]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: form
+  });
+  await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages?routed=1`,
+    { headers: { Authorization: `Bearer ${joined.body.member.token}` } }
+  );
+  const busy = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(busy.body.members.find((member) => member.type === "ai").presence.status, "busy");
+});
+
 test("AI relay client joins, persists identity, receives and sends messages", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
@@ -271,6 +318,63 @@ test("AI relay client joins, persists identity, receives and sends messages", as
     "status"
   ], { env: clientEnv });
   assert.doesNotMatch(clientStatus.stdout, /memberToken|inviteToken/);
+});
+
+test("Codex worker consumes a routed message and posts the generated reply", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Worker Group", ownerName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "worker-config.json");
+  const fakeCodex = path.join(dataDir, "fake-codex");
+  await fs.writeFile(fakeCodex, `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    printf '%s\\n' '常驻 Worker 已自动回复' > "$1"
+    exit 0
+  fi
+  shift
+done
+exit 1
+`, { mode: 0o700 });
+  const workerEnv = { ...process.env, GROUP_RELAY_AGENT_CONFIG: configFile };
+
+  const joined = await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    created.body.inviteUrl.replace("http://relay.test", base),
+    "--provider",
+    "codex",
+    "--owner",
+    "Yunfei",
+    "--name",
+    "Codex"
+  ], { env: workerEnv });
+  const aiMemberId = JSON.parse(joined.stdout).member.id;
+
+  const question = new FormData();
+  question.set("text", "@Codex 请回复");
+  question.set("mentions", JSON.stringify([aiMemberId]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: question
+  });
+
+  await execFileAsync(process.execPath, [
+    codexWorker,
+    "--once",
+    "--codex-bin",
+    fakeCodex
+  ], { env: workerEnv, timeout: 10_000 });
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(history.body.messages.at(-1).text, "常驻 Worker 已自动回复");
+  assert.equal(history.body.messages.at(-1).sender.id, aiMemberId);
 });
 
 test("one AI session switches groups and disconnects its previous membership", async (t) => {
