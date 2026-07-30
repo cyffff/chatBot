@@ -85,8 +85,11 @@ export async function createApp(options = {}) {
       response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
     }
     const pending = waiters.get(groupId) ?? new Set();
-    waiters.delete(groupId);
-    for (const waiter of pending) waiter(payload);
+    for (const waiter of [...pending]) {
+      if (event === "message" || waiter.includeMemberEvents) {
+        waiter.finish({ event, payload });
+      }
+    }
   }
 
   function routedMessages(messages, member, enabled) {
@@ -253,26 +256,34 @@ export async function createApp(options = {}) {
         });
       }
       const timeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
-      const message = await new Promise((resolve) => {
+      const update = await new Promise((resolve) => {
         const groupId = req.params.groupId;
         const groupWaiters = waiters.get(groupId) ?? new Set();
+        let waiter;
         const finish = (value) => {
           clearTimeout(timeout);
-          groupWaiters.delete(finish);
+          groupWaiters.delete(waiter);
           if (!groupWaiters.size && waiters.get(groupId) === groupWaiters) {
             waiters.delete(groupId);
           }
           resolve(value);
         };
         const timeout = setTimeout(() => finish(null), timeoutMs);
-        groupWaiters.add(finish);
+        waiter = {
+          finish,
+          includeMemberEvents: req.query.routed !== "1"
+        };
+        groupWaiters.add(waiter);
         waiters.set(groupId, groupWaiters);
       });
-      const routed = routedMessages(message ? [message] : [], req.member, req.query.routed === "1");
+      const messages = update?.event === "message" ? [update.payload] : [];
+      const routed = routedMessages(messages, req.member, req.query.routed === "1");
       if (routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,
-        cursor: message?.id ?? req.query.after ?? null
+        cursor: update?.event === "message" ? update.payload.id : req.query.after ?? null,
+        event: update?.event ?? null,
+        eventPayload: update?.event === "message" ? null : update?.payload ?? null
       });
     } catch (error) {
       next(error);

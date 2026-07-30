@@ -159,6 +159,32 @@ function renderMembers(members) {
   }
 }
 
+function applyMemberEvent(eventName, payload) {
+  if (eventName === "member_presence") {
+    const member = state.members.find((candidate) => candidate.id === payload.id);
+    if (!member) return refreshMembers();
+    member.presence = payload.presence;
+    renderMembers(state.members);
+    return Promise.resolve();
+  }
+  if (eventName === "member_left") {
+    renderMembers(state.members.filter((member) => member.id !== payload.id));
+    return Promise.resolve();
+  }
+  if (eventName === "member_joined") return refreshMembers();
+  return Promise.resolve();
+}
+
+function messagesAreNearBottom() {
+  const messages = $("#messages");
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 100;
+}
+
+function scrollMessagesToBottom() {
+  const messages = $("#messages");
+  messages.scrollTop = messages.scrollHeight;
+}
+
 function attachmentNode(attachment) {
   const link = document.createElement("a");
   link.className = "attachment";
@@ -177,6 +203,7 @@ function attachmentNode(attachment) {
 
 function renderMessage(message) {
   if (state.rendered.has(message.id)) return;
+  const shouldFollow = messagesAreNearBottom();
   state.rendered.add(message.id);
   state.cursor = message.id;
   const item = document.createElement("li");
@@ -214,7 +241,12 @@ function renderMessage(message) {
     item.append(attachments);
   }
   $("#messages").append(item);
-  $("#messages").scrollTop = $("#messages").scrollHeight;
+  if (shouldFollow) requestAnimationFrame(scrollMessagesToBottom);
+  for (const image of item.querySelectorAll("img")) {
+    image.addEventListener("load", () => {
+      if (shouldFollow) scrollMessagesToBottom();
+    }, { once: true });
+  }
 }
 
 async function loadChat() {
@@ -229,6 +261,10 @@ async function loadChat() {
   messages.forEach(renderMessage);
   state.cursor = cursor;
   show("#chat-view");
+  requestAnimationFrame(() => {
+    scrollMessagesToBottom();
+    requestAnimationFrame(scrollMessagesToBottom);
+  });
   startRealtime();
   startPresenceRefresh();
 }
@@ -260,15 +296,11 @@ function connectEvents() {
   const events = new EventSource(`/api/groups/${state.groupId}/events?token=${encodeURIComponent(state.token)}`);
   events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
-  events.addEventListener("member_joined", async () => {
-    await refreshMembers();
-  });
-  events.addEventListener("member_left", async () => {
-    await refreshMembers();
-  });
-  events.addEventListener("member_presence", async () => {
-    await refreshMembers();
-  });
+  for (const eventName of ["member_joined", "member_left", "member_presence"]) {
+    events.addEventListener(eventName, (event) => {
+      applyMemberEvent(eventName, JSON.parse(event.data)).catch(() => {});
+    });
+  }
   events.onerror = () => {
     $("#connection").textContent = "备用连接";
   };
@@ -279,8 +311,11 @@ async function pollMessages() {
     try {
       const query = new URLSearchParams({ timeoutMs: "25000", limit: "200" });
       if (state.cursor) query.set("after", state.cursor);
-      const { messages } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
+      const { messages, event, eventPayload } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
       messages.forEach(renderMessage);
+      if (event && event !== "message" && eventPayload) {
+        await applyMemberEvent(event, eventPayload);
+      }
       markConnected();
     } catch {
       $("#connection").textContent = "正在重连";

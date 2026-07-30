@@ -115,6 +115,41 @@ test("long polling delivers a new message without refreshing", async (t) => {
   assert.equal(waited.body.messages[0].text, "live message");
 });
 
+test("long polling delivers AI presence events without treating them as messages", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Presence Events", ownerName: "Owner" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Codex",
+      type: "ai",
+      provider: "codex",
+      ownerName: "Yunfei"
+    })
+  });
+  const waitRequest = json(
+    base,
+    `/api/groups/${created.body.group.id}/messages/wait?timeoutMs=2000`,
+    { headers: { Authorization: `Bearer ${created.body.member.token}` } }
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await json(base, `/api/groups/${created.body.group.id}/members/me/presence`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    body: JSON.stringify({ status: "busy" })
+  });
+
+  const waited = await waitRequest;
+  assert.equal(waited.body.event, "member_presence");
+  assert.equal(waited.body.eventPayload.id, joined.body.member.id);
+  assert.equal(waited.body.eventPayload.presence.status, "busy");
+  assert.deepEqual(waited.body.messages, []);
+});
+
 test("routes @AI messages only to the mentioned AI", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
