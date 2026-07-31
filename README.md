@@ -1025,6 +1025,61 @@ macOS Codex 桌面版默认会尝试使用
 > `worker:codex` 会持续调用模型并消耗对应账号额度。确认需要全天候自动回复后，
 > 再交给 PM2、systemd 或其他进程管理器长期运行。
 
+### Codex Mac Hooks：状态和回复自动回调
+
+Codex Mac 支持生命周期 Hooks。Group Relay 提供了 Hook 适配器，可以把当前 Codex
+task 的状态和最终回复自动回调到它绑定的唯一群组：
+
+```text
+SessionStart       → 上报在线
+UserPromptSubmit   → 立即上报忙碌，可选创建“正在处理…”占位消息
+Stop               → 回填占位消息或发送最终答案，然后恢复在线
+```
+
+只需在本机安装一次 Hooks：
+
+```bash
+cd /absolute/path/to/group-relay
+npm run hooks:install
+```
+
+安装程序会合并写入 `~/.codex/hooks.json`，不会删除已有 Hooks，并在
+`~/.codex/hooks.json.bak` 保留上一次配置。随后重启 Codex Mac，在 `/hooks` 中检查并
+信任新增的 `SessionStart`、`UserPromptSubmit` 和 `Stop` 命令 Hook。
+
+在需要接入群聊的 Codex task 中运行加入命令。Codex 会通过 `CODEX_THREAD_ID` 自动使用
+真实 task ID 作为 session，并建立 task → group 的绑定：
+
+```bash
+npm run relay -- join "INVITE_URL" \
+  --provider codex \
+  --owner "Yunfei" \
+  --name "Codex" \
+  --hook-placeholder
+```
+
+`--hook-placeholder` 同时开启自动回复：Codex 开始处理时先发一条“正在处理…”，完成后
+在原消息位置回填最终答案。若只需要自动发送最终答案而不需要占位，使用
+`--hook-replies`。不加这两个参数时，Hook 只同步在线/忙碌状态，不会把普通 Codex
+回答发进群聊。
+
+已经通过旧命令加入的 session，不必重新创建 AI 成员。在对应 Codex task 中执行：
+
+```bash
+npm run relay -- bind-codex --session "原来的-session-id" --placeholder
+```
+
+绑定表保存在 `~/.group-relay/codex-bindings.json`，只记录本机配置文件路径和群组 ID；
+成员 token 仍保存在原 session 配置文件中。Hook 每次都会校验绑定群组与配置群组一致，
+不一致时拒绝发送，避免 task 串群。每个 Codex task 的真实 `session_id` 独立，因此多个
+Codex task 可以同时绑定不同群组。
+
+注意：开启 `--hook-replies` 或 `--hook-placeholder` 后，这个 Codex task 的每次最终回答
+都会转发到绑定群组。应为群聊使用独立 Codex task；普通开发 task 建议只启用状态同步。
+Hooks 是 Codex → Group Relay 的出站回调，不能在 Codex task 已停止时接收群消息并主动
+唤醒它。全天候入站消息仍使用 `npm run worker:codex -- --session ...`；它会持续长轮询、
+维护每分钟心跳并调用 Codex 生成回复。
+
 发送图片或文件：
 
 ```bash

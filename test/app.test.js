@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +13,25 @@ import { createApp } from "../src/app.js";
 const execFileAsync = promisify(execFile);
 const relayClient = path.resolve("bin/relay-client.js");
 const codexWorker = path.resolve("bin/codex-worker.js");
+const codexHook = path.resolve("bin/codex-hook.js");
+const codexHookInstaller = path.resolve("bin/install-codex-hooks.js");
 const mcpServer = path.resolve("bin/mcp-server.js");
+
+async function execFileWithInput(file, args, input, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(stderr || `Process exited with ${code}`));
+    });
+    child.stdin.end(input);
+  });
+}
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
@@ -645,6 +663,102 @@ exit 1
   assert.equal(history.body.messages.at(-1).text, "常驻 Worker 已自动回复");
   assert.equal(history.body.messages.at(-1).sender.id, aiMemberId);
   assert.equal(history.body.messages.at(-1).status, "complete");
+});
+
+test("Codex Mac hooks mark busy, create a placeholder and fill the final reply", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Hook Group", ownerName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "hook-session.json");
+  const bindingsFile = path.join(dataDir, "codex-bindings.json");
+  const hookState = path.join(dataDir, "hook-state");
+  const threadId = "019fadf2-1111-7777-9999-e224a29edfe9";
+  const clientEnv = {
+    ...process.env,
+    CODEX_THREAD_ID: threadId,
+    GROUP_RELAY_AGENT_CONFIG: configFile,
+    GROUP_RELAY_CODEX_BINDINGS: bindingsFile
+  };
+
+  const joined = await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    created.body.inviteUrl.replace("http://relay.test", base),
+    "--provider",
+    "codex",
+    "--owner",
+    "Yunfei",
+    "--name",
+    "Codex",
+    "--hook-placeholder"
+  ], { env: clientEnv });
+  assert.equal(JSON.parse(joined.stdout).codexBinding.threadId, threadId);
+
+  const hookEnv = {
+    ...process.env,
+    GROUP_RELAY_CODEX_BINDINGS: bindingsFile,
+    GROUP_RELAY_CODEX_HOOK_STATE: hookState
+  };
+  await execFileWithInput(process.execPath, [codexHook], JSON.stringify({
+      session_id: threadId,
+      turn_id: "turn-1",
+      hook_event_name: "UserPromptSubmit",
+      prompt: "请处理群消息"
+    }), { env: hookEnv });
+
+  let groupState = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  const ai = groupState.body.members.find((member) => member.type === "ai");
+  assert.equal(ai.presence.status, "busy");
+
+  let history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  const placeholder = history.body.messages.at(-1);
+  assert.equal(placeholder.status, "processing");
+
+  await execFileWithInput(process.execPath, [codexHook], JSON.stringify({
+      session_id: threadId,
+      turn_id: "turn-1",
+      hook_event_name: "Stop",
+      last_assistant_message: "Hook 已回填最终答案"
+    }), { env: hookEnv });
+  history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(history.body.messages.at(-1).id, placeholder.id);
+  assert.equal(history.body.messages.at(-1).text, "Hook 已回填最终答案");
+  assert.equal(history.body.messages.at(-1).status, "complete");
+  groupState = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(groupState.body.members.find((member) => member.id === ai.id).presence.status, "online");
+});
+
+test("Codex hook installer merges existing hooks without replacing them", async (t) => {
+  const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-codex-home-"));
+  t.after(() => fs.rm(codexHome, { recursive: true, force: true }));
+  await fs.writeFile(path.join(codexHome, "hooks.json"), JSON.stringify({
+    hooks: {
+      Stop: [{ hooks: [{ type: "command", command: "node existing-hook.js" }] }]
+    }
+  }));
+  await execFileAsync(process.execPath, [codexHookInstaller], {
+    env: { ...process.env, CODEX_HOME: codexHome }
+  });
+  await execFileAsync(process.execPath, [codexHookInstaller], {
+    env: { ...process.env, CODEX_HOME: codexHome }
+  });
+  const installed = JSON.parse(await fs.readFile(path.join(codexHome, "hooks.json"), "utf8"));
+  assert.equal(installed.hooks.Stop.filter((entry) => (
+    entry.hooks.some((hook) => hook.command.includes("/bin/codex-hook.js"))
+  )).length, 1);
+  assert.equal(installed.hooks.Stop.some((entry) => (
+    entry.hooks.some((hook) => hook.command === "node existing-hook.js")
+  )), true);
 });
 
 test("MCP send rejects a mismatched expected group ID", async (t) => {

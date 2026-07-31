@@ -14,7 +14,8 @@ function globalOption(name) {
   return value;
 }
 
-const sessionId = globalOption("session") ?? process.env.GROUP_RELAY_SESSION_ID ?? null;
+const codexThreadId = process.env.CODEX_THREAD_ID ?? null;
+const sessionId = globalOption("session") ?? process.env.GROUP_RELAY_SESSION_ID ?? codexThreadId;
 const connectionName = globalOption("connection") ?? null;
 const safeSessionId = sessionId?.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
 const configFile = path.resolve(
@@ -22,6 +23,10 @@ const configFile = path.resolve(
     ?? (safeSessionId ? `.group-relay-sessions/${safeSessionId}.json` : ".group-relay-agent.json")
 );
 const presenceFile = `${configFile}.presence`;
+const codexBindingsFile = path.resolve(
+  process.env.GROUP_RELAY_CODEX_BINDINGS
+    ?? path.join(os.homedir(), ".group-relay", "codex-bindings.json")
+);
 
 function option(name, fallback) {
   const index = args.indexOf(`--${name}`);
@@ -89,6 +94,31 @@ async function saveConfig(config) {
   await fs.chmod(configFile, 0o600);
 }
 
+async function updateCodexBinding(threadId, config, options = {}) {
+  let registry = { version: 1, threads: {} };
+  try {
+    registry = JSON.parse(await fs.readFile(codexBindingsFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  registry.version = 1;
+  registry.threads ??= {};
+  registry.threads[threadId] = {
+    configFile,
+    expectedGroupId: config.groupId,
+    sessionId: config.sessionId ?? sessionId,
+    forwardReplies: options.forwardReplies === true,
+    placeholder: options.placeholder === true,
+    boundAt: new Date().toISOString()
+  };
+  const temporary = `${codexBindingsFile}.tmp`;
+  await fs.mkdir(path.dirname(codexBindingsFile), { recursive: true });
+  await fs.writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(temporary, codexBindingsFile);
+  await fs.chmod(codexBindingsFile, 0o600);
+  return registry.threads[threadId];
+}
+
 async function readPresenceStatus() {
   try {
     const value = (await fs.readFile(presenceFile, "utf8")).trim();
@@ -146,6 +176,8 @@ function providerName(provider) {
 async function join() {
   const inviteUrl = args.shift();
   const force = flag("force");
+  const hookReplies = flag("hook-replies");
+  const hookPlaceholder = flag("hook-placeholder");
   const provider = option("provider");
   const ownerName = option("owner");
   const name = option("name", providerName(provider));
@@ -171,6 +203,13 @@ async function join() {
   if (previous && !force && previous.baseUrl === baseUrl && previous.groupId === target.group.id) {
     try {
       const group = await request(previous, `/api/groups/${previous.groupId}`);
+      let codexBinding = null;
+      if (provider === "codex" && codexThreadId) {
+        codexBinding = await updateCodexBinding(codexThreadId, previous, {
+          forwardReplies: hookReplies || hookPlaceholder,
+          placeholder: hookPlaceholder
+        });
+      }
       console.log(JSON.stringify({
         connected: true,
         reused: true,
@@ -181,6 +220,11 @@ async function join() {
           displayName: `${previous.ownerName}’s ${previous.memberName}`,
           provider: previous.provider
         },
+        codexBinding: codexBinding ? {
+          threadId: codexThreadId,
+          forwardReplies: codexBinding.forwardReplies,
+          placeholder: codexBinding.placeholder
+        } : null,
         configFile
       }, null, 2));
       return;
@@ -225,6 +269,13 @@ async function join() {
   const history = await request(config, `/api/groups/${config.groupId}/messages?limit=100&routed=1`);
   config.cursor = history.cursor;
   await saveConfig(config);
+  let codexBinding = null;
+  if (provider === "codex" && codexThreadId) {
+    codexBinding = await updateCodexBinding(codexThreadId, config, {
+      forwardReplies: hookReplies || hookPlaceholder,
+      placeholder: hookPlaceholder
+    });
+  }
   const online = await sendText(config, `${ownerName}’s ${name} 已加入群聊，正在监听消息。`);
   await reportPresence(config, "online");
   console.log(JSON.stringify({
@@ -236,7 +287,38 @@ async function join() {
     member: { id: config.memberId, displayName: `${ownerName}’s ${name}`, provider },
     recentMessages: history.messages,
     announcement: online.message,
+    codexBinding: codexBinding ? {
+      threadId: codexThreadId,
+      forwardReplies: codexBinding.forwardReplies,
+      placeholder: codexBinding.placeholder
+    } : null,
     configFile
+  }, null, 2));
+}
+
+async function bindCodex() {
+  const config = await loadConfig();
+  const threadId = option("thread-id", codexThreadId);
+  const forwardReplies = flag("forward-replies");
+  const placeholder = flag("placeholder");
+  if (!threadId) {
+    throw new Error("No Codex thread id found. Run inside Codex Mac or pass --thread-id.");
+  }
+  if (config.provider !== "codex") {
+    throw new Error(`Cannot bind Codex hooks to provider ${config.provider ?? "unknown"}.`);
+  }
+  const binding = await updateCodexBinding(threadId, config, {
+    forwardReplies: forwardReplies || placeholder,
+    placeholder
+  });
+  console.log(JSON.stringify({
+    bound: true,
+    threadId,
+    sessionId: binding.sessionId,
+    groupId: binding.expectedGroupId,
+    forwardReplies: binding.forwardReplies,
+    placeholder: binding.placeholder,
+    bindingsFile: codexBindingsFile
   }, null, 2));
 }
 
@@ -421,11 +503,12 @@ async function status() {
   }, null, 2));
 }
 
-const commands = { join, send, update, wait, listen, history, status, presence };
+const commands = { join, send, update, wait, listen, history, status, presence, "bind-codex": bindCodex };
 
 if (!commands[command]) {
   console.error(`Usage:
-  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--force]
+  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--force] [--hook-replies] [--hook-placeholder]
+  npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
   npm run relay -- status --session <session-id>
   npm run relay -- history --session <session-id> [--after <message-id>] [--limit 100]
   npm run relay -- wait --session <session-id> [--timeout 25000]
