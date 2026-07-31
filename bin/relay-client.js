@@ -27,6 +27,10 @@ const codexBindingsFile = path.resolve(
   process.env.GROUP_RELAY_CODEX_BINDINGS
     ?? path.join(os.homedir(), ".group-relay", "codex-bindings.json")
 );
+const localWorkersFile = path.resolve(
+  process.env.GROUP_RELAY_LOCAL_WORKERS
+    ?? path.join(os.homedir(), ".group-relay", "local-workers.json")
+);
 
 function option(name, fallback) {
   const index = args.indexOf(`--${name}`);
@@ -119,6 +123,36 @@ async function updateCodexBinding(threadId, config, options = {}) {
   return registry.threads[threadId];
 }
 
+async function updateLocalWorker(config, enabled) {
+  let registry = { version: 1, workers: {} };
+  try {
+    registry = JSON.parse(await fs.readFile(localWorkersFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  registry.version = 1;
+  registry.workers ??= {};
+  const workerId = config.sessionId ?? sessionId ?? config.memberId;
+  if (!workerId) throw new Error("The AI session has no stable worker id.");
+  if (enabled) {
+    registry.workers[workerId] = {
+      configFile,
+      groupId: config.groupId,
+      provider: config.provider,
+      enabled: true,
+      updatedAt: new Date().toISOString()
+    };
+  } else {
+    delete registry.workers[workerId];
+  }
+  const temporary = `${localWorkersFile}.tmp`;
+  await fs.mkdir(path.dirname(localWorkersFile), { recursive: true });
+  await fs.writeFile(temporary, `${JSON.stringify(registry, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(temporary, localWorkersFile);
+  await fs.chmod(localWorkersFile, 0o600);
+  return { workerId, enabled, registryFile: localWorkersFile };
+}
+
 async function readPresenceStatus() {
   try {
     const value = (await fs.readFile(presenceFile, "utf8")).trim();
@@ -178,9 +212,12 @@ async function join() {
   const force = flag("force");
   const hookReplies = flag("hook-replies");
   const hookPlaceholder = flag("hook-placeholder");
+  const background = flag("background");
   const provider = option("provider");
   const ownerName = option("owner");
   const name = option("name", providerName(provider));
+  const agentBin = option("agent-bin");
+  const model = option("model");
   if (!inviteUrl || !provider || !ownerName || !["codex", "claude", "cursor"].includes(provider)) {
     throw new Error(
       "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>]"
@@ -210,6 +247,7 @@ async function join() {
           placeholder: hookPlaceholder
         });
       }
+      const localWorker = background ? await updateLocalWorker(previous, true) : null;
       console.log(JSON.stringify({
         connected: true,
         reused: true,
@@ -225,6 +263,7 @@ async function join() {
           forwardReplies: codexBinding.forwardReplies,
           placeholder: codexBinding.placeholder
         } : null,
+        localWorker,
         configFile
       }, null, 2));
       return;
@@ -250,7 +289,9 @@ async function join() {
     provider,
     ownerName,
     sessionId,
-    cursor: null
+    cursor: null,
+    ...(agentBin ? { agentBin: path.resolve(agentBin) } : {}),
+    ...(model ? { model } : {})
   };
   let disconnectedPrevious = false;
   let disconnectWarning = null;
@@ -269,6 +310,7 @@ async function join() {
   const history = await request(config, `/api/groups/${config.groupId}/messages?limit=100&routed=1`);
   config.cursor = history.cursor;
   await saveConfig(config);
+  const localWorker = background ? await updateLocalWorker(config, true) : null;
   let codexBinding = null;
   if (provider === "codex" && codexThreadId) {
     codexBinding = await updateCodexBinding(codexThreadId, config, {
@@ -292,8 +334,19 @@ async function join() {
       forwardReplies: codexBinding.forwardReplies,
       placeholder: codexBinding.placeholder
     } : null,
+    localWorker,
     configFile
   }, null, 2));
+}
+
+async function backgroundWorker() {
+  const config = await loadConfig();
+  if (!config.provider || !["codex", "claude", "cursor"].includes(config.provider)) {
+    throw new Error("Only Codex, Claude and Cursor AI sessions can run in the Mac background bridge.");
+  }
+  const disable = flag("disable");
+  const result = await updateLocalWorker(config, !disable);
+  console.log(JSON.stringify({ ...result, provider: config.provider, groupId: config.groupId }, null, 2));
 }
 
 async function bindCodex() {
@@ -503,12 +556,24 @@ async function status() {
   }, null, 2));
 }
 
-const commands = { join, send, update, wait, listen, history, status, presence, "bind-codex": bindCodex };
+const commands = {
+  join,
+  send,
+  update,
+  wait,
+  listen,
+  history,
+  status,
+  presence,
+  background: backgroundWorker,
+  "bind-codex": bindCodex
+};
 
 if (!commands[command]) {
   console.error(`Usage:
-  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--force] [--hook-replies] [--hook-placeholder]
+  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
   npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
+  npm run relay -- background --session <session-id> [--disable]
   npm run relay -- status --session <session-id>
   npm run relay -- history --session <session-id> [--after <message-id>] [--limit 100]
   npm run relay -- wait --session <session-id> [--timeout 25000]

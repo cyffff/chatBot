@@ -20,7 +20,14 @@ xcrun swiftc \
   -O \
   -target arm64-apple-macos13.0 \
   -framework AppKit \
+  -framework ServiceManagement \
   -framework WebKit
+
+xcrun swiftc \
+  "$PROJECT_DIR/macos/GroupRelayBridge.swift" \
+  -o "$CONTENTS/MacOS/GroupRelayBridge" \
+  -O \
+  -target arm64-apple-macos13.0
 
 cp "$PROJECT_DIR/macos/Info.plist" "$CONTENTS/Info.plist"
 

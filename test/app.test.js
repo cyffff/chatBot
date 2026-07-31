@@ -761,6 +761,48 @@ test("Codex hook installer merges existing hooks without replacing them", async 
   )), true);
 });
 
+test("AI sessions can register and disable the Mac background bridge", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Background Group", ownerName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "background-session.json");
+  const workersFile = path.join(dataDir, "local-workers.json");
+  const clientEnv = {
+    ...process.env,
+    GROUP_RELAY_AGENT_CONFIG: configFile,
+    GROUP_RELAY_LOCAL_WORKERS: workersFile
+  };
+  await execFileAsync(process.execPath, [
+    relayClient,
+    "join",
+    created.body.inviteUrl.replace("http://relay.test", base),
+    "--session",
+    "mac-background-codex",
+    "--provider",
+    "codex",
+    "--owner",
+    "Yunfei",
+    "--name",
+    "Codex",
+    "--background"
+  ], { env: clientEnv });
+  let registry = JSON.parse(await fs.readFile(workersFile, "utf8"));
+  assert.equal(registry.workers["mac-background-codex"].configFile, configFile);
+  assert.equal(registry.workers["mac-background-codex"].provider, "codex");
+
+  await execFileAsync(process.execPath, [
+    relayClient,
+    "background",
+    "--session",
+    "mac-background-codex",
+    "--disable"
+  ], { env: clientEnv });
+  registry = JSON.parse(await fs.readFile(workersFile, "utf8"));
+  assert.equal(registry.workers["mac-background-codex"], undefined);
+});
+
 test("MCP send rejects a mismatched expected group ID", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

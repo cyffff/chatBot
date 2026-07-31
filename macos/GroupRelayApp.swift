@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import WebKit
 
 private let serverPreferenceKey = "GroupRelayServerURL"
@@ -214,23 +215,145 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        NSApplication.shared.terminate(nil)
+        sender.orderOut(nil)
         return true
+    }
+}
+
+final class LocalAIBridgeManager {
+    private var processes: [String: Process] = [:]
+    private var timer: Timer?
+    private(set) var statusText = "后台 AI：0 个运行中"
+    var onStatusChanged: ((String) -> Void)?
+
+    func start() {
+        registerLoginItem()
+        synchronizeWorkers()
+        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.synchronizeWorkers()
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        for process in processes.values where process.isRunning { process.terminate() }
+        processes.removeAll()
+        updateStatus()
+    }
+
+    @objc func synchronizeWorkers() {
+        let registryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".group-relay/local-workers.json")
+        guard
+            let data = try? Data(contentsOf: registryURL),
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let workers = root["workers"] as? [String: [String: Any]]
+        else {
+            stopRemovedWorkers(active: [])
+            return
+        }
+        var active = Set<String>()
+        for (workerId, worker) in workers {
+            guard
+                worker["enabled"] as? Bool == true,
+                let configFile = worker["configFile"] as? String,
+                FileManager.default.fileExists(atPath: configFile)
+            else { continue }
+            active.insert(workerId)
+            if processes[workerId]?.isRunning != true { launch(workerId: workerId, configFile: configFile) }
+        }
+        stopRemovedWorkers(active: active)
+        updateStatus()
+    }
+
+    private func launch(workerId: String, configFile: String) {
+        guard let helper = Bundle.main.url(forAuxiliaryExecutable: "GroupRelayBridge") else {
+            statusText = "后台 AI：桥接程序缺失"
+            onStatusChanged?(statusText)
+            return
+        }
+        let process = Process()
+        process.executableURL = helper
+        process.arguments = ["--config", configFile]
+        let logURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Group Relay/bridge.log")
+        try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        if let log = try? FileHandle(forWritingTo: logURL) {
+            _ = try? log.seekToEnd()
+            process.standardOutput = log
+            process.standardError = log
+            process.terminationHandler = { [weak self] _ in
+                try? log.close()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    self?.processes.removeValue(forKey: workerId)
+                    self?.synchronizeWorkers()
+                }
+            }
+        }
+        do {
+            try process.run()
+            processes[workerId] = process
+        } catch {
+            statusText = "后台 AI 启动失败：\(error.localizedDescription)"
+            onStatusChanged?(statusText)
+        }
+    }
+
+    private func stopRemovedWorkers(active: Set<String>) {
+        for workerId in processes.keys.filter({ !active.contains($0) }) {
+            guard let process = processes[workerId] else { continue }
+            if process.isRunning { process.terminate() }
+            processes.removeValue(forKey: workerId)
+        }
+        updateStatus()
+    }
+
+    private func updateStatus() {
+        let running = processes.values.filter(\.isRunning).count
+        statusText = "后台 AI：\(running) 个运行中"
+        onStatusChanged?(statusText)
+    }
+
+    private func registerLoginItem() {
+        guard #available(macOS 13.0, *) else { return }
+        do {
+            if SMAppService.mainApp.status == .notRegistered { try SMAppService.mainApp.register() }
+        } catch {
+            statusText = "开机启动未启用：\(error.localizedDescription)"
+            onStatusChanged?(statusText)
+        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var relayWindow: RelayWindowController?
+    private let bridgeManager = LocalAIBridgeManager()
+    private var bridgeStatusItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         relayWindow = RelayWindowController()
         buildMenus()
+        bridgeManager.onStatusChanged = { [weak self] status in self?.bridgeStatusItem?.title = status }
+        bridgeManager.start()
         relayWindow?.start()
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        relayWindow?.start()
+        return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        bridgeManager.stop()
     }
 
     private func buildMenus() {
@@ -239,6 +362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 Group Relay", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let show = appMenu.addItem(withTitle: "显示 Group Relay", action: #selector(showMainWindow), keyEquivalent: "")
+        show.target = self
+        bridgeStatusItem = appMenu.addItem(withTitle: bridgeManager.statusText, action: #selector(refreshBridges), keyEquivalent: "")
+        bridgeStatusItem?.target = self
         appMenu.addItem(.separator())
         let settings = appMenu.addItem(withTitle: "服务器设置…", action: #selector(RelayWindowController.showServerSettings), keyEquivalent: ",")
         settings.target = relayWindow
@@ -257,6 +385,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(viewMenuItem)
 
         NSApplication.shared.mainMenu = mainMenu
+    }
+
+    @objc private func showMainWindow() {
+        relayWindow?.start()
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func refreshBridges() {
+        bridgeManager.synchronizeWorkers()
     }
 }
 

@@ -353,6 +353,58 @@ https://chat.example.com
 缓存。点击“从浏览器导入会话”后，客户端会自动打开 Chrome，通过一次性迁移页面
 把浏览器自身保存的有效会话安全地归入当前邮箱账户。
 
+### Mac 后台 AI 桥接
+
+1.1.0 起，Mac 客户端内置本地 AI 桥接程序，不需要服务器端 OpenAI、Anthropic 或
+Cursor API Key，也不要求另外安装 Node。它使用本机已经登录的 AI CLI：
+
+- Codex：优先使用 ChatGPT Mac App 内置的 Codex
+- Claude：使用 `~/.local/bin/claude` 等本机 Claude Code CLI
+- Cursor：使用 `~/.local/bin/cursor-agent` 或 `~/.cursor/bin/cursor-agent`
+
+首次使用 Claude 或 Cursor 时，需要在本机分别完成一次 `claude` 或
+`cursor-agent login`；凭证只留在用户电脑，不上传 Group Relay 服务器。
+
+AI 加入群组时加上 `--background`，Mac App 会在十秒内发现并启动对应桥接：
+
+```bash
+npm run relay -- join "INVITE_URL" \
+  --session "codex-talk-more" \
+  --provider codex \
+  --owner "Yunfei" \
+  --name "Codex" \
+  --background
+```
+
+旧 AI session 可直接启用，不需要重新加入：
+
+```bash
+npm run relay -- background --session "codex-talk-more"
+```
+
+停用：
+
+```bash
+npm run relay -- background --session "codex-talk-more" --disable
+```
+
+启用后，群聊消息会由 Mac App 后台接收。收到普通消息或明确 `@` 这个 AI 的消息后，
+客户端立即标记忙碌、发送“正在处理…”占位、调用本机 AI，再原位回填答案。窗口关闭时
+App 只隐藏，桥接继续运行；必须从菜单选择“退出 Group Relay”才会停止。App 会请求注册
+为 macOS 登录项，重启电脑后自动恢复所有启用的 AI session。菜单中的“后台 AI”显示
+当前运行数量，点击可立即重新扫描。
+
+注册表保存在 `~/.group-relay/local-workers.json`，仅包含本机 session 配置文件路径。
+成员 token 仍以权限 `0600` 留在原配置文件中。详细日志位于：
+
+```text
+~/Library/Logs/Group Relay/bridge.log
+~/Library/Logs/Group Relay/ai-stderr.log
+```
+
+后台桥接在独立临时空目录中调用 AI，并明确禁止群消息读取本机文件、执行命令、修改
+代码或操作外部系统。需要这些权限的任务必须回到原 AI 客户端，由设备主人确认。
+
 ### 本地构建 DMG
 
 构建机需要 macOS Command Line Tools。Apple Silicon Mac 执行：
