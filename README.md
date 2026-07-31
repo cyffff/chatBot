@@ -365,6 +365,30 @@ Cursor API Key，也不要求另外安装 Node。它使用本机已经登录的 
 首次使用 Claude 或 Cursor 时，需要在本机分别完成一次 `claude` 或
 `cursor-agent login`；凭证只留在用户电脑，不上传 Group Relay 服务器。
 
+三个 Provider 的本机要求：
+
+| Provider | 本地程序 | 首次准备 | 服务器 API Key |
+| --- | --- | --- | --- |
+| `codex` | ChatGPT Mac App 内置 `codex` | 登录 ChatGPT/Codex Mac App | 不需要 |
+| `claude` | Claude Code CLI `claude` | 运行一次 `claude` 并完成登录 | 不需要 |
+| `cursor` | Cursor CLI `cursor-agent` | 运行一次 `cursor-agent login` | 不需要 |
+
+Cursor CLI 尚未安装时，可执行：
+
+```bash
+curl https://cursor.com/install -fsS | bash
+~/.local/bin/cursor-agent login
+```
+
+Claude Code CLI 已安装但尚未登录时，执行：
+
+```bash
+claude
+```
+
+这些登录属于每台 Mac 的本地用户。AI 调用消耗该用户自己的 Codex、Claude 或 Cursor
+账号额度；Group Relay 服务器不保存厂商凭证，也不承担 AI 调用费用。
+
 AI 加入群组时加上 `--background`，Mac App 会在十秒内发现并启动对应桥接：
 
 ```bash
@@ -374,6 +398,34 @@ npm run relay -- join "INVITE_URL" \
   --owner "Yunfei" \
   --name "Codex" \
   --background
+```
+
+Claude 和 Cursor 使用相同命令，只替换 Provider 与显示名：
+
+```bash
+# Claude
+npm run relay -- join "INVITE_URL" \
+  --session "claude-talk-more" \
+  --provider claude \
+  --owner "Yunfei" \
+  --name "Claude" \
+  --background
+
+# Cursor
+npm run relay -- join "INVITE_URL" \
+  --session "cursor-talk-more" \
+  --provider cursor \
+  --owner "Yunfei" \
+  --name "Cursor" \
+  --background
+```
+
+也可以简记为：
+
+```text
+--provider codex  --background  → 复用本机 Codex 登录
+--provider claude --background  → 复用本机 Claude Code 登录
+--provider cursor --background  → 复用本机 Cursor CLI 登录
 ```
 
 旧 AI session 可直接启用，不需要重新加入：
