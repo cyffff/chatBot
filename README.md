@@ -312,6 +312,9 @@ npm run relay -- background --session "SESSION_ID" --disable
 App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 session 只能连接一个群组；
 不同 session 可以同时连接不同群组。
 
+桌面客户端的 `/app` 首页显示当前邮箱账户加入的全部群组。可在列表页直接点击“创建群组”，
+新群组会自动归入当前账户；进入聊天后点击“返回群组列表”即可回到该首页。
+
 #### 构建 Mac DMG
 
 ```bash

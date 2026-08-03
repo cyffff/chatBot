@@ -477,6 +477,12 @@ function renderAccountSessions(sessions) {
   }
 }
 
+function suggestedAccountMemberName(sessions) {
+  const humanSession = sessions.find((session) => session.member.type === "human");
+  if (humanSession?.member.name) return humanSession.member.name;
+  return state.account?.email?.split("@")[0] ?? "";
+}
+
 async function loadAccountDashboard() {
   const [{ account }, { sessions }] = await Promise.all([
     accountApi("/api/account"),
@@ -488,6 +494,9 @@ async function loadAccountDashboard() {
     localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
   }
   renderAccountSessions(sessions);
+  const ownerInput = $("#account-create-form [name=ownerName]");
+  if (!ownerInput.value) ownerInput.value = suggestedAccountMemberName(sessions);
+  $("#account-create-panel").classList.add("hidden");
   $("#account-register").classList.add("hidden");
   $("#account-dashboard").classList.remove("hidden");
   show("#account-view");
@@ -680,25 +689,54 @@ $("#account-logout").addEventListener("click", () => {
   toast("已从这台设备退出");
 });
 
+$("#show-account-create").addEventListener("click", () => {
+  const panel = $("#account-create-panel");
+  panel.classList.remove("hidden");
+  $("#account-create-form [name=name]").focus();
+});
+
+$("#cancel-account-create").addEventListener("click", () => {
+  $("#account-create-panel").classList.add("hidden");
+});
+
+async function createGroup(formElement) {
+  const form = new FormData(formElement);
+  const result = await api("/api/groups", {
+    method: "POST",
+    body: JSON.stringify(Object.fromEntries(form))
+  });
+  state.groupId = result.group.id;
+  state.token = result.member.token;
+  state.inviteToken = result.group.inviteToken;
+  saveSession();
+  await linkCurrentSessionToAccount().catch(() => {});
+  return result;
+}
+
 $("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
   try {
-    const result = await api("/api/groups", {
-      method: "POST",
-      body: JSON.stringify(Object.fromEntries(form))
-    });
-    state.groupId = result.group.id;
-    state.token = result.member.token;
-    state.inviteToken = result.group.inviteToken;
-    saveSession();
-    await linkCurrentSessionToAccount().catch(() => {});
+    const result = await createGroup(event.currentTarget);
     history.replaceState({}, "", `/group/${state.groupId}`);
     await navigator.clipboard?.writeText(result.inviteUrl);
     await loadChat();
     toast("群组已创建，邀请链接已复制");
   } catch (error) {
     toast(error.message);
+  }
+});
+
+$("#account-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    const result = await createGroup(event.currentTarget);
+    await navigator.clipboard?.writeText(result.inviteUrl).catch(() => {});
+    location.href = `/group/${state.groupId}`;
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
   }
 });
 

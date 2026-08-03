@@ -111,6 +111,22 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .install-tip strong { color: #24573e; }
 .account-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .account-actions .file-button { padding: 12px 14px; }
+.account-create-panel {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #d9e4da;
+  border-radius: 13px;
+  background: #f4f8f3;
+}
+.panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.panel-heading .compact { margin: 3px 0 0; }
+.account-create-panel form {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 14px;
+}
+.account-create-panel form button { min-height: 45px; }
 .compact { margin: 10px 0; font-size: 13px; }
 .import-block { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e1e8e1; }
 .centered { width: fit-content; }
@@ -317,6 +333,7 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   }
   .account-actions { display: grid; }
   .account-actions > * { width: 100%; text-align: center; }
+  .account-create-panel form { grid-template-columns: 1fr; }
   .session-card { align-items: flex-start; }
   .session-actions { flex-direction: column; align-items: stretch; }
 }
