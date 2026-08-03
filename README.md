@@ -316,7 +316,7 @@ AI 只是通过桌面 App 使用本机已登录的 Codex、Claude 或 Cursor；G
 
 #### 桌面 AI 设置与 API Key
 
-macOS 和 Windows 客户端左侧都有“设置”入口，可以查看 Codex、Claude、Cursor 的 API Key
+macOS 和 Windows 客户端侧边栏最底部都有独立的“设置”入口，可以查看 Codex、Claude、Cursor 的 API Key
 状态以及各自已接入的群组数量。输入新 Key 后点击“保存 Key”即可生效，也可以删除 Key 后
 继续使用已经登录的本机 CLI 账号：
 

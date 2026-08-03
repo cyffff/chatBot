@@ -61,11 +61,13 @@
               <a class="active" href="#overview" data-overview-view="overview">⌂ <span>总览</span></a>
               <a href="#tasks" data-overview-view="tasks">◎ <span>AI 任务</span></a>
               <a href="#groups" data-overview-view="groups">◫ <span>我的群组</span></a>
-              <a href="#settings" data-overview-view="settings">⚙ <span>设置</span></a>
             </div>
             <div class="overview-sidebar-footer">
-              <small id="account-email"></small>
-              <button id="account-logout" class="sidebar-logout" type="button">重置本机</button>
+              <a class="overview-settings-link" href="#settings" data-overview-view="settings">⚙ <span>设置</span></a>
+              <div class="sidebar-account-actions">
+                <small id="account-email"></small>
+                <button id="account-logout" class="sidebar-logout" type="button">重置本机</button>
+              </div>
             </div>
           </nav>
 
