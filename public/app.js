@@ -444,6 +444,7 @@ async function pollMessages() {
 function renderAccountSessions(sessions) {
   const list = $("#session-list");
   list.innerHTML = "";
+  $("#overview-group-count").textContent = sessions.length;
   $("#empty-sessions").classList.toggle("hidden", sessions.length !== 0);
   for (const session of sessions) {
     const item = document.createElement("article");
@@ -499,12 +500,52 @@ function dashboardOwnerName(email) {
   return first.charAt(0).toLocaleUpperCase() + first.slice(1);
 }
 
+function renderOverviewHeader(account) {
+  const now = new Date();
+  const hour = now.getHours();
+  const greeting = hour < 6 ? "夜深了" : hour < 12 ? "早上好" : hour < 18 ? "下午好" : "晚上好";
+  const owner = dashboardOwnerName(account.email);
+  $("#overview-greeting").textContent = greeting;
+  $("#overview-owner").textContent = owner;
+  $("#dashboard-owner").textContent = owner;
+  $("#sidebar-owner").textContent = owner;
+  $("#overview-date").textContent = now.toLocaleDateString("zh-CN", {
+    year: "numeric", month: "long", day: "numeric", weekday: "long"
+  });
+}
+
+function renderOverviewCalendar() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const days = new Date(year, month + 1, 0).getDate();
+  $("#calendar-title").textContent = `${year}年${month + 1}月`;
+  $("#calendar-today").textContent = `${month + 1}/${now.getDate()}`;
+  const grid = $("#calendar-grid");
+  grid.innerHTML = "";
+  for (let index = 0; index < firstDay; index += 1) {
+    const blank = document.createElement("span");
+    blank.className = "muted-day";
+    grid.append(blank);
+  }
+  for (let day = 1; day <= days; day += 1) {
+    const cell = document.createElement("span");
+    cell.textContent = day;
+    if (day === now.getDate()) cell.className = "today";
+    grid.append(cell);
+  }
+}
+
 function taskAssigneeName(assignee) {
   return assignee.ownerName ? `${assignee.ownerName}’s ${assignee.name}` : assignee.name;
 }
 
 function renderAITasks() {
   const summary = state.taskSummary;
+  $("#overview-task-count").textContent = state.tasks.length;
+  $("#overview-progress-count").textContent = summary.in_progress ?? 0;
+  $("#overview-completed-count").textContent = summary.completed ?? 0;
   $("#task-count-all").textContent = state.tasks.length;
   $("#task-count-assigned").textContent = summary.assigned ?? 0;
   $("#task-count-in-progress").textContent = summary.in_progress ?? 0;
@@ -575,7 +616,8 @@ async function loadAccountDashboard() {
   state.tasks = taskData.tasks;
   state.taskSummary = taskData.summary;
   $("#account-email").textContent = account.email;
-  $("#dashboard-owner").textContent = dashboardOwnerName(account.email);
+  renderOverviewHeader(account);
+  renderOverviewCalendar();
   for (const session of sessions) {
     localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
   }
@@ -587,6 +629,7 @@ async function loadAccountDashboard() {
   $("#account-create-panel").classList.add("hidden");
   $("#account-register").classList.add("hidden");
   $("#account-dashboard").classList.remove("hidden");
+  $("#account-view").classList.add("dashboard-mode");
   show("#account-view");
   return sessions;
 }
@@ -594,6 +637,7 @@ async function loadAccountDashboard() {
 async function showAccountView() {
   show("#account-view");
   if (!loadAccountCredential()) {
+    $("#account-view").classList.remove("dashboard-mode");
     $("#account-register").classList.remove("hidden");
     $("#account-dashboard").classList.add("hidden");
     return;
@@ -607,6 +651,7 @@ async function showAccountView() {
       state.accountToken = null;
       $("#account-register").classList.remove("hidden");
       $("#account-dashboard").classList.add("hidden");
+      $("#account-view").classList.remove("dashboard-mode");
       toast("账户密钥已失效，请导入账户备份");
       return;
     }
@@ -776,6 +821,7 @@ $("#account-logout").addEventListener("click", () => {
   state.taskRefreshTimer = null;
   $("#account-dashboard").classList.add("hidden");
   $("#account-register").classList.remove("hidden");
+  $("#account-view").classList.remove("dashboard-mode");
   toast("已从这台设备退出");
 });
 
@@ -801,11 +847,15 @@ $("#refresh-ai-tasks").addEventListener("click", async (event) => {
   }
 });
 
-$("#show-account-create").addEventListener("click", () => {
+function showAccountCreatePanel() {
   const panel = $("#account-create-panel");
   panel.classList.remove("hidden");
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
   $("#account-create-form [name=name]").focus();
-});
+}
+
+$("#show-account-create").addEventListener("click", showAccountCreatePanel);
+$("#show-account-create-inline").addEventListener("click", showAccountCreatePanel);
 
 $("#cancel-account-create").addEventListener("click", () => {
   $("#account-create-panel").classList.add("hidden");

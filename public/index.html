@@ -63,70 +63,123 @@
           </div>
         </div>
 
-        <div id="account-dashboard" class="hidden">
-          <div class="account-heading">
-            <div>
-              <p class="eyebrow">MY SESSIONS</p>
-              <h1>我的会话</h1>
-              <p id="account-email" class="muted"></p>
+        <div id="account-dashboard" class="overview-shell hidden">
+          <nav class="overview-sidebar" aria-label="首页导航">
+            <div class="overview-brand"><span>GR</span><strong>Group Relay</strong></div>
+            <div class="overview-profile">
+              <span class="overview-avatar">AI</span>
+              <strong id="sidebar-owner">Yunfei</strong>
+              <small>AI 工作台</small>
             </div>
-            <button id="account-logout" class="text-button" type="button">退出本机</button>
-          </div>
-          <div class="install-tip">
-            <strong id="client-tip-title">安装到 iPhone</strong>
-            <span id="client-tip-text">在 Safari 点“分享”，选择“添加到主屏幕”。请使用固定域名，临时 Cloudflare 地址变化后已安装客户端会失效。</span>
-          </div>
-          <section class="ai-task-dashboard" aria-labelledby="ai-dashboard-title">
-            <div class="dashboard-heading">
+            <div class="overview-nav">
+              <a class="active" href="#overview-top">⌂ <span>总览</span></a>
+              <a href="#ai-workboard">◎ <span>AI 任务</span></a>
+              <a href="#my-groups">◫ <span>我的群组</span></a>
+            </div>
+            <div class="overview-sidebar-footer">
+              <small id="account-email"></small>
+              <button id="account-logout" class="sidebar-logout" type="button">退出本机</button>
+            </div>
+          </nav>
+
+          <div class="overview-content">
+            <div id="overview-top" class="overview-hero">
               <div>
-                <p class="eyebrow">AI WORKBOARD</p>
-                <h2 id="ai-dashboard-title"><span id="dashboard-owner">Yunfei</span> 的 AI 看板</h2>
-                <p class="muted compact">在群聊中发送“@AI + Jira 链接”，任务会自动出现在这里。</p>
+                <p class="eyebrow">PERSONAL AI OVERVIEW</p>
+                <h1><span id="overview-greeting">你好</span>，<span id="overview-owner">Yunfei</span></h1>
+                <p id="overview-date" class="muted"></p>
               </div>
-              <button id="refresh-ai-tasks" class="text-button" type="button">刷新</button>
+              <div class="hero-orb" aria-hidden="true">AI</div>
             </div>
-            <div class="task-summary" aria-label="任务统计">
-              <button class="task-stat active" type="button" data-task-filter="all"><strong id="task-count-all">0</strong><span>全部</span></button>
-              <button class="task-stat" type="button" data-task-filter="assigned"><strong id="task-count-assigned">0</strong><span>待开始</span></button>
-              <button class="task-stat" type="button" data-task-filter="in_progress"><strong id="task-count-in-progress">0</strong><span>进行中</span></button>
-              <button class="task-stat" type="button" data-task-filter="completed"><strong id="task-count-completed">0</strong><span>已完成</span></button>
-              <button class="task-stat" type="button" data-task-filter="failed"><strong id="task-count-failed">0</strong><span>需处理</span></button>
+
+            <div class="overview-metrics" aria-label="工作台统计">
+              <article><span class="metric-icon groups">◫</span><div><strong id="overview-group-count">0</strong><small>我的群组</small></div></article>
+              <article><span class="metric-icon tasks">◎</span><div><strong id="overview-task-count">0</strong><small>Jira 任务</small></div></article>
+              <article><span class="metric-icon progress">↻</span><div><strong id="overview-progress-count">0</strong><small>正在处理</small></div></article>
+              <article><span class="metric-icon done">✓</span><div><strong id="overview-completed-count">0</strong><small>已经完成</small></div></article>
             </div>
-            <div id="ai-task-list" class="ai-task-list"></div>
-            <div id="empty-ai-tasks" class="task-empty">
-              暂无 Jira 任务。在自己的群组里 @AI 并粘贴 Jira 链接即可分配。
-            </div>
-          </section>
-          <div class="account-actions">
-            <button id="show-account-create" type="button">创建群组</button>
-            <button id="start-browser-transfer" class="secondary" type="button">从浏览器导入会话</button>
-          </div>
-          <div id="account-create-panel" class="account-create-panel hidden">
-            <div class="panel-heading">
-              <div>
-                <strong>创建新群组</strong>
-                <p class="muted compact">创建后会自动加入当前邮箱账户。</p>
+
+            <div id="account-create-panel" class="account-create-panel hidden">
+              <div class="panel-heading">
+                <div>
+                  <strong>创建新群组</strong>
+                  <p class="muted compact">创建后会自动加入当前邮箱账户。</p>
+                </div>
+                <button id="cancel-account-create" class="text-button" type="button">取消</button>
               </div>
-              <button id="cancel-account-create" class="text-button" type="button">取消</button>
+              <form id="account-create-form">
+                <label>群组名称<input name="name" required maxlength="80" placeholder="例如：支付重构讨论" /></label>
+                <label>你的名字<input name="ownerName" required maxlength="60" placeholder="例如：Yunfei" /></label>
+                <button type="submit">创建并打开群组</button>
+              </form>
             </div>
-            <form id="account-create-form">
-              <label>群组名称<input name="name" required maxlength="80" placeholder="例如：支付重构讨论" /></label>
-              <label>你的名字<input name="ownerName" required maxlength="60" placeholder="例如：Yunfei" /></label>
-              <button type="submit">创建并打开群组</button>
-            </form>
-          </div>
-          <p id="import-result" class="muted compact"></p>
-          <details class="advanced-recovery">
-            <summary>高级恢复</summary>
-            <div>
-              <button id="export-account" class="secondary" type="button">下载账户备份</button>
-              <label class="file-button">导入账户备份<input id="import-account-file" type="file" accept="application/json,.json" /></label>
+
+            <div class="overview-grid">
+              <div class="overview-primary">
+                <section id="ai-workboard" class="ai-task-dashboard" aria-labelledby="ai-dashboard-title">
+                  <div class="dashboard-heading">
+                    <div>
+                      <p class="eyebrow">AI WORKBOARD</p>
+                      <h2 id="ai-dashboard-title"><span id="dashboard-owner">Yunfei</span> 的 AI 看板</h2>
+                      <p class="muted compact">在群聊中发送“@AI + Jira 链接”，任务会自动出现在这里。</p>
+                    </div>
+                    <button id="refresh-ai-tasks" class="text-button" type="button">刷新</button>
+                  </div>
+                  <div class="task-summary" aria-label="任务统计">
+                    <button class="task-stat active" type="button" data-task-filter="all"><strong id="task-count-all">0</strong><span>全部</span></button>
+                    <button class="task-stat" type="button" data-task-filter="assigned"><strong id="task-count-assigned">0</strong><span>待开始</span></button>
+                    <button class="task-stat" type="button" data-task-filter="in_progress"><strong id="task-count-in-progress">0</strong><span>进行中</span></button>
+                    <button class="task-stat" type="button" data-task-filter="completed"><strong id="task-count-completed">0</strong><span>已完成</span></button>
+                    <button class="task-stat" type="button" data-task-filter="failed"><strong id="task-count-failed">0</strong><span>需处理</span></button>
+                  </div>
+                  <div id="ai-task-list" class="ai-task-list"></div>
+                  <div id="empty-ai-tasks" class="task-empty">暂无 Jira 任务。在自己的群组里 @AI 并粘贴 Jira 链接即可分配。</div>
+                </section>
+
+                <section id="my-groups" class="groups-overview-card">
+                  <div class="dashboard-heading">
+                    <div><p class="eyebrow">MY GROUPS</p><h2>最近群组</h2></div>
+                    <button id="show-account-create-inline" class="text-button" type="button">＋ 新建</button>
+                  </div>
+                  <div id="session-list" class="session-list"></div>
+                  <div id="empty-sessions" class="empty-state hidden">
+                    <p>还没有归入这个账户的会话。</p>
+                    <p>创建群组，或通过邀请链接加入新群组。</p>
+                  </div>
+                </section>
+              </div>
+
+              <div class="overview-rail">
+                <section class="calendar-card">
+                  <div class="rail-heading"><strong id="calendar-title">本月</strong><span id="calendar-today"></span></div>
+                  <div class="calendar-week"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div>
+                  <div id="calendar-grid" class="calendar-grid"></div>
+                </section>
+
+                <section class="quick-actions-card">
+                  <p class="eyebrow">QUICK ACTIONS</p>
+                  <h2>快捷操作</h2>
+                  <div class="account-actions">
+                    <button id="show-account-create" type="button">＋ 创建群组</button>
+                    <button id="start-browser-transfer" class="secondary" type="button">从浏览器导入会话</button>
+                  </div>
+                  <p id="import-result" class="muted compact"></p>
+                </section>
+
+                <div class="install-tip">
+                  <strong id="client-tip-title">安装到 iPhone</strong>
+                  <span id="client-tip-text">在 Safari 点“分享”，选择“添加到主屏幕”。请使用固定域名。</span>
+                </div>
+
+                <details class="advanced-recovery">
+                  <summary>账户与高级恢复</summary>
+                  <div>
+                    <button id="export-account" class="secondary" type="button">下载账户备份</button>
+                    <label class="file-button">导入账户备份<input id="import-account-file" type="file" accept="application/json,.json" /></label>
+                  </div>
+                </details>
+              </div>
             </div>
-          </details>
-          <div id="session-list" class="session-list"></div>
-          <div id="empty-sessions" class="empty-state hidden">
-            <p>还没有归入这个账户的会话。</p>
-            <p>先点“导入本浏览器会话”，或通过邀请链接加入新群组。</p>
           </div>
         </div>
       </section>
