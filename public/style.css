@@ -640,6 +640,15 @@ aside li > span:nth-child(2) { min-width: 0; }
 .presence-dot.online { background: #2aae68; }
 .presence-dot.busy { background: #e49a2f; }
 .presence-dot.offline { background: #9aa19c; }
+.chat-ai-panel { margin-top: 22px; padding: 12px; border: 1px solid #dbe5dc; border-radius: 12px; background: white; }
+.chat-ai-panel > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.chat-ai-panel > div:first-child strong { font-size: 12px; }
+.chat-ai-panel > div:first-child button { padding: 3px; font-size: 9px; }
+.chat-ai-panel p { margin: 8px 0 10px; color: #7b857e; font-size: 10px; line-height: 1.45; }
+.chat-ai-actions { display: grid; gap: 7px; }
+.chat-ai-actions button { width: 100%; padding: 8px; font-size: 10px; }
+.chat-ai-actions button.attached { color: #8a5714; border-color: #efd29d; background: #fff4df; }
+.chat-ai-actions button:disabled { color: #9ba29c; background: #f0f2f0; }
 .storage-note { margin-top: 28px; color: #7c877f; font-size: 12px; line-height: 1.5; }
 .conversation {
   min-width: 0;

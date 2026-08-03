@@ -15,6 +15,8 @@ const state = {
   canManageTrustedExecution: false,
   account: null,
   accountToken: null,
+  accountSessions: [],
+  aiProviderStatus: [],
   tasks: [],
   taskSummary: {},
   taskFilter: "all",
@@ -481,7 +483,7 @@ async function loadChat() {
   });
   startRealtime();
   startPresenceRefresh();
-  ensureAccountForCurrentSession().catch(() => {});
+  void refreshChatAIControls();
   return true;
 }
 
@@ -562,6 +564,7 @@ function stopChatRealtime() {
   state.memberId = null;
   state.members = [];
   state.rendered.clear();
+  $("#chat-ai-panel").classList.add("hidden");
 }
 
 function showChatLoading(groupName = "") {
@@ -569,6 +572,7 @@ function showChatLoading(groupName = "") {
   $("#connection").textContent = "正在加载消息…";
   $("#connection").classList.remove("online");
   $("#member-list").innerHTML = "";
+  $("#chat-ai-panel").classList.add("hidden");
   $("#messages").innerHTML = "";
   $("#mention-menu").classList.add("hidden");
   $("#file-count").textContent = "";
@@ -871,6 +875,7 @@ function setOverviewView(view, { updateHash = true } = {}) {
 }
 
 function renderAISettings(providers) {
+  state.aiProviderStatus = providers;
   for (const provider of ["codex", "claude", "cursor"]) {
     const card = document.querySelector(`[data-ai-provider="${provider}"]`);
     const status = providers.find((item) => item.provider === provider) ?? {};
@@ -941,6 +946,84 @@ async function loadAISettings() {
   }
 }
 
+function renderChatAIControls(session, providers) {
+  const panel = $("#chat-ai-panel");
+  const actions = $("#chat-ai-actions");
+  const attachedProviders = new Set((session.desktopAis ?? []).map((member) => member.provider));
+  const usableProviders = providers.filter((provider) => provider.cliAvailable === true);
+  panel.classList.remove("hidden");
+  actions.innerHTML = "";
+  $("#chat-ai-help").textContent = usableProviders.length
+    ? "选择已经在本机接入的 AI 加入当前群组。群成员随后可以直接 @ 它。"
+    : "当前没有可运行的本机 AI。请先在“接入设置”中配置并安装对应 CLI。";
+
+  for (const provider of ["codex", "claude", "cursor"]) {
+    const label = aiProviderLabels[provider];
+    const status = providers.find((item) => item.provider === provider) ?? {};
+    const attached = attachedProviders.has(provider);
+    const usable = status.cliAvailable === true;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `secondary ${attached ? "attached" : ""}`;
+    button.textContent = attached ? `${label} · 离开` : usable ? `＋ ${label} 加入` : `${label} · 未接入`;
+    button.disabled = !attached && !usable;
+    button.title = attached
+      ? `让我的 ${label} 离开当前群组`
+      : usable ? `把本机 ${label} 加入当前群组` : `请先安装并配置 ${label} CLI`;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        const bridge = desktopNativeBridge();
+        if (!bridge) throw new Error("请在 Group Relay 桌面客户端中管理本机 AI");
+        if (attached) {
+          const result = await accountApi(`/api/account/sessions/${state.groupId}/ais/${provider}`, { method: "DELETE" });
+          bridge.postMessage({ action: "removeAIWorker", workerId: result.workerId });
+          toast(`${label} 已离开当前群组`);
+        } else {
+          const result = await accountApi(`/api/account/sessions/${state.groupId}/ais`, {
+            method: "POST",
+            body: JSON.stringify({ provider })
+          });
+          bridge.postMessage({ action: "configureAIWorker", worker: result.worker });
+          toast(`${label} 已加入当前群组`);
+        }
+        await Promise.all([refreshMembers(), refreshChatAIControls()]);
+      } catch (error) {
+        button.disabled = false;
+        toast(error.message);
+      }
+    });
+    actions.append(button);
+  }
+}
+
+async function refreshChatAIControls() {
+  const requestedGroupId = state.groupId;
+  if (!requestedGroupId || !desktopNativeBridge()) {
+    $("#chat-ai-panel").classList.add("hidden");
+    return;
+  }
+  $("#chat-ai-panel").classList.remove("hidden");
+  $("#chat-ai-help").textContent = "正在读取本机 AI 配置…";
+  $("#chat-ai-actions").innerHTML = "";
+  try {
+    await ensureAccountForCurrentSession();
+    const [{ sessions }, settings] = await Promise.all([
+      accountApi("/api/account/sessions"),
+      requestNative("getAISettings")
+    ]);
+    if (state.groupId !== requestedGroupId) return;
+    state.accountSessions = sessions;
+    state.aiProviderStatus = settings.providers ?? [];
+    const session = sessions.find((item) => item.group.id === requestedGroupId);
+    if (!session) throw new Error("当前群组尚未同步到本机账户");
+    renderChatAIControls(session, state.aiProviderStatus);
+  } catch (error) {
+    if (state.groupId !== requestedGroupId) return;
+    $("#chat-ai-help").textContent = error.message;
+  }
+}
+
 function showAccountDashboardShell(view = overviewViewFromHash()) {
   $("#account-dashboard").classList.remove("hidden");
   $("#account-view").classList.add("dashboard-mode");
@@ -961,6 +1044,7 @@ async function loadAccountDashboard() {
     accountApi("/api/account/tasks")
   ]);
   state.account = account;
+  state.accountSessions = sessions;
   state.tasks = taskData.tasks;
   state.taskSummary = taskData.summary;
   $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
@@ -1500,6 +1584,13 @@ $("#back-to-groups").addEventListener("click", (event) => {
   history.replaceState({}, "", "/app#groups");
   stopChatRealtime();
   showAccountDashboardShell("groups");
+  void showAccountView();
+});
+
+$("#chat-ai-settings").addEventListener("click", () => {
+  history.replaceState({}, "", "/app#settings");
+  stopChatRealtime();
+  showAccountDashboardShell("settings");
   void showAccountView();
 });
 
