@@ -48,6 +48,17 @@ const accountSchema = z.object({
   email: z.string().trim().email().max(254)
 });
 
+const accountProfileSchema = z.object({
+  displayName: z.string().trim().min(1).max(60),
+  avatarDataUrl: z.string().max(750_000).nullable()
+}).strict().superRefine((value, ctx) => {
+  if (value.avatarDataUrl === null) return;
+  const match = value.avatarDataUrl.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!match || Buffer.from(match[2], "base64").byteLength > 512 * 1024) {
+    ctx.addIssue({ code: "custom", path: ["avatarDataUrl"], message: "avatar must be a PNG, JPEG or WebP image up to 512 KB" });
+  }
+});
+
 const desktopAiSchema = z.object({
   provider: z.enum(["codex", "claude", "cursor"])
 });
@@ -150,6 +161,8 @@ export async function createApp(options = {}) {
     return {
       id: account.id,
       email: account.email,
+      displayName: account.displayName ?? null,
+      avatarDataUrl: account.avatarDataUrl ?? null,
       createdAt: account.createdAt
     };
   }
@@ -292,6 +305,19 @@ export async function createApp(options = {}) {
 
   app.get("/api/account", requireAccount, (req, res) => {
     res.json({ account: publicAccount(req.account) });
+  });
+
+  app.patch("/api/account", requireAccount, async (req, res, next) => {
+    try {
+      const profile = accountProfileSchema.parse(req.body);
+      const account = await store.updateAccountProfile(req.account.id, profile);
+      if (!account) return res.status(404).json({ error: "account not found" });
+      const updatedMembers = await store.renameAccountMemberships(account, profile.displayName);
+      for (const { groupId, member } of updatedMembers) publish(groupId, "member_updated", publicMember(member));
+      res.json({ account: publicAccount(account) });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/account/sessions", requireAccount, async (req, res, next) => {

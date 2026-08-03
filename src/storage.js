@@ -138,6 +138,8 @@ export class FileStore {
         id: id(),
         email: normalizedEmail,
         normalizedEmail,
+        displayName: null,
+        avatarDataUrl: null,
         token: secret(),
         createdAt: new Date().toISOString(),
         memberships: []
@@ -151,6 +153,40 @@ export class FileStore {
     if (!token) return null;
     return Object.values(await this.accounts())
       .find((account) => account.token === token) ?? null;
+  }
+
+  async updateAccountProfile(accountId, profile) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[accountId];
+      if (!account) return null;
+      account.displayName = profile.displayName;
+      account.avatarDataUrl = profile.avatarDataUrl;
+      account.updatedAt = new Date().toISOString();
+      return account;
+    });
+  }
+
+  async renameAccountMemberships(account, displayName) {
+    const updated = [];
+    for (const membership of account.memberships ?? []) {
+      const members = await this.updateMembers(membership.groupId, (items) => {
+        const changed = [];
+        const human = items.find((member) => member.id === membership.memberId && member.type === "human");
+        if (human && human.name !== displayName) {
+          human.name = displayName;
+          changed.push(human);
+        }
+        for (const member of items) {
+          if (member.type === "ai" && member.desktopOwnerAccountId === account.id && member.ownerName !== displayName) {
+            member.ownerName = displayName;
+            changed.push(member);
+          }
+        }
+        return changed;
+      }).catch(() => []);
+      updated.push(...members.map((member) => ({ groupId: membership.groupId, member })));
+    }
+    return updated;
   }
 
   async linkAccountMemberships(accountId, memberships) {

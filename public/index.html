@@ -53,8 +53,11 @@
           <nav class="overview-sidebar" aria-label="首页导航">
             <div class="overview-brand"><span>GR</span><strong>Group Relay</strong></div>
             <div class="overview-profile">
-              <span class="overview-avatar">AI</span>
-              <strong id="sidebar-owner">Yunfei</strong>
+              <button id="open-profile-settings" class="overview-avatar" type="button" title="编辑个人资料">
+                <img id="sidebar-avatar-image" class="hidden" alt="个人头像" />
+                <span id="sidebar-avatar-fallback">我</span>
+              </button>
+              <strong id="sidebar-owner">我</strong>
               <small>AI 工作台</small>
             </div>
             <div class="overview-nav">
@@ -75,7 +78,7 @@
             <div id="overview-top" class="overview-hero">
               <div>
                 <p class="eyebrow">PERSONAL AI OVERVIEW</p>
-                <h1><span id="overview-greeting">你好</span>，<span id="overview-owner">Yunfei</span></h1>
+                <h1><span id="overview-greeting">你好</span>，<span id="overview-owner">我</span></h1>
                 <p id="overview-date" class="muted"></p>
               </div>
               <div class="hero-orb" aria-hidden="true">AI</div>
@@ -109,7 +112,7 @@
                   <div class="dashboard-heading">
                     <div>
                       <p class="eyebrow">AI WORKBOARD</p>
-                      <h2 id="ai-dashboard-title"><span id="dashboard-owner">Yunfei</span> 的 AI 看板</h2>
+                      <h2 id="ai-dashboard-title"><span id="dashboard-owner">我</span>的 AI 看板</h2>
                       <p class="muted compact">在群聊中发送“@AI + Jira 链接”，任务会自动出现在这里。</p>
                     </div>
                     <button id="refresh-ai-tasks" class="text-button" type="button">刷新</button>
@@ -176,10 +179,26 @@
             <section id="ai-settings" class="ai-settings-card">
               <div class="settings-heading">
                 <div>
-                  <p class="eyebrow">DESKTOP AI SETTINGS</p>
-                  <h2>AI 接入设置</h2>
-                  <p class="muted compact">查看本机接入状态并管理 API Key。密钥只保存在当前电脑的安全凭据存储中，不会上传到 Group Relay 服务器。</p>
+                  <p class="eyebrow">SETTINGS</p>
+                  <h2>设置</h2>
+                  <p class="muted compact">管理个人资料和本机 AI 接入。</p>
                 </div>
+              </div>
+              <form id="profile-settings-form" class="profile-settings-card">
+                <div class="profile-settings-heading"><strong>个人资料</strong><small>名字会同步到你的群组成员身份</small></div>
+                <div class="profile-avatar-editor">
+                  <div class="profile-avatar-preview">
+                    <img id="profile-avatar-image" class="hidden" alt="头像预览" />
+                    <span id="profile-avatar-fallback">我</span>
+                  </div>
+                  <label class="profile-avatar-upload">上传头像<input id="profile-avatar-input" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+                  <button id="remove-profile-avatar" class="text-button" type="button">移除头像</button>
+                </div>
+                <label>我的名字<input name="displayName" required maxlength="60" placeholder="输入你的名字" /></label>
+                <button type="submit">保存个人资料</button>
+              </form>
+              <div class="ai-provider-section-heading">
+                <div><strong>AI 接入</strong><small>查看接入状态并管理 API Key</small></div>
                 <button id="refresh-ai-settings" class="text-button" type="button">刷新状态</button>
               </div>
               <div id="ai-settings-notice" class="settings-notice" role="status">正在读取桌面 AI 状态…</div>

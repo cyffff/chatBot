@@ -19,6 +19,7 @@ const state = {
   taskSummary: {},
   taskFilter: "all",
   taskRefreshTimer: null,
+  profileAvatarDataUrl: null,
   overviewView: "overview"
 };
 
@@ -709,11 +710,40 @@ function dashboardOwnerName(value) {
   return first.charAt(0).toLocaleUpperCase() + first.slice(1);
 }
 
+function accountOwnerName(account, sessions) {
+  const saved = String(account?.displayName ?? "").trim();
+  return saved || dashboardOwnerName(suggestedAccountMemberName(sessions));
+}
+
+function renderAvatar(imageSelector, fallbackSelector, avatarDataUrl, owner) {
+  const image = $(imageSelector);
+  const fallback = $(fallbackSelector);
+  if (avatarDataUrl) {
+    image.src = avatarDataUrl;
+    image.classList.remove("hidden");
+    fallback.classList.add("hidden");
+  } else {
+    image.removeAttribute("src");
+    image.classList.add("hidden");
+    fallback.textContent = Array.from(owner || "我")[0]?.toLocaleUpperCase() ?? "我";
+    fallback.classList.remove("hidden");
+  }
+}
+
+function renderAccountProfile(account, sessions) {
+  const owner = accountOwnerName(account, sessions);
+  state.profileAvatarDataUrl = account.avatarDataUrl ?? null;
+  $("#profile-settings-form [name=displayName]").value = owner;
+  renderAvatar("#sidebar-avatar-image", "#sidebar-avatar-fallback", account.avatarDataUrl, owner);
+  renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", account.avatarDataUrl, owner);
+  return owner;
+}
+
 function renderOverviewHeader(account, sessions) {
   const now = new Date();
   const hour = now.getHours();
   const greeting = hour < 6 ? "夜深了" : hour < 12 ? "早上好" : hour < 18 ? "下午好" : "晚上好";
-  const owner = dashboardOwnerName(suggestedAccountMemberName(sessions));
+  const owner = renderAccountProfile(account, sessions);
   $("#overview-greeting").textContent = greeting;
   $("#overview-owner").textContent = owner;
   $("#dashboard-owner").textContent = owner;
@@ -1105,6 +1135,78 @@ for (const button of document.querySelectorAll("[data-task-filter]")) {
 }
 
 $("#refresh-ai-settings").addEventListener("click", () => { void loadAISettings(); });
+
+$("#open-profile-settings").addEventListener("click", () => setOverviewView("settings"));
+
+async function profileAvatarFromFile(file) {
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    throw new Error("头像只支持 PNG、JPEG 或 WebP");
+  }
+  if (file.size > 5 * 1024 * 1024) throw new Error("原始头像不能超过 5 MB");
+  const source = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    image.src = source;
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("无法读取这张图片"));
+    });
+    const size = 256;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext("2d");
+    const scale = Math.max(size / image.naturalWidth, size / image.naturalHeight);
+    const width = image.naturalWidth * scale;
+    const height = image.naturalHeight * scale;
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, size, size);
+    context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height);
+    return canvas.toDataURL("image/jpeg", 0.86);
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
+$("#profile-avatar-input").addEventListener("change", async (event) => {
+  const [file] = event.target.files;
+  event.target.value = "";
+  if (!file) return;
+  try {
+    state.profileAvatarDataUrl = await profileAvatarFromFile(file);
+    const owner = $("#profile-settings-form [name=displayName]").value.trim() || "我";
+    renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", state.profileAvatarDataUrl, owner);
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#remove-profile-avatar").addEventListener("click", () => {
+  state.profileAvatarDataUrl = null;
+  const owner = $("#profile-settings-form [name=displayName]").value.trim() || "我";
+  renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", null, owner);
+});
+
+$("#profile-settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const displayName = form.elements.displayName.value.trim();
+  if (!displayName) return;
+  form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
+  try {
+    const { account } = await accountApi("/api/account", {
+      method: "PATCH",
+      body: JSON.stringify({ displayName, avatarDataUrl: state.profileAvatarDataUrl })
+    });
+    state.account = account;
+    await loadAccountDashboard();
+    toast("个人资料已保存，群聊名字已同步更新");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; });
+  }
+});
 
 for (const form of document.querySelectorAll(".ai-key-form")) {
   form.addEventListener("submit", async (event) => {

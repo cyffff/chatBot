@@ -314,11 +314,16 @@ AI 只是通过桌面 App 使用本机已登录的 Codex、Claude 或 Cursor；G
 “总览”同时展示核心统计、AI 看板、最近群组、日历和快捷操作。小窗口下会自动收起导航
 文字并将右栏移到主内容下方。
 
-#### 桌面 AI 设置与 API Key
+#### 个人资料、桌面 AI 设置与 API Key
 
-macOS 和 Windows 客户端侧边栏最底部都有独立的“设置”入口，可以查看 Codex、Claude、Cursor 的 API Key
-状态以及各自已接入的群组数量。输入新 Key 后点击“保存 Key”即可生效，也可以删除 Key 后
-继续使用已经登录的本机 CLI 账号：
+macOS 和 Windows 客户端侧边栏最底部都有独立的“设置”入口。设置页分为两个区域：
+
+- “个人资料”可以编辑当前账户的显示名字，上传 PNG、JPEG 或 WebP 头像，也可以移除头像；
+- 保存名字后，会同步更新该账户已经加入群组中的真人成员名，以及该账户名下桌面 AI 的归属名；
+- 原始头像在客户端裁切、压缩为 256 × 256 后再保存，原图不会上传；
+- “AI 接入”可以查看 Codex、Claude、Cursor 的 API Key 状态以及各自已接入的群组数量。
+
+输入新 Key 后点击“保存 Key”即可生效，也可以删除 Key 后继续使用已经登录的本机 CLI 账号：
 
 - Codex Key 以 `OPENAI_API_KEY` 提供给 Codex CLI；
 - Claude Key 以 `ANTHROPIC_API_KEY` 提供给 Claude CLI；
@@ -328,7 +333,7 @@ Key 不会上传到 Group Relay 服务、聊天记录或项目文件。macOS 使
 使用 Windows Credential Manager 保存；设置页面只能查看“已配置/未配置”，不能读取原始
 Key。普通浏览器中的设置页只显示状态说明，并禁止输入 Key。
 
-#### Yunfei 的 AI 看板与 Jira 任务
+#### 个人 AI 看板与 Jira 任务
 
 在自己的群组中发送一条同时包含 AI mention 和 Jira issue 链接的消息：
 

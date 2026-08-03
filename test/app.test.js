@@ -152,11 +152,22 @@ test("email accounts import validated browser sessions and list joined groups", 
   assert.equal(imported.body.sessions[0].member.name, "Yunfei");
   assert.equal(imported.body.sessions[0].memberToken, created.body.member.token);
 
+  const avatarDataUrl = "data:image/png;base64,iVBORw0KGgo=";
+  const profile = await json(base, "/api/account", {
+    method: "PATCH",
+    headers: { "X-Account-Token": account.body.accountToken },
+    body: JSON.stringify({ displayName: "Zoe", avatarDataUrl })
+  });
+  assert.equal(profile.response.status, 200);
+  assert.equal(profile.body.account.displayName, "Zoe");
+  assert.equal(profile.body.account.avatarDataUrl, avatarDataUrl);
+
   const listed = await json(base, "/api/account/sessions", {
     headers: { "X-Account-Token": account.body.accountToken }
   });
   assert.equal(listed.response.status, 200);
   assert.equal(listed.body.sessions.length, 1);
+  assert.equal(listed.body.sessions[0].member.name, "Zoe");
 
   const unauthorized = await json(base, "/api/account/sessions", {
     headers: { "X-Account-Token": "wrong" }
