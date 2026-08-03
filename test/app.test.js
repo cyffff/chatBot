@@ -117,15 +117,16 @@ test("email accounts import validated browser sessions and list joined groups", 
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
-    body: JSON.stringify({ email: "YUNFEI@example.com" })
+    body: JSON.stringify({ email: "YUNFEI.CAO@example.com" })
   });
   assert.equal(account.response.status, 201);
-  assert.equal(account.body.account.email, "yunfei@example.com");
+  assert.equal(account.body.account.email, "yunfei.cao@example.com");
+  assert.equal(account.body.account.displayName, "yunfei.cao");
   assert.ok(account.body.accountToken);
 
   const duplicate = await json(base, "/api/accounts", {
     method: "POST",
-    body: JSON.stringify({ email: "yunfei@example.com" })
+    body: JSON.stringify({ email: "yunfei.cao@example.com" })
   });
   assert.equal(duplicate.response.status, 409);
 

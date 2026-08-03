@@ -691,13 +691,6 @@ function renderAccountSessions(sessions) {
   }
 }
 
-function suggestedAccountMemberName(sessions) {
-  const humanSession = sessions.find((session) => session.member.type === "human");
-  if (humanSession?.member.name) return humanSession.member.name;
-  if (isAutomaticAccount()) return "我";
-  return state.account?.email?.split("@")[0] ?? "";
-}
-
 const taskStatusLabels = {
   assigned: "待开始",
   in_progress: "进行中",
@@ -705,14 +698,13 @@ const taskStatusLabels = {
   failed: "需处理"
 };
 
-function dashboardOwnerName(value) {
-  const first = String(value ?? "我").split("@")[0].split(/[._-]/)[0] || "我";
-  return first.charAt(0).toLocaleUpperCase() + first.slice(1);
+function accountEmailNickname(account) {
+  return String(account?.email ?? "").split("@")[0].trim() || "我";
 }
 
-function accountOwnerName(account, sessions) {
+function accountOwnerName(account) {
   const saved = String(account?.displayName ?? "").trim();
-  return saved || dashboardOwnerName(suggestedAccountMemberName(sessions));
+  return saved || accountEmailNickname(account);
 }
 
 function renderAvatar(imageSelector, fallbackSelector, avatarDataUrl, owner) {
@@ -730,20 +722,31 @@ function renderAvatar(imageSelector, fallbackSelector, avatarDataUrl, owner) {
   }
 }
 
-function renderAccountProfile(account, sessions) {
-  const owner = accountOwnerName(account, sessions);
+function renderAccountProfile(account) {
+  const owner = accountOwnerName(account);
   state.profileAvatarDataUrl = account.avatarDataUrl ?? null;
-  $("#profile-settings-form [name=displayName]").value = owner;
+  const form = $("#profile-settings-form");
+  form.elements.displayName.value = owner;
+  form.dataset.savedName = owner;
+  $("#profile-display-name").textContent = owner;
+  $("#profile-email").textContent = account.email;
   renderAvatar("#sidebar-avatar-image", "#sidebar-avatar-fallback", account.avatarDataUrl, owner);
   renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", account.avatarDataUrl, owner);
+  setProfileEditing(false);
   return owner;
 }
 
-function renderOverviewHeader(account, sessions) {
+function setProfileEditing(editing) {
+  $("#profile-editor").classList.toggle("hidden", !editing);
+  $("#edit-profile").classList.toggle("hidden", editing);
+  if (editing) $("#profile-settings-form [name=displayName]").focus();
+}
+
+function renderOverviewHeader(account) {
   const now = new Date();
   const hour = now.getHours();
   const greeting = hour < 6 ? "夜深了" : hour < 12 ? "早上好" : hour < 18 ? "下午好" : "晚上好";
-  const owner = renderAccountProfile(account, sessions);
+  const owner = renderAccountProfile(account);
   $("#overview-greeting").textContent = greeting;
   $("#overview-owner").textContent = owner;
   $("#dashboard-owner").textContent = owner;
@@ -957,7 +960,7 @@ async function loadAccountDashboard() {
   state.tasks = taskData.tasks;
   state.taskSummary = taskData.summary;
   $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
-  renderOverviewHeader(account, sessions);
+  renderOverviewHeader(account);
   renderOverviewCalendar();
   for (const session of sessions) {
     localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
@@ -966,7 +969,7 @@ async function loadAccountDashboard() {
   renderAITasks();
   startTaskRefresh();
   const ownerInput = $("#account-create-form [name=ownerName]");
-  if (!ownerInput.value) ownerInput.value = suggestedAccountMemberName(sessions);
+  if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
   $("#account-create-panel").classList.add("hidden");
   $("#account-dashboard").classList.remove("hidden");
   $("#account-view").classList.add("dashboard-mode");
@@ -1159,6 +1162,28 @@ for (const button of document.querySelectorAll("[data-task-filter]")) {
 $("#refresh-ai-settings").addEventListener("click", () => { void loadAISettings(); });
 
 $("#open-profile-settings").addEventListener("click", () => setOverviewView("settings"));
+
+$("#edit-profile").addEventListener("click", () => {
+  const form = $("#profile-settings-form");
+  form.elements.displayName.value = form.dataset.savedName || accountEmailNickname(state.account);
+  state.profileAvatarDataUrl = state.account?.avatarDataUrl ?? null;
+  renderAvatar(
+    "#profile-avatar-image",
+    "#profile-avatar-fallback",
+    state.profileAvatarDataUrl,
+    form.elements.displayName.value
+  );
+  setProfileEditing(true);
+});
+
+$("#cancel-profile-edit").addEventListener("click", () => {
+  const form = $("#profile-settings-form");
+  const owner = form.dataset.savedName || accountEmailNickname(state.account);
+  form.elements.displayName.value = owner;
+  state.profileAvatarDataUrl = state.account?.avatarDataUrl ?? null;
+  renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", state.profileAvatarDataUrl, owner);
+  setProfileEditing(false);
+});
 
 async function profileAvatarFromFile(file) {
   if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {

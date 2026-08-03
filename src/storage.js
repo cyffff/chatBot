@@ -138,7 +138,7 @@ export class FileStore {
         id: id(),
         email: normalizedEmail,
         normalizedEmail,
-        displayName: null,
+        displayName: normalizedEmail.split("@")[0],
         avatarDataUrl: null,
         token: secret(),
         createdAt: new Date().toISOString(),

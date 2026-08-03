@@ -185,17 +185,28 @@
                 </div>
               </div>
               <form id="profile-settings-form" class="profile-settings-card">
-                <div class="profile-settings-heading"><strong>个人资料</strong><small>名字会同步到你的群组成员身份</small></div>
-                <div class="profile-avatar-editor">
+                <div class="profile-settings-heading">
+                  <div><strong>个人资料</strong><small>默认昵称取注册邮箱 @ 前面的内容</small></div>
+                  <button id="edit-profile" class="text-button" type="button">编辑资料</button>
+                </div>
+                <div class="profile-summary">
                   <div class="profile-avatar-preview">
                     <img id="profile-avatar-image" class="hidden" alt="头像预览" />
                     <span id="profile-avatar-fallback">我</span>
                   </div>
-                  <label class="profile-avatar-upload">上传头像<input id="profile-avatar-input" type="file" accept="image/png,image/jpeg,image/webp" /></label>
-                  <button id="remove-profile-avatar" class="text-button" type="button">移除头像</button>
+                  <div><strong id="profile-display-name">我</strong><small id="profile-email"></small></div>
                 </div>
-                <label>我的名字<input name="displayName" required maxlength="60" placeholder="输入你的名字" /></label>
-                <button type="submit">保存个人资料</button>
+                <div id="profile-editor" class="profile-editor hidden">
+                  <div class="profile-avatar-editor">
+                    <label class="profile-avatar-upload">上传头像<input id="profile-avatar-input" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+                    <button id="remove-profile-avatar" class="text-button" type="button">移除头像</button>
+                  </div>
+                  <label>昵称<input name="displayName" required maxlength="60" placeholder="输入你的昵称" /></label>
+                  <div class="profile-editor-actions">
+                    <button type="submit">保存修改</button>
+                    <button id="cancel-profile-edit" class="secondary" type="button">取消</button>
+                  </div>
+                </div>
               </form>
               <div class="ai-provider-section-heading">
                 <div><strong>AI 接入</strong><small>查看接入状态并管理 API Key</small></div>
