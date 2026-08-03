@@ -157,6 +157,7 @@ async function resumeSession(groupId, inviteToken = null) {
   state.groupId = groupId;
   state.token = saved.token;
   state.inviteToken = inviteToken;
+  showChatLoading();
   try {
     await loadChat();
     history.replaceState({}, "", `/group/${state.groupId}`);
@@ -424,14 +425,17 @@ function renderMessage(message) {
 }
 
 async function loadChat() {
+  const requestedGroupId = state.groupId;
   const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor }] = await Promise.all([
     api(`/api/groups/${state.groupId}`),
     api(`/api/groups/${state.groupId}/messages?limit=200`)
   ]);
+  if (state.groupId !== requestedGroupId) return false;
   state.inviteToken = group.inviteToken;
   state.memberId = currentMemberId;
   state.canManageTrustedExecution = canManageTrustedExecution === true;
   $("#group-name").textContent = group.name;
+  $("#messages").innerHTML = "";
   renderMembers(members);
   messages.forEach(renderMessage);
   state.cursor = cursor;
@@ -443,6 +447,7 @@ async function loadChat() {
   startRealtime();
   startPresenceRefresh();
   ensureAccountForCurrentSession().catch(() => {});
+  return true;
 }
 
 async function refreshMembers() {
@@ -524,6 +529,46 @@ function stopChatRealtime() {
   state.rendered.clear();
 }
 
+function showChatLoading(groupName = "") {
+  $("#group-name").textContent = groupName || "正在打开群组";
+  $("#connection").textContent = "正在加载消息…";
+  $("#connection").classList.remove("online");
+  $("#member-list").innerHTML = "";
+  $("#messages").innerHTML = "";
+  $("#mention-menu").classList.add("hidden");
+  $("#file-count").textContent = "";
+  const loading = document.createElement("li");
+  loading.className = "chat-loading";
+  const spinner = document.createElement("span");
+  spinner.setAttribute("aria-hidden", "true");
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "正在进入群组";
+  const detail = document.createElement("small");
+  detail.textContent = "正在同步成员和最近消息…";
+  copy.append(title, detail);
+  loading.append(spinner, copy);
+  $("#messages").append(loading);
+  show("#chat-view");
+}
+
+async function openAccountSession(session) {
+  stopChatRealtime();
+  state.groupId = session.group.id;
+  state.token = session.memberToken;
+  localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ token: state.token }));
+  history.replaceState({}, "", `/group/${state.groupId}`);
+  showChatLoading(session.group.name);
+  try {
+    await loadChat();
+  } catch (error) {
+    stopChatRealtime();
+    history.replaceState({}, "", "/app#groups");
+    showAccountDashboardShell("groups");
+    toast(`无法打开群组：${error.message}`);
+  }
+}
+
 function renderAccountSessions(sessions) {
   const list = $("#session-list");
   list.innerHTML = "";
@@ -592,10 +637,7 @@ function renderAccountSessions(sessions) {
     const open = document.createElement("button");
     open.type = "button";
     open.textContent = "打开";
-    open.addEventListener("click", () => {
-      localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
-      location.href = `/group/${session.group.id}`;
-    });
+    open.addEventListener("click", () => { void openAccountSession(session); });
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "text-button";
@@ -1039,7 +1081,8 @@ $("#create-form").addEventListener("submit", async (event) => {
   try {
     const result = await createGroup(event.currentTarget);
     history.replaceState({}, "", `/group/${state.groupId}`);
-    await navigator.clipboard?.writeText(result.inviteUrl);
+    showChatLoading(result.group.name);
+    await navigator.clipboard?.writeText(result.inviteUrl).catch(() => {});
     await loadChat();
     toast("群组已创建，邀请链接已复制");
   } catch (error) {
@@ -1053,8 +1096,10 @@ $("#account-create-form").addEventListener("submit", async (event) => {
   button.disabled = true;
   try {
     const result = await createGroup(event.currentTarget);
+    history.replaceState({}, "", `/group/${state.groupId}`);
+    showChatLoading(result.group.name);
     await navigator.clipboard?.writeText(result.inviteUrl).catch(() => {});
-    location.href = `/group/${state.groupId}`;
+    await loadChat();
   } catch (error) {
     toast(error.message);
     button.disabled = false;
@@ -1080,6 +1125,7 @@ $("#join-form").addEventListener("submit", async (event) => {
     saveSession();
     await linkCurrentSessionToAccount().catch(() => {});
     history.replaceState({}, "", `/group/${state.groupId}`);
+    showChatLoading(result.group.name);
     await loadChat();
   } catch (error) {
     if (error.message === "invite not found") {
