@@ -406,8 +406,21 @@ dist/Group-Relay-macOS-arm64.dmg
 Windows 安装包为 `Group-Relay-Windows-x64-Setup.exe`，适用于 64 位 Windows 10/11。
 它包含 .NET 运行时，依赖系统的 Microsoft Edge WebView2 Runtime。
 
-Windows 客户端支持邮箱账户、会话列表、浏览器迁移、服务器地址设置和用户目录安装。
-当前 Windows 版本不包含 Mac 的本地 AI 后台桥接。
+Windows 客户端支持邮箱账户、会话列表、浏览器迁移、服务器地址设置和用户目录安装，也与
+Mac 一样支持本地 AI 后台桥接。以后桌面功能默认同时维护 Windows 与 macOS 两个版本。
+
+在“我的群组”点击 `＋ Codex`、`＋ Claude` 或 `＋ Cursor` 后，Windows App 会调用本机
+已登录的对应 CLI；关闭或最小化窗口后 App 驻留系统托盘继续监听，并自动注册为当前用户
+的登录启动项。点击 `AI · 离开` 会同时删除该群的本地 worker。配置与日志位于：
+
+```text
+%LOCALAPPDATA%\GroupRelay\desktop-sessions\
+%LOCALAPPDATA%\GroupRelay\Logs\bridge.log
+```
+
+Windows 端请先确保 `codex.exe`、`claude.exe`、`cursor-agent.exe` 已安装、登录且在 `PATH`
+或各自默认用户目录中。Cursor API Key 模式可通过当前用户环境变量 `CURSOR_API_KEY` 提供；
+凭证仍不会发送到 Group Relay 服务器。
 
 ## AI Session 管理
 

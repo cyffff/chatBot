@@ -500,7 +500,7 @@ function renderAccountSessions(sessions) {
         ? `让我的 ${labels[provider]} 离开这个群组`
         : `把本机已登录的 ${labels[provider]} 加入这个群组`;
       toggle.addEventListener("click", async () => {
-        const nativeBridge = window.webkit?.messageHandlers?.relayNative;
+        const nativeBridge = window.webkit?.messageHandlers?.relayNative ?? window.chrome?.webview;
         if (!nativeBridge) {
           toast("请在 Group Relay 桌面客户端中管理本机 AI");
           return;

@@ -20,7 +20,10 @@ internal sealed class RelayForm : Form
 {
     private const string DefaultServerUrl = "https://troops-prospects-dictionary-metals.trycloudflare.com";
     private readonly WebView2 webView = new() { Dock = DockStyle.Fill };
+    private readonly WindowsAiBridgeManager aiBridge = new();
+    private readonly NotifyIcon trayIcon = new();
     private string serverUrl;
+    private bool exiting;
 
     public RelayForm()
     {
@@ -30,12 +33,28 @@ internal sealed class RelayForm : Form
         Height = 820;
         MinimumSize = new Size(760, 560);
         StartPosition = FormStartPosition.CenterScreen;
+        trayIcon.Icon = SystemIcons.Application;
+        trayIcon.Text = "Group Relay";
+        trayIcon.Visible = true;
+        trayIcon.DoubleClick += (_, _) => RestoreWindow();
+        trayIcon.ContextMenuStrip = new ContextMenuStrip();
+        trayIcon.ContextMenuStrip.Items.Add("显示 Group Relay", null, (_, _) => RestoreWindow());
+        trayIcon.ContextMenuStrip.Items.Add("退出", null, (_, _) => ExitApplication());
 
         var menu = BuildMenu();
         MainMenuStrip = menu;
         Controls.Add(webView);
         Controls.Add(menu);
         Load += async (_, _) => await InitializeWebView();
+        Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) Hide(); };
+        FormClosing += (_, eventArgs) =>
+        {
+            if (exiting) return;
+            eventArgs.Cancel = true;
+            Hide();
+            trayIcon.ShowBalloonTip(1500, "Group Relay", "窗口已隐藏，桌面 AI 仍在后台运行。", ToolTipIcon.Info);
+        };
+        aiBridge.Start();
     }
 
     private MenuStrip BuildMenu()
@@ -45,7 +64,7 @@ internal sealed class RelayForm : Form
         app.DropDownItems.Add("服务器设置…", null, (_, _) => ShowServerSettings());
         app.DropDownItems.Add("在浏览器中打开", null, (_, _) => OpenExternal($"{serverUrl}/app"));
         app.DropDownItems.Add(new ToolStripSeparator());
-        app.DropDownItems.Add("退出", null, (_, _) => Close());
+        app.DropDownItems.Add("退出", null, (_, _) => ExitApplication());
 
         var view = new ToolStripMenuItem("显示");
         view.DropDownItems.Add("重新载入", null, (_, _) => webView.Reload());
@@ -110,19 +129,47 @@ internal sealed class RelayForm : Form
         {
             using var document = JsonDocument.Parse(eventArgs.WebMessageAsJson);
             var root = document.RootElement;
-            if (root.GetProperty("action").GetString() != "openExternal") return;
-            var rawUrl = root.GetProperty("url").GetString();
-            if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var url)) return;
             var server = new Uri(serverUrl);
-            if (url.Scheme is not ("http" or "https")) return;
-            if (!string.Equals(url.Host, server.Host, StringComparison.OrdinalIgnoreCase)) return;
-            if (!url.AbsolutePath.StartsWith("/transfer/", StringComparison.Ordinal)) return;
-            OpenExternal(url.AbsoluteUri);
+            if (!Uri.TryCreate(eventArgs.Source, UriKind.Absolute, out var source)) return;
+            if (!string.Equals(source.Host, server.Host, StringComparison.OrdinalIgnoreCase)) return;
+            switch (root.GetProperty("action").GetString())
+            {
+                case "openExternal":
+                    var rawUrl = root.GetProperty("url").GetString();
+                    if (!Uri.TryCreate(rawUrl, UriKind.Absolute, out var url)) return;
+                    if (url.Scheme is not ("http" or "https")) return;
+                    if (!string.Equals(url.Host, server.Host, StringComparison.OrdinalIgnoreCase)) return;
+                    if (!url.AbsolutePath.StartsWith("/transfer/", StringComparison.Ordinal)) return;
+                    OpenExternal(url.AbsoluteUri);
+                    break;
+                case "configureAIWorker":
+                    aiBridge.Configure(root.GetProperty("worker"));
+                    break;
+                case "removeAIWorker":
+                    aiBridge.Remove(root.GetProperty("workerId").GetString() ?? "");
+                    break;
+            }
         }
-        catch
+        catch (Exception error)
         {
-            // Ignore malformed or untrusted web messages.
+            MessageBox.Show(this, error.Message, "无法更新桌面 AI", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    private void RestoreWindow()
+    {
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    private void ExitApplication()
+    {
+        exiting = true;
+        aiBridge.Dispose();
+        trayIcon.Visible = false;
+        trayIcon.Dispose();
+        Application.Exit();
     }
 
     private static void OpenExternal(string url)
