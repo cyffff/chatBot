@@ -177,13 +177,42 @@ internal sealed class RelayForm : Form
 
     private object AiSettingsPayload()
     {
-        var providers = new[] { "codex", "claude", "cursor" }.Select(provider => new
+        var providers = new[] { "codex", "claude", "cursor" }.Select(provider =>
         {
-            provider,
-            keyConfigured = WindowsAiCredentials.IsConfigured(provider),
-            workerCount = aiBridge.ConfiguredCount(provider)
+            var cliPath = FindCliPath(provider);
+            return new
+            {
+                provider,
+                keyConfigured = WindowsAiCredentials.IsConfigured(provider),
+                credentialStore = "Windows Credential Manager",
+                cliAvailable = cliPath is not null,
+                cliPath = cliPath ?? "",
+                workerCount = aiBridge.ConfiguredCount(provider)
+            };
         });
         return new { platform = "windows", providers };
+    }
+
+    private static string? FindCliPath(string provider)
+    {
+        var names = provider switch
+        {
+            "codex" => new[] { "codex.exe" },
+            "claude" => new[] { "claude.exe" },
+            "cursor" => new[] { "cursor-agent.exe" },
+            _ => Array.Empty<string>()
+        };
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var candidates = names.SelectMany(name => new[]
+        {
+            Path.Combine(home, ".local", "bin", name),
+            Path.Combine(home, ".cursor", "bin", name),
+            Path.Combine(local, "Programs", "cursor-agent", name)
+        }).Concat((Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .SelectMany(directory => names.Select(name => Path.Combine(directory.Trim('"'), name))));
+        return candidates.FirstOrDefault(File.Exists);
     }
 
     private void SendNativeResponse(string requestId, object? result = null, string? error = null)

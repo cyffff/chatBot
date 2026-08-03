@@ -517,10 +517,23 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .provider-state { padding: 4px 7px; border-radius: 999px; color: #6f7972; background: #e9eeea; font-size: 9px; font-weight: 800; }
 .provider-state.ready { color: #1f6848; background: #dff1e4; }
 .provider-state.active { color: #8a5714; background: #fff0d6; }
+.provider-state.missing { color: #9a3d3d; background: #fde7e7; }
 .ai-provider-card dl { display: grid; gap: 7px; margin: 16px 0; }
 .ai-provider-card dl div { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; }
 .ai-provider-card dt { color: #7a857d; }
 .ai-provider-card dd { margin: 0; color: #334038; font-weight: 750; }
+.provider-help {
+  min-height: 45px;
+  margin: -2px 0 14px;
+  padding: 10px;
+  border-radius: 9px;
+  color: #6c776f;
+  background: #eef2ee;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.provider-help.ready { color: #286247; background: #e7f3e9; }
+.provider-help.missing { color: #913e3e; background: #fff0f0; }
 .ai-key-form { gap: 9px; margin: 0; }
 .ai-key-form label { font-size: 11px; }
 .ai-key-form input { padding: 10px 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }

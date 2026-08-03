@@ -290,9 +290,43 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             let count = workers.values.filter { value in
                 (value as? [String: Any])?["provider"] as? String == provider
             }.count
-            return ["provider": provider, "keyConfigured": hasAPIKey(provider), "workerCount": count]
+            let cliPath = cliExecutablePath(provider)
+            return [
+                "provider": provider,
+                "keyConfigured": hasAPIKey(provider),
+                "credentialStore": "macOS 钥匙串",
+                "cliAvailable": cliPath != nil,
+                "cliPath": cliPath ?? "",
+                "workerCount": count
+            ]
         }
         return ["platform": "macos", "providers": providers]
+    }
+
+    private func cliExecutablePath(_ provider: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let names: [String]
+        let preferred: [String]
+        switch provider {
+        case "codex":
+            names = ["codex"]
+            preferred = ["/Applications/ChatGPT.app/Contents/Resources/codex", "\(home)/.local/bin/codex"]
+        case "claude":
+            names = ["claude"]
+            preferred = ["\(home)/.local/bin/claude"]
+        case "cursor":
+            names = ["cursor-agent"]
+            preferred = ["\(home)/.local/bin/cursor-agent", "\(home)/.cursor/bin/cursor-agent"]
+        default:
+            return nil
+        }
+        let standard = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+            .flatMap { directory in names.map { "\(directory)/\($0)" } }
+        let fromPath = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .flatMap { directory in names.map { "\(directory)/\($0)" } }
+        return (preferred + standard + fromPath)
+            .first(where: FileManager.default.isExecutableFile(atPath:))
     }
 
     private func sendNativeResponse(requestId: String, result: [String: Any]? = nil, error: String? = nil) {

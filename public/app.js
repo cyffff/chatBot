@@ -872,20 +872,39 @@ function renderAISettings(providers) {
     const card = document.querySelector(`[data-ai-provider="${provider}"]`);
     const status = providers.find((item) => item.provider === provider) ?? {};
     const workerCount = Number(status.workerCount || 0);
-    card.querySelector("[data-key-state]").textContent = status.keyConfigured ? "已安全保存" : "未配置（使用 CLI 登录）";
+    const keyConfigured = status.keyConfigured === true;
+    const cliAvailable = status.cliAvailable === true;
+    card.querySelector("[data-key-state]").textContent = keyConfigured ? "已配置（内容已隐藏）" : "未配置";
+    card.querySelector("[data-mode-state]").textContent = keyConfigured
+      ? "API Key（优先）"
+      : cliAvailable ? "本机 CLI 登录账号" : "尚不可用";
+    const cliState = card.querySelector("[data-cli-state]");
+    cliState.textContent = cliAvailable ? "已安装" : "未找到";
+    cliState.title = status.cliPath || "";
+    card.querySelector("[data-key-storage]").textContent = keyConfigured
+      ? (status.credentialStore || "本机安全凭据")
+      : "未保存";
     card.querySelector("[data-worker-count]").textContent = `${workerCount} 个`;
+    const help = card.querySelector("[data-provider-help]");
     const badge = card.querySelector(".provider-state");
-    badge.classList.remove("ready", "active");
-    if (workerCount > 0) {
-      badge.textContent = "已接入";
-      badge.classList.add("active");
-    } else if (status.keyConfigured) {
+    badge.classList.remove("ready", "active", "missing");
+    help.classList.remove("ready", "missing");
+    if (keyConfigured) {
       badge.textContent = "Key 已配置";
       badge.classList.add("ready");
+      help.textContent = "后台回复会优先使用这个 API Key；保存新 Key 会覆盖旧配置。";
+      help.classList.add("ready");
+    } else if (cliAvailable) {
+      badge.textContent = "CLI 可用";
+      badge.classList.add("active");
+      help.textContent = "尚未配置 API Key；后台将使用本机 CLI 的登录账号。也可以在下方保存 Key。";
     } else {
-      badge.textContent = "CLI 模式";
+      badge.textContent = "未就绪";
+      badge.classList.add("missing");
+      help.textContent = `没有配置 API Key，也没有找到 ${aiProviderLabels[provider]} CLI。请保存 Key，或先安装并登录 CLI。`;
+      help.classList.add("missing");
     }
-    card.querySelector(".remove-ai-key").disabled = !status.keyConfigured;
+    card.querySelector(".remove-ai-key").disabled = !keyConfigured;
   }
 }
 
@@ -905,7 +924,10 @@ async function loadAISettings() {
   try {
     const result = await requestNative("getAISettings");
     renderAISettings(result.providers ?? []);
-    notice.textContent = "密钥保存在当前电脑的安全凭据存储中；页面和服务器都无法读取密钥内容。";
+    const configuredCount = (result.providers ?? []).filter((provider) => provider.keyConfigured).length;
+    notice.textContent = configuredCount > 0
+      ? `已读取本机配置：${configuredCount} 个 API Key 已安全保存。完整密钥不会显示，也不会上传服务器。`
+      : "当前没有保存 API Key；可使用已登录的本机 CLI，或在下方完成配置。";
   } catch (error) {
     notice.textContent = error.message;
     notice.className = "settings-notice error";
