@@ -90,13 +90,6 @@ button.secondary { color: #24573e; background: #e7f0e8; }
   text-decoration: none;
 }
 
-.account-heading {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
-}
-.account-heading .muted { margin: 8px 0 0; }
 .install-tip {
   display: grid;
   gap: 5px;
