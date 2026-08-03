@@ -396,6 +396,28 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .overview-rail .advanced-recovery { margin: 0; padding: 14px; border: 1px solid #dce6dd; border-radius: 13px; background: white; }
 .account-card.dashboard-mode .account-create-panel { margin: 0 0 12px; background: white; }
 
+.overview-content[data-view="tasks"] .overview-hero,
+.overview-content[data-view="tasks"] .overview-metrics,
+.overview-content[data-view="tasks"] .groups-overview-card,
+.overview-content[data-view="tasks"] .overview-rail,
+.overview-content[data-view="groups"] .overview-hero,
+.overview-content[data-view="groups"] .overview-metrics,
+.overview-content[data-view="groups"] .ai-task-dashboard,
+.overview-content[data-view="groups"] .overview-rail {
+  display: none;
+}
+.overview-content[data-view="tasks"] .overview-grid,
+.overview-content[data-view="groups"] .overview-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+.overview-content[data-view="tasks"] .ai-task-dashboard,
+.overview-content[data-view="groups"] .groups-overview-card {
+  min-height: calc(100vh - 112px);
+}
+.overview-content[data-view="groups"] .groups-overview-card .session-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .chat { width: min(1180px, 100%); height: min(860px, calc(100vh - 64px)); overflow: hidden; }
 header {
   height: 90px;
@@ -551,6 +573,7 @@ aside li > span:nth-child(2) { min-width: 0; }
   .overview-nav a { justify-content: center; font-size: 16px; }
   .sidebar-logout { padding-inline: 6px; font-size: 9px; }
   .overview-grid { grid-template-columns: minmax(0, 1fr); }
+  .overview-content[data-view="groups"] .groups-overview-card .session-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-rail .advanced-recovery { grid-column: 1 / -1; }
 }
@@ -588,6 +611,9 @@ aside li > span:nth-child(2) { min-width: 0; }
   .overview-rail { grid-template-columns: 1fr; }
   .overview-rail .advanced-recovery { grid-column: auto; }
   .groups-overview-card .session-list { grid-template-columns: 1fr; }
+  .overview-content[data-view="groups"] .groups-overview-card .session-list { grid-template-columns: 1fr; }
+  .overview-content[data-view="tasks"] .ai-task-dashboard,
+  .overview-content[data-view="groups"] .groups-overview-card { min-height: calc(100dvh - 88px); }
   .account-actions { display: grid; }
   .account-actions > * { width: 100%; text-align: center; }
   .account-create-panel form { grid-template-columns: 1fr; }

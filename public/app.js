@@ -15,7 +15,8 @@ const state = {
   tasks: [],
   taskSummary: {},
   taskFilter: "all",
-  taskRefreshTimer: null
+  taskRefreshTimer: null,
+  overviewView: "overview"
 };
 
 const accountStorageKey = "relay-account-v1";
@@ -634,6 +635,26 @@ function startTaskRefresh() {
   state.taskRefreshTimer = setInterval(() => loadAccountTasks().catch(() => {}), 10_000);
 }
 
+function overviewViewFromHash() {
+  const hash = location.hash.toLowerCase();
+  if (["#tasks", "#ai-workboard"].includes(hash)) return "tasks";
+  if (["#groups", "#my-groups"].includes(hash)) return "groups";
+  return "overview";
+}
+
+function setOverviewView(view, { updateHash = true } = {}) {
+  const nextView = ["overview", "tasks", "groups"].includes(view) ? view : "overview";
+  state.overviewView = nextView;
+  const content = $(".overview-content");
+  content.dataset.view = nextView;
+  document.querySelectorAll("[data-overview-view]").forEach((link) => {
+    link.classList.toggle("active", link.dataset.overviewView === nextView);
+    link.setAttribute("aria-current", link.dataset.overviewView === nextView ? "page" : "false");
+  });
+  content.scrollTop = 0;
+  if (updateHash) history.replaceState({}, "", `${location.pathname}${location.search}#${nextView}`);
+}
+
 async function loadAccountDashboard() {
   const [{ account }, { sessions }, taskData] = await Promise.all([
     accountApi("/api/account"),
@@ -659,6 +680,7 @@ async function loadAccountDashboard() {
   $("#account-dashboard").classList.remove("hidden");
   $("#account-view").classList.add("dashboard-mode");
   show("#account-view");
+  setOverviewView(overviewViewFromHash(), { updateHash: false });
   return sessions;
 }
 
@@ -862,6 +884,19 @@ for (const button of document.querySelectorAll("[data-task-filter]")) {
     renderAITasks();
   });
 }
+
+for (const link of document.querySelectorAll("[data-overview-view]")) {
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    setOverviewView(link.dataset.overviewView);
+  });
+}
+
+window.addEventListener("hashchange", () => {
+  if (!$("#account-dashboard").classList.contains("hidden")) {
+    setOverviewView(overviewViewFromHash(), { updateHash: false });
+  }
+});
 
 $("#refresh-ai-tasks").addEventListener("click", async (event) => {
   event.currentTarget.disabled = true;
