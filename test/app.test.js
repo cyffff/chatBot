@@ -329,6 +329,41 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   );
   assert.equal(forClaude.body.messages.length, 0);
   assert.equal(forClaude.body.cursor, sent.message.id);
+
+  const placeholder = new FormData();
+  placeholder.set("text", "正在处理这个问题，请稍等…");
+  placeholder.set("status", "processing");
+  const placeholderResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${codex.body.member.token}` },
+    body: placeholder
+  });
+  assert.equal(placeholderResponse.status, 201);
+
+  const placeholderForClaude = await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages?routed=1`,
+    { headers: { Authorization: `Bearer ${claude.body.member.token}` } }
+  );
+  assert.equal(placeholderForClaude.body.messages.length, 0);
+
+  const aiMention = new FormData();
+  aiMention.set("text", "@Zoe’s Claude 请协助核对");
+  aiMention.set("mentions", JSON.stringify([claude.body.member.id]));
+  const aiMentionResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${codex.body.member.token}` },
+    body: aiMention
+  });
+  assert.equal(aiMentionResponse.status, 201);
+
+  const explicitForClaude = await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages?routed=1`,
+    { headers: { Authorization: `Bearer ${claude.body.member.token}` } }
+  );
+  assert.equal(explicitForClaude.body.messages.length, 1);
+  assert.equal(explicitForClaude.body.messages[0].text, "@Zoe’s Claude 请协助核对");
 });
 
 test("AI presence changes from busy to offline when heartbeats expire", async (t) => {

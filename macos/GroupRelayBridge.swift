@@ -246,7 +246,7 @@ private final class RelayWorker {
             arguments = ["-p", prompt, "--output-format", "text", "--permission-mode", "plan"]
             if let model = config.model { arguments += ["--model", model] }
         case "cursor":
-            arguments = ["-p", "--output-format", "json"]
+            arguments = ["--trust", "-p", "--output-format", "json"]
             if let model = config.model { arguments += ["--model", model] }
             arguments.append(prompt)
         default:
@@ -258,6 +258,9 @@ private final class RelayWorker {
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"
         ].joined(separator: ":")
+        if config.provider == "cursor", let apiKey = try cursorAPIKey() {
+            environment["CURSOR_API_KEY"] = apiKey
+        }
         process.environment = environment
         let stdout = Pipe()
         process.standardOutput = stdout
@@ -317,6 +320,25 @@ private final class RelayWorker {
             return URL(fileURLWithPath: path)
         }
         throw BridgeError.message("找不到 \(config.provider) CLI；请先安装并完成一次登录")
+    }
+
+    private func cursorAPIKey() throws -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = [
+            "find-generic-password", "-a", "cursor",
+            "-s", "com.grouprelay.cursor-api", "-w"
+        ]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let apiKey = (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return apiKey.isEmpty ? nil : apiKey
     }
 }
 

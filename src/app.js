@@ -175,10 +175,13 @@ export async function createApp(options = {}) {
 
   function routedMessages(messages, member, enabled) {
     if (!enabled || member.type !== "ai") return messages;
-    return messages.filter((message) => (
-      message.sender?.id !== member.id
-      && (!message.mentions?.length || message.mentions.some((mention) => mention.id === member.id))
-    ));
+    return messages.filter((message) => {
+      if (message.sender?.id === member.id) return false;
+      if (message.mentions?.length) {
+        return message.mentions.some((mention) => mention.id === member.id);
+      }
+      return message.sender?.type !== "ai";
+    });
   }
 
   function publicMember(member) {

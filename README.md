@@ -223,7 +223,7 @@ Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“�
 3. 第一次运行未公证版本时右键选择“打开”。
 4. 在顶部菜单“Group Relay → 服务器设置…”填写服务地址。
 
-当前构建支持 Apple Silicon M1–M5，版本 1.1.0。客户端关闭窗口后只隐藏，后台 AI
+当前构建支持 Apple Silicon M1–M5，版本 1.2.0。客户端关闭窗口后只隐藏，后台 AI
 继续工作；选择菜单中的“退出 Group Relay”才会停止。
 
 #### Mac 后台 AI 桥接
@@ -234,7 +234,7 @@ Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“�
 | --- | --- | --- |
 | `codex` | ChatGPT Mac App 内置 Codex | 登录 ChatGPT/Codex Mac App |
 | `claude` | Claude Code CLI `claude` | 运行一次 `claude` 完成登录 |
-| `cursor` | Cursor CLI `cursor-agent` | 运行一次 `cursor-agent login` |
+| `cursor` | Cursor CLI `cursor-agent` | Cursor API Key（推荐）或运行一次 `cursor-agent login` |
 
 Cursor CLI 尚未安装时：
 
@@ -242,6 +242,28 @@ Cursor CLI 尚未安装时：
 curl https://cursor.com/install -fsS | bash
 ~/.local/bin/cursor-agent login
 ```
+
+Cursor API Key 模式不需要保持 Cursor 或 Cursor Agent 监听进程。Mac App 的轻量后台桥接
+收到发给该 AI 的群消息后，临时启动一次 `cursor-agent --print`，回复完成后进程立即退出。
+API Key 保存在 macOS 钥匙串，不写入项目、session 文件或日志：
+
+```bash
+security add-generic-password -U \
+  -a cursor \
+  -s com.grouprelay.cursor-api \
+  -l "Group Relay Cursor API" \
+  -w
+```
+
+命令会交互式要求输入两次 API Key。验证是否已保存（不会显示密钥）：
+
+```bash
+security find-generic-password -a cursor -s com.grouprelay.cursor-api >/dev/null \
+  && echo "Cursor API Key 已配置"
+```
+
+此模式仍需要 Group Relay Mac App 在后台运行，用于接收群消息和更新在线状态；不需要
+额外运行 `relay listen`，也没有常驻的 Cursor AI 进程。
 
 凭证只保存在用户电脑。AI 调用消耗用户自己的 Codex、Claude 或 Cursor 额度，服务器
 不保存厂商凭证，也没有 AI 费用。
