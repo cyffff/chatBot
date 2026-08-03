@@ -355,6 +355,124 @@ function scrollMessagesToBottom() {
   messages.scrollTop = messages.scrollHeight;
 }
 
+function appendInlineMarkdown(parent, source) {
+  const tokenPattern = /(\*\*([^*\n]+)\*\*|`([^`\n]+)`|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\))/g;
+  let cursor = 0;
+  for (const match of source.matchAll(tokenPattern)) {
+    parent.append(document.createTextNode(source.slice(cursor, match.index)));
+    if (match[2] !== undefined) {
+      const strong = document.createElement("strong");
+      strong.textContent = match[2];
+      parent.append(strong);
+    } else if (match[3] !== undefined) {
+      const code = document.createElement("code");
+      code.textContent = match[3];
+      parent.append(code);
+    } else {
+      const link = document.createElement("a");
+      link.textContent = match[4];
+      link.href = match[5];
+      link.target = "_blank";
+      link.rel = "noreferrer noopener";
+      parent.append(link);
+    }
+    cursor = match.index + match[0].length;
+  }
+  parent.append(document.createTextNode(source.slice(cursor)));
+}
+
+function markdownBlockStart(line) {
+  return /^\s*```/.test(line)
+    || /^\s{0,3}#{1,4}\s+/.test(line)
+    || /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)
+    || /^\s*[-*+]\s+/.test(line)
+    || /^\s*\d+[.)]\s+/.test(line)
+    || /^\s*>\s?/.test(line);
+}
+
+function renderMarkdown(target, source) {
+  target.replaceChildren();
+  target.classList.add("markdown-body");
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    if (/^\s*```/.test(line)) {
+      const language = line.trim().slice(3).trim();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (language) code.dataset.language = language;
+      code.textContent = codeLines.join("\n");
+      pre.append(code);
+      target.append(pre);
+      continue;
+    }
+    const heading = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const element = document.createElement(`h${Math.min(heading[1].length + 2, 6)}`);
+      appendInlineMarkdown(element, heading[2]);
+      target.append(element);
+      index += 1;
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      target.append(document.createElement("hr"));
+      index += 1;
+      continue;
+    }
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      const list = document.createElement(unordered ? "ul" : "ol");
+      const pattern = unordered ? /^\s*[-*+]\s+(.+)$/ : /^\s*\d+[.)]\s+(.+)$/;
+      while (index < lines.length) {
+        const entry = lines[index].match(pattern);
+        if (!entry) break;
+        const item = document.createElement("li");
+        appendInlineMarkdown(item, entry[1]);
+        list.append(item);
+        index += 1;
+      }
+      target.append(list);
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const quote = document.createElement("blockquote");
+      const quoteLines = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      quoteLines.forEach((quoteLine, quoteIndex) => {
+        if (quoteIndex) quote.append(document.createElement("br"));
+        appendInlineMarkdown(quote, quoteLine);
+      });
+      target.append(quote);
+      continue;
+    }
+    const paragraph = document.createElement("p");
+    let firstLine = true;
+    while (index < lines.length && lines[index].trim() && !markdownBlockStart(lines[index])) {
+      if (!firstLine) paragraph.append(document.createElement("br"));
+      appendInlineMarkdown(paragraph, lines[index]);
+      firstLine = false;
+      index += 1;
+    }
+    target.append(paragraph);
+  }
+}
+
 function updateMessageNode(item, message) {
   let bubble = item.querySelector(".bubble");
   if (message.text) {
@@ -363,7 +481,7 @@ function updateMessageNode(item, message) {
       bubble.className = "bubble";
       item.append(bubble);
     }
-    bubble.textContent = message.text;
+    renderMarkdown(bubble, message.text);
   } else {
     bubble?.remove();
   }

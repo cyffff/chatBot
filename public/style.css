@@ -688,7 +688,37 @@ aside li > span:nth-child(2) { min-width: 0; }
 .time { color: #929a94; font-size: 11px; }
 .bubble {
   width: fit-content; max-width: 100%; padding: 11px 14px; border-radius: 3px 14px 14px 14px;
-  background: white; border: 1px solid #e1e6e1; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5;
+  background: white; border: 1px solid #e1e6e1; overflow-wrap: anywhere; line-height: 1.55;
+}
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: 0 0 10px; white-space: normal; }
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 { margin: 16px 0 8px; color: #183c2c; line-height: 1.3; }
+.markdown-body h3 { font-size: 17px; }
+.markdown-body h4 { font-size: 15px; }
+.markdown-body h5,
+.markdown-body h6 { font-size: 14px; }
+.markdown-body ul,
+.markdown-body ol { margin: 7px 0 12px; padding-left: 23px; }
+.markdown-body li { margin: 5px 0; padding-left: 2px; }
+.markdown-body hr { margin: 16px 0; border: 0; border-top: 1px solid #dce5dd; }
+.markdown-body strong { color: #172d22; font-weight: 800; }
+.markdown-body a { color: #176c49; text-decoration: underline; text-underline-offset: 2px; }
+.markdown-body code {
+  padding: 2px 5px; border-radius: 5px; background: #edf2ee; color: #244738;
+  font: 0.9em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.markdown-body pre {
+  max-width: 100%; margin: 10px 0 12px; padding: 12px 14px; overflow-x: auto;
+  border: 1px solid #dbe4dc; border-radius: 9px; background: #f3f6f3;
+}
+.markdown-body pre code { padding: 0; background: transparent; white-space: pre; }
+.markdown-body blockquote {
+  margin: 10px 0 12px; padding: 7px 12px; border-left: 3px solid #78a48c;
+  color: #536158; background: #f3f7f3;
 }
 .attachments { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
 .attachment { color: #245f42; background: #edf5ee; padding: 8px 10px; border-radius: 9px; text-decoration: none; font-size: 12px; }
