@@ -23,6 +23,9 @@ const state = {
 };
 
 const accountStorageKey = "relay-account-v1";
+const aiProviderLabels = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+const nativeRequests = new Map();
+let nativeRequestSequence = 0;
 const views = ["#create-view", "#join-view", "#invalid-view", "#account-view", "#transfer-view", "#chat-view"];
 function show(selector) {
   views.forEach((view) => $(view).classList.toggle("hidden", view !== selector));
@@ -33,6 +36,37 @@ function toast(message) {
   element.textContent = message;
   element.classList.add("visible");
   setTimeout(() => element.classList.remove("visible"), 1800);
+}
+
+function desktopNativeBridge() {
+  return window.webkit?.messageHandlers?.relayNative ?? window.chrome?.webview ?? null;
+}
+
+function handleNativeResponse(payload) {
+  if (payload?.type !== "relayNativeResponse" || !payload.requestId) return;
+  const pending = nativeRequests.get(payload.requestId);
+  if (!pending) return;
+  nativeRequests.delete(payload.requestId);
+  clearTimeout(pending.timer);
+  if (payload.ok) pending.resolve(payload.result ?? {});
+  else pending.reject(new Error(payload.error || "桌面客户端操作失败"));
+}
+
+window.addEventListener("relay-native-response", (event) => handleNativeResponse(event.detail));
+window.chrome?.webview?.addEventListener?.("message", (event) => handleNativeResponse(event.data));
+
+function requestNative(action, payload = {}) {
+  const bridge = desktopNativeBridge();
+  if (!bridge) return Promise.reject(new Error("请在 Group Relay 桌面客户端中配置 AI"));
+  const requestId = `native-${Date.now()}-${nativeRequestSequence += 1}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      nativeRequests.delete(requestId);
+      reject(new Error("桌面客户端响应超时"));
+    }, 10_000);
+    nativeRequests.set(requestId, { resolve, reject, timer });
+    bridge.postMessage({ action, requestId, ...payload });
+  });
 }
 
 async function api(url, options = {}) {
@@ -785,11 +819,12 @@ function overviewViewFromHash() {
   const hash = location.hash.toLowerCase();
   if (["#tasks", "#ai-workboard"].includes(hash)) return "tasks";
   if (["#groups", "#my-groups"].includes(hash)) return "groups";
+  if (hash === "#settings") return "settings";
   return "overview";
 }
 
 function setOverviewView(view, { updateHash = true } = {}) {
-  const nextView = ["overview", "tasks", "groups"].includes(view) ? view : "overview";
+  const nextView = ["overview", "tasks", "groups", "settings"].includes(view) ? view : "overview";
   state.overviewView = nextView;
   const content = $(".overview-content");
   content.dataset.view = nextView;
@@ -799,6 +834,52 @@ function setOverviewView(view, { updateHash = true } = {}) {
   });
   content.scrollTop = 0;
   if (updateHash) history.replaceState({}, "", `${location.pathname}${location.search}#${nextView}`);
+  if (nextView === "settings") void loadAISettings();
+}
+
+function renderAISettings(providers) {
+  for (const provider of ["codex", "claude", "cursor"]) {
+    const card = document.querySelector(`[data-ai-provider="${provider}"]`);
+    const status = providers.find((item) => item.provider === provider) ?? {};
+    const workerCount = Number(status.workerCount || 0);
+    card.querySelector("[data-key-state]").textContent = status.keyConfigured ? "已安全保存" : "未配置（使用 CLI 登录）";
+    card.querySelector("[data-worker-count]").textContent = `${workerCount} 个`;
+    const badge = card.querySelector(".provider-state");
+    badge.classList.remove("ready", "active");
+    if (workerCount > 0) {
+      badge.textContent = "已接入";
+      badge.classList.add("active");
+    } else if (status.keyConfigured) {
+      badge.textContent = "Key 已配置";
+      badge.classList.add("ready");
+    } else {
+      badge.textContent = "CLI 模式";
+    }
+    card.querySelector(".remove-ai-key").disabled = !status.keyConfigured;
+  }
+}
+
+async function loadAISettings() {
+  const notice = $("#ai-settings-notice");
+  const forms = document.querySelectorAll(".ai-key-form");
+  if (!desktopNativeBridge()) {
+    notice.textContent = "API Key 只允许在 macOS 或 Windows 桌面客户端中配置。网页版不会接收或保存密钥。";
+    notice.className = "settings-notice warning";
+    forms.forEach((form) => { form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; }); });
+    renderAISettings([]);
+    return;
+  }
+  notice.textContent = "正在读取本机安全凭据和 AI 接入状态…";
+  notice.className = "settings-notice";
+  forms.forEach((form) => { form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; }); });
+  try {
+    const result = await requestNative("getAISettings");
+    renderAISettings(result.providers ?? []);
+    notice.textContent = "密钥保存在当前电脑的安全凭据存储中；页面和服务器都无法读取密钥内容。";
+  } catch (error) {
+    notice.textContent = error.message;
+    notice.className = "settings-notice error";
+  }
 }
 
 function showAccountDashboardShell(view = overviewViewFromHash()) {
@@ -1020,6 +1101,49 @@ for (const button of document.querySelectorAll("[data-task-filter]")) {
       candidate.classList.toggle("active", candidate === button);
     });
     renderAITasks();
+  });
+}
+
+$("#refresh-ai-settings").addEventListener("click", () => { void loadAISettings(); });
+
+for (const form of document.querySelectorAll(".ai-key-form")) {
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const provider = form.dataset.provider;
+    const input = form.elements.apiKey;
+    const apiKey = input.value.trim();
+    if (!apiKey) {
+      toast(`请输入 ${aiProviderLabels[provider]} API Key`);
+      input.focus();
+      return;
+    }
+    form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
+    try {
+      const result = await requestNative("saveAIKey", { provider, apiKey });
+      input.value = "";
+      renderAISettings(result.providers ?? []);
+      toast(`${aiProviderLabels[provider]} API Key 已安全保存`);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; });
+      void loadAISettings();
+    }
+  });
+  form.querySelector(".remove-ai-key").addEventListener("click", async () => {
+    const provider = form.dataset.provider;
+    form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
+    try {
+      const result = await requestNative("deleteAIKey", { provider });
+      form.elements.apiKey.value = "";
+      renderAISettings(result.providers ?? []);
+      toast(`${aiProviderLabels[provider]} API Key 已删除，将改用 CLI 登录`);
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; });
+      void loadAISettings();
+    }
   });
 }
 

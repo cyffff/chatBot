@@ -61,6 +61,7 @@
               <a class="active" href="#overview" data-overview-view="overview">⌂ <span>总览</span></a>
               <a href="#tasks" data-overview-view="tasks">◎ <span>AI 任务</span></a>
               <a href="#groups" data-overview-view="groups">◫ <span>我的群组</span></a>
+              <a href="#settings" data-overview-view="settings">⚙ <span>设置</span></a>
             </div>
             <div class="overview-sidebar-footer">
               <small id="account-email"></small>
@@ -169,6 +170,45 @@
                 </details>
               </div>
             </div>
+
+            <section id="ai-settings" class="ai-settings-card">
+              <div class="settings-heading">
+                <div>
+                  <p class="eyebrow">DESKTOP AI SETTINGS</p>
+                  <h2>AI 接入设置</h2>
+                  <p class="muted compact">查看本机接入状态并管理 API Key。密钥只保存在当前电脑的安全凭据存储中，不会上传到 Group Relay 服务器。</p>
+                </div>
+                <button id="refresh-ai-settings" class="text-button" type="button">刷新状态</button>
+              </div>
+              <div id="ai-settings-notice" class="settings-notice" role="status">正在读取桌面 AI 状态…</div>
+              <div class="ai-provider-grid">
+                <article class="ai-provider-card" data-ai-provider="codex">
+                  <div class="provider-heading"><span class="provider-logo codex">C</span><div><h3>Codex</h3><small>OpenAI / Codex CLI</small></div><span class="provider-state">检查中</span></div>
+                  <dl><div><dt>API Key</dt><dd data-key-state>未检查</dd></div><div><dt>已接入群组</dt><dd data-worker-count>0</dd></div></dl>
+                  <form class="ai-key-form" data-provider="codex">
+                    <label>OpenAI API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="10000" placeholder="sk-…" /></label>
+                    <div><button type="submit">保存 Key</button><button class="secondary remove-ai-key" type="button">删除 Key</button></div>
+                  </form>
+                </article>
+                <article class="ai-provider-card" data-ai-provider="claude">
+                  <div class="provider-heading"><span class="provider-logo claude">A</span><div><h3>Claude</h3><small>Anthropic / Claude CLI</small></div><span class="provider-state">检查中</span></div>
+                  <dl><div><dt>API Key</dt><dd data-key-state>未检查</dd></div><div><dt>已接入群组</dt><dd data-worker-count>0</dd></div></dl>
+                  <form class="ai-key-form" data-provider="claude">
+                    <label>Anthropic API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="10000" placeholder="sk-ant-…" /></label>
+                    <div><button type="submit">保存 Key</button><button class="secondary remove-ai-key" type="button">删除 Key</button></div>
+                  </form>
+                </article>
+                <article class="ai-provider-card" data-ai-provider="cursor">
+                  <div class="provider-heading"><span class="provider-logo cursor">▶</span><div><h3>Cursor</h3><small>Cursor Agent CLI</small></div><span class="provider-state">检查中</span></div>
+                  <dl><div><dt>API Key</dt><dd data-key-state>未检查</dd></div><div><dt>已接入群组</dt><dd data-worker-count>0</dd></div></dl>
+                  <form class="ai-key-form" data-provider="cursor">
+                    <label>Cursor API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="10000" placeholder="crsr_…" /></label>
+                    <div><button type="submit">保存 Key</button><button class="secondary remove-ai-key" type="button">删除 Key</button></div>
+                  </form>
+                </article>
+              </div>
+              <p class="settings-footnote">未配置 Key 时仍可使用已登录的本机 CLI 账号。保存新 Key 后，后台 AI 的下一次回复会自动使用它。</p>
+            </section>
           </div>
         </div>
       </section>

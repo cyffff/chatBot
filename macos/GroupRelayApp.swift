@@ -1,4 +1,5 @@
 import AppKit
+import Security
 import ServiceManagement
 import WebKit
 
@@ -113,6 +114,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             let action = body["action"] as? String,
             message.frameInfo.request.url?.host == serverURL.host
         else { return }
+        let requestId = body["requestId"] as? String
         do {
             switch action {
             case "openExternal":
@@ -138,11 +140,30 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             case "removeAIWorker":
                 guard let workerId = body["workerId"] as? String else { return }
                 try removeAIWorker(workerId)
+            case "getAISettings":
+                guard let requestId else { return }
+                sendNativeResponse(requestId: requestId, result: aiSettingsPayload())
+            case "saveAIKey":
+                guard
+                    let requestId,
+                    let provider = body["provider"] as? String,
+                    let apiKey = body["apiKey"] as? String
+                else { return }
+                try saveAPIKey(apiKey, provider: provider)
+                sendNativeResponse(requestId: requestId, result: aiSettingsPayload())
+            case "deleteAIKey":
+                guard let requestId, let provider = body["provider"] as? String else { return }
+                try deleteAPIKey(provider: provider)
+                sendNativeResponse(requestId: requestId, result: aiSettingsPayload())
             default:
                 return
             }
         } catch {
-            showError("无法更新桌面 AI", detail: error.localizedDescription)
+            if let requestId {
+                sendNativeResponse(requestId: requestId, error: error.localizedDescription)
+            } else {
+                showError("无法更新桌面 AI", detail: error.localizedDescription)
+            }
         }
     }
 
@@ -161,6 +182,88 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func validateProvider(_ provider: String) throws {
+        guard ["codex", "claude", "cursor"].contains(provider) else {
+            throw NSError(domain: "GroupRelay", code: 20, userInfo: [NSLocalizedDescriptionKey: "不支持的 AI 类型"])
+        }
+    }
+
+    private func credentialService(_ provider: String) -> String {
+        "com.grouprelay.\(provider)-api"
+    }
+
+    private func keychainQuery(_ provider: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrAccount: provider,
+            kSecAttrService: credentialService(provider)
+        ]
+    }
+
+    private func hasAPIKey(_ provider: String) -> Bool {
+        var query = keychainQuery(provider)
+        query[kSecReturnData] = false
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    private func saveAPIKey(_ rawValue: String, provider: String) throws {
+        try validateProvider(provider)
+        let apiKey = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty, apiKey.utf8.count <= 10_000 else {
+            throw NSError(domain: "GroupRelay", code: 21, userInfo: [NSLocalizedDescriptionKey: "API Key 不能为空或过长"])
+        }
+        let query = keychainQuery(provider)
+        SecItemDelete(query as CFDictionary)
+        var value = query
+        value[kSecValueData] = Data(apiKey.utf8)
+        value[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+        let status = SecItemAdd(value as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw NSError(domain: "GroupRelay", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "无法写入 macOS 钥匙串（\(status)）"])
+        }
+    }
+
+    private func deleteAPIKey(provider: String) throws {
+        try validateProvider(provider)
+        let status = SecItemDelete(keychainQuery(provider) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NSError(domain: "GroupRelay", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "无法删除 macOS 钥匙串密钥（\(status)）"])
+        }
+    }
+
+    private func aiSettingsPayload() -> [String: Any] {
+        let registry = jsonObject(at: workerRegistryURL)
+        let workers = registry?["workers"] as? [String: Any] ?? [:]
+        let providers = ["codex", "claude", "cursor"].map { provider -> [String: Any] in
+            let count = workers.values.filter { value in
+                (value as? [String: Any])?["provider"] as? String == provider
+            }.count
+            return ["provider": provider, "keyConfigured": hasAPIKey(provider), "workerCount": count]
+        }
+        return ["platform": "macos", "providers": providers]
+    }
+
+    private func sendNativeResponse(requestId: String, result: [String: Any]? = nil, error: String? = nil) {
+        var payload: [String: Any] = [
+            "type": "relayNativeResponse",
+            "requestId": requestId,
+            "ok": error == nil
+        ]
+        if let result { payload["result"] = result }
+        if let error { payload["error"] = error }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        let encoded = data.base64EncodedString()
+        let script = """
+        (() => {
+          const bytes = Uint8Array.from(atob('\(encoded)'), character => character.charCodeAt(0));
+          const detail = JSON.parse(new TextDecoder().decode(bytes));
+          window.dispatchEvent(new CustomEvent('relay-native-response', { detail }));
+        })();
+        """
+        DispatchQueue.main.async { [weak self] in self?.webView.evaluateJavaScript(script) }
     }
 
     private func configureAIWorker(_ incoming: [String: Any]) throws {

@@ -125,10 +125,12 @@ internal sealed class RelayForm : Form
 
     private void HandleWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs eventArgs)
     {
+        string? requestId = null;
         try
         {
             using var document = JsonDocument.Parse(eventArgs.WebMessageAsJson);
             var root = document.RootElement;
+            requestId = root.TryGetProperty("requestId", out var request) ? request.GetString() : null;
             var server = new Uri(serverUrl);
             if (!Uri.TryCreate(eventArgs.Source, UriKind.Absolute, out var source)) return;
             if (!string.Equals(source.Host, server.Host, StringComparison.OrdinalIgnoreCase)) return;
@@ -148,12 +150,53 @@ internal sealed class RelayForm : Form
                 case "removeAIWorker":
                     aiBridge.Remove(root.GetProperty("workerId").GetString() ?? "");
                     break;
+                case "getAISettings":
+                    if (requestId is not null) SendNativeResponse(requestId, AiSettingsPayload());
+                    break;
+                case "saveAIKey":
+                    if (requestId is null) return;
+                    WindowsAiCredentials.Save(
+                        root.GetProperty("provider").GetString() ?? "",
+                        root.GetProperty("apiKey").GetString() ?? ""
+                    );
+                    SendNativeResponse(requestId, AiSettingsPayload());
+                    break;
+                case "deleteAIKey":
+                    if (requestId is null) return;
+                    WindowsAiCredentials.Delete(root.GetProperty("provider").GetString() ?? "");
+                    SendNativeResponse(requestId, AiSettingsPayload());
+                    break;
             }
         }
         catch (Exception error)
         {
-            MessageBox.Show(this, error.Message, "无法更新桌面 AI", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (requestId is not null) SendNativeResponse(requestId, error: error.Message);
+            else MessageBox.Show(this, error.Message, "无法更新桌面 AI", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    private object AiSettingsPayload()
+    {
+        var providers = new[] { "codex", "claude", "cursor" }.Select(provider => new
+        {
+            provider,
+            keyConfigured = WindowsAiCredentials.IsConfigured(provider),
+            workerCount = aiBridge.ConfiguredCount(provider)
+        });
+        return new { platform = "windows", providers };
+    }
+
+    private void SendNativeResponse(string requestId, object? result = null, string? error = null)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            type = "relayNativeResponse",
+            requestId,
+            ok = error is null,
+            result,
+            error
+        });
+        webView.CoreWebView2.PostWebMessageAsJson(payload);
     }
 
     private void RestoreWindow()

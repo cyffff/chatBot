@@ -45,6 +45,20 @@ internal sealed class WindowsAiBridgeManager : IDisposable
         get { lock (workersLock) return workers.Values.Count(value => !value.Task.IsCompleted); }
     }
 
+    public int ConfiguredCount(string provider)
+    {
+        Directory.CreateDirectory(sessionsDirectory);
+        return Directory.EnumerateFiles(sessionsDirectory, "desktop-*.json").Count(file =>
+        {
+            try
+            {
+                var configured = JsonSerializer.Deserialize<DesktopAiWorkerConfig>(File.ReadAllText(file), JsonOptions);
+                return configured?.Provider == provider;
+            }
+            catch { return false; }
+        });
+    }
+
     public void Start()
     {
         Directory.CreateDirectory(sessionsDirectory);
@@ -442,6 +456,18 @@ internal sealed class WindowsAiWorker
                 start.ArgumentList.Add("json");
                 if (config.Model is not null) { start.ArgumentList.Add("--model"); start.ArgumentList.Add(config.Model); }
                 start.ArgumentList.Add(prompt);
+            }
+            var apiKey = WindowsAiCredentials.Read(config.Provider);
+            if (!string.IsNullOrWhiteSpace(apiKey))
+            {
+                var variable = config.Provider switch
+                {
+                    "codex" => "OPENAI_API_KEY",
+                    "claude" => "ANTHROPIC_API_KEY",
+                    "cursor" => "CURSOR_API_KEY",
+                    _ => null
+                };
+                if (variable is not null) start.Environment[variable] = apiKey;
             }
             using var process = Process.Start(start) ?? throw new InvalidOperationException($"无法启动 {config.Provider}");
             using var cancellationRegistration = cancellation.Register(() =>

@@ -224,7 +224,7 @@ Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“�
 3. 第一次运行未公证版本时右键选择“打开”。
 4. 在顶部菜单“Group Relay → 服务器设置…”填写服务地址。
 
-当前构建支持 Apple Silicon M1–M5，版本 1.6.0。客户端关闭窗口后只隐藏，后台 AI
+当前构建支持 Apple Silicon M1–M5，版本 1.7.0。客户端关闭窗口后只隐藏，后台 AI
 继续工作；选择菜单中的“退出 Group Relay”才会停止。
 
 #### Mac 后台 AI 桥接
@@ -243,33 +243,9 @@ Cursor CLI 尚未安装时：
 curl https://cursor.com/install -fsS | bash
 ```
 
-Cursor 支持两种正式接入方式，Mac App 会自动选择：钥匙串中存在 API Key 时优先使用
-方式一；没有 API Key 时使用 Cursor CLI 已登录的账号。
-
-##### 方式一：Cursor API Key（推荐）
-
-API Key 模式不需要保持 Cursor 或 Cursor Agent 监听进程。Mac App 的轻量后台桥接
-收到发给该 AI 的群消息后，临时启动一次 `cursor-agent --print`，回复完成后进程立即退出。
-API Key 保存在 macOS 钥匙串，不写入项目、session 文件或日志：
-
-```bash
-security add-generic-password -U \
-  -a cursor \
-  -s com.grouprelay.cursor-api \
-  -l "Group Relay Cursor API" \
-  -w
-```
-
-命令会交互式要求输入两次 API Key。验证是否已保存（不会显示密钥）：
-
-```bash
-security find-generic-password -a cursor -s com.grouprelay.cursor-api >/dev/null \
-  && echo "Cursor API Key 已配置"
-```
-
-##### 方式二：Cursor 账号登录
-
-不配置 API Key 时，运行一次登录命令：
+在桌面 App 左侧打开“设置”，可以直接配置 Codex、Claude 或 Cursor API Key。API Key
+模式不需要保持 AI 客户端或 Agent 监听进程；后台桥接收到群消息时才临时启动对应 CLI，
+回复完成后进程退出。没有配置 API Key 时，也可以继续使用 CLI 已登录账号，例如 Cursor：
 
 ```bash
 ~/.local/bin/cursor-agent login
@@ -279,13 +255,9 @@ security find-generic-password -a cursor -s com.grouprelay.cursor-api >/dev/null
 登录凭证由 Cursor CLI 保存在本机。Group Relay 仍然只在收到发给 Cursor 的消息时临时
 启动一次 CLI，不需要单独运行 Cursor 监听进程。
 
-两种方式都需要 Group Relay Mac App 在后台运行，用于接收群消息和更新在线状态；都不
-需要额外运行 `relay listen`，也没有常驻的 Cursor AI 对话进程。若要从 API Key 切换到
-账号登录模式，可删除钥匙串项目：
-
-```bash
-security delete-generic-password -a cursor -s com.grouprelay.cursor-api
-```
+两种方式都需要 Group Relay Mac App 在后台运行，用于接收群消息和更新在线状态；不需要
+额外运行 `relay listen`，也没有常驻的 AI 对话进程。要切回账号登录模式，在“设置”中
+删除对应 Key 即可。
 
 凭证只保存在用户电脑。AI 调用消耗用户自己的 Codex、Claude 或 Cursor 额度，服务器
 不保存厂商凭证，也没有 AI 费用。
@@ -341,6 +313,20 @@ AI 只是通过桌面 App 使用本机已登录的 Codex、Claude 或 Cursor；G
 工作区，而不是只滚动页面。“我的群组”会显示全宽群组列表；“AI 任务”会显示全宽看板；
 “总览”同时展示核心统计、AI 看板、最近群组、日历和快捷操作。小窗口下会自动收起导航
 文字并将右栏移到主内容下方。
+
+#### 桌面 AI 设置与 API Key
+
+macOS 和 Windows 客户端左侧都有“设置”入口，可以查看 Codex、Claude、Cursor 的 API Key
+状态以及各自已接入的群组数量。输入新 Key 后点击“保存 Key”即可生效，也可以删除 Key 后
+继续使用已经登录的本机 CLI 账号：
+
+- Codex Key 以 `OPENAI_API_KEY` 提供给 Codex CLI；
+- Claude Key 以 `ANTHROPIC_API_KEY` 提供给 Claude CLI；
+- Cursor Key 以 `CURSOR_API_KEY` 提供给 Cursor Agent。
+
+Key 不会上传到 Group Relay 服务、聊天记录或项目文件。macOS 使用系统钥匙串保存，Windows
+使用 Windows Credential Manager 保存；设置页面只能查看“已配置/未配置”，不能读取原始
+Key。普通浏览器中的设置页只显示状态说明，并禁止输入 Key。
 
 #### Yunfei 的 AI 看板与 Jira 任务
 
@@ -425,9 +411,9 @@ Mac 一样支持本地 AI 后台桥接。以后桌面功能默认同时维护 Wi
 %LOCALAPPDATA%\GroupRelay\Logs\bridge.log
 ```
 
-Windows 端请先确保 `codex.exe`、`claude.exe`、`cursor-agent.exe` 已安装、登录且在 `PATH`
-或各自默认用户目录中。Cursor API Key 模式可通过当前用户环境变量 `CURSOR_API_KEY` 提供；
-凭证仍不会发送到 Group Relay 服务器。
+Windows 端请先确保 `codex.exe`、`claude.exe`、`cursor-agent.exe` 已安装且在 `PATH` 或各自
+默认用户目录中。可以使用 CLI 登录，也可以在左侧“设置”中配置三种 AI 的 Key；Key 保存到
+Windows Credential Manager，不会发送到 Group Relay 服务器。
 
 ## AI Session 管理
 

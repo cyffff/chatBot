@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 private struct AgentConfig: Codable {
     var baseUrl: String
@@ -297,8 +298,13 @@ private final class RelayWorker {
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path,
             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"
         ].joined(separator: ":")
-        if config.provider == "cursor", let apiKey = try cursorAPIKey() {
-            environment["CURSOR_API_KEY"] = apiKey
+        if let apiKey = try providerAPIKey() {
+            let variable = [
+                "codex": "OPENAI_API_KEY",
+                "claude": "ANTHROPIC_API_KEY",
+                "cursor": "CURSOR_API_KEY"
+            ][config.provider]
+            if let variable { environment[variable] = apiKey }
         }
         process.environment = environment
         let stdout = Pipe()
@@ -371,20 +377,20 @@ private final class RelayWorker {
         throw BridgeError.message("找不到 \(config.provider) CLI；请先安装并完成一次登录")
     }
 
-    private func cursorAPIKey() throws -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
-            "find-generic-password", "-a", "cursor",
-            "-s", "com.grouprelay.cursor-api", "-w"
+    private func providerAPIKey() throws -> String? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrAccount: config.provider,
+            kSecAttrService: "com.grouprelay.\(config.provider)-api",
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
         ]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw BridgeError.message("Unable to read \(config.provider) API Key from Keychain (\(status))")
+        }
         let apiKey = (String(data: data, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return apiKey.isEmpty ? nil : apiKey
