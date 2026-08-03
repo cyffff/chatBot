@@ -483,7 +483,54 @@ function renderAccountSessions(sessions) {
     title.textContent = session.group.name;
     const meta = document.createElement("p");
     meta.textContent = `${displayName(session.member)} · 加入于 ${new Date(session.linkedAt).toLocaleDateString()}`;
-    details.append(title, meta);
+    const aiControls = document.createElement("div");
+    aiControls.className = "desktop-ai-controls";
+    const aiLabel = document.createElement("span");
+    aiLabel.textContent = "我的桌面 AI";
+    aiControls.append(aiLabel);
+    const attachedProviders = new Set((session.desktopAis ?? []).map((member) => member.provider));
+    for (const provider of ["codex", "claude", "cursor"]) {
+      const labels = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+      const attached = attachedProviders.has(provider);
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = `desktop-ai-toggle ${attached ? "attached" : ""}`;
+      toggle.textContent = attached ? `${labels[provider]} · 离开` : `＋ ${labels[provider]}`;
+      toggle.title = attached
+        ? `让我的 ${labels[provider]} 离开这个群组`
+        : `把本机已登录的 ${labels[provider]} 加入这个群组`;
+      toggle.addEventListener("click", async () => {
+        const nativeBridge = window.webkit?.messageHandlers?.relayNative;
+        if (!nativeBridge) {
+          toast("请在 Group Relay 桌面客户端中管理本机 AI");
+          return;
+        }
+        toggle.disabled = true;
+        try {
+          if (attached) {
+            const result = await accountApi(
+              `/api/account/sessions/${session.group.id}/ais/${provider}`,
+              { method: "DELETE" }
+            );
+            nativeBridge.postMessage({ action: "removeAIWorker", workerId: result.workerId });
+            toast(`${labels[provider]} 已离开 ${session.group.name}`);
+          } else {
+            const result = await accountApi(`/api/account/sessions/${session.group.id}/ais`, {
+              method: "POST",
+              body: JSON.stringify({ provider })
+            });
+            nativeBridge.postMessage({ action: "configureAIWorker", worker: result.worker });
+            toast(`${labels[provider]} 已加入 ${session.group.name}`);
+          }
+          await loadAccountDashboard();
+        } catch (error) {
+          toggle.disabled = false;
+          toast(error.message);
+        }
+      });
+      aiControls.append(toggle);
+    }
+    details.append(title, meta, aiControls);
     const actions = document.createElement("div");
     actions.className = "session-actions";
     const open = document.createElement("button");

@@ -228,6 +228,19 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .session-card h2 { margin: 0 0 4px; font-size: 16px; }
 .session-card p { margin: 0; color: #7a857d; font-size: 12px; }
 .session-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.desktop-ai-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 11px; }
+.desktop-ai-controls > span { margin-right: 2px; color: #657169; font-size: 10px; font-weight: 800; }
+.desktop-ai-toggle {
+  padding: 6px 8px;
+  border: 1px solid #cfdcd1;
+  border-radius: 8px;
+  color: #285f43;
+  background: #eef5ef;
+  font-size: 10px;
+}
+.desktop-ai-toggle:hover { color: white; background: #277153; }
+.desktop-ai-toggle.attached { color: #8b5420; border-color: #edd6b5; background: #fff3e3; }
+.desktop-ai-toggle.attached:hover { color: white; background: #ad6828; }
 .empty-state {
   margin-top: 18px;
   padding: 22px;

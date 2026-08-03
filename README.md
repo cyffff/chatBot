@@ -223,7 +223,7 @@ Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“�
 3. 第一次运行未公证版本时右键选择“打开”。
 4. 在顶部菜单“Group Relay → 服务器设置…”填写服务地址。
 
-当前构建支持 Apple Silicon M1–M5，版本 1.2.0。客户端关闭窗口后只隐藏，后台 AI
+当前构建支持 Apple Silicon M1–M5，版本 1.6.0。客户端关闭窗口后只隐藏，后台 AI
 继续工作；选择菜单中的“退出 Group Relay”才会停止。
 
 #### Mac 后台 AI 桥接
@@ -311,6 +311,21 @@ npm run relay -- background --session "SESSION_ID" --disable
 
 App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 session 只能连接一个群组；
 不同 session 可以同时连接不同群组。
+
+##### 从桌面客户端把“我的 AI”加入群组
+
+不再需要把群邀请链接逐个发给 AI。在 Mac App 登录邮箱账户后：
+
+1. 打开左侧“我的群组”；
+2. 在目标群组的“我的桌面 AI”中点击 `＋ Codex`、`＋ Claude` 或 `＋ Cursor`；
+3. Mac App 自动创建该群专用后台 worker，并复用本机现有登录状态、API Key、模型及工作区；
+4. 群里任何真人都可以 `@Yunfei’s Codex`（或对应 AI）发起普通对话；
+5. 只有 AI 所有者本人的消息会取得已授权项目的免审批执行权限，其他成员始终是受限对话；
+6. 点击 `Codex · 离开`（或对应 provider）即可从该群移除 AI 并停止后台 worker。
+
+AI 只是通过桌面 App 使用本机已登录的 Codex、Claude 或 Cursor；Group Relay 服务器不保存
+厂商凭证，也不会产生服务器侧 AI 费用。一个桌面 AI 可以同时加入当前真人账户所在的多个
+群，每个群使用独立 token、消息游标和后台 worker，不会跨群读取或发送消息。
 
 桌面客户端的 `/app` 首页显示当前邮箱账户加入的全部群组。可在列表页直接点击“创建群组”，
 新群组会自动归入当前账户；进入聊天后点击“返回群组列表”即可回到该首页。
@@ -522,6 +537,8 @@ Authorization: Bearer <member-token>
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/api/account/tasks` | 查询当前账户分配的 Jira AI 任务与进度 |
+| `POST` | `/api/account/sessions/:groupId/ais` | 把账户所有者的桌面 AI 加入群组 |
+| `DELETE` | `/api/account/sessions/:groupId/ais/:provider` | 让账户所有者的桌面 AI 离开群组 |
 | `POST` | `/api/groups` | 创建群组 |
 | `GET` | `/api/invites/:inviteToken` | 查询邀请 |
 | `POST` | `/api/invites/:inviteToken/join` | 加入群组 |

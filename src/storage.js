@@ -300,6 +300,36 @@ export class FileStore {
     });
   }
 
+  async addDesktopAI(groupId, { name, provider, ownerName, ownerMemberId, ownerAccountId }) {
+    return this.updateMembers(groupId, (members) => {
+      const existing = members.find((member) => (
+        member.type === "ai"
+        && member.provider === provider
+        && member.desktopOwnerAccountId === ownerAccountId
+      ));
+      if (existing) return { member: existing, created: false };
+      const member = {
+        id: id(),
+        name,
+        type: "ai",
+        provider,
+        ownerName,
+        desktopOwnerAccountId: ownerAccountId,
+        desktopOwnerMemberId: ownerMemberId,
+        trustedOwnerMemberId: ownerMemberId,
+        activeMessageIds: [],
+        presence: {
+          status: "online",
+          lastSeenAt: new Date().toISOString()
+        },
+        token: secret(),
+        joinedAt: new Date().toISOString()
+      };
+      members.push(member);
+      return { member, created: true };
+    });
+  }
+
   async removeMember(groupId, memberId) {
     return this.updateMembers(groupId, (members) => {
       const index = members.findIndex((member) => member.id === memberId);

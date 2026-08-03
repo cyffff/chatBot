@@ -48,6 +48,10 @@ const accountSchema = z.object({
   email: z.string().trim().email().max(254)
 });
 
+const desktopAiSchema = z.object({
+  provider: z.enum(["codex", "claude", "cursor"])
+});
+
 const sessionImportSchema = z.object({
   sessions: z.array(z.object({
     groupId: z.string().uuid(),
@@ -153,9 +157,10 @@ export async function createApp(options = {}) {
   async function accountSessions(account) {
     const sessions = [];
     for (const membership of account.memberships ?? []) {
-      const [group, member] = await Promise.all([
+      const [group, member, members] = await Promise.all([
         store.getGroup(membership.groupId),
-        store.authenticate(membership.groupId, membership.memberToken).catch(() => null)
+        store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
+        store.listMembers(membership.groupId).catch(() => [])
       ]);
       if (!group || !member || member.id !== membership.memberId) continue;
       sessions.push({
@@ -165,6 +170,9 @@ export async function createApp(options = {}) {
           createdAt: group.createdAt
         },
         member: publicMember(member),
+        desktopAis: members
+          .filter((candidate) => candidate.type === "ai" && candidate.desktopOwnerAccountId === account.id)
+          .map(publicMember),
         memberToken: membership.memberToken,
         linkedAt: membership.linkedAt
       });
@@ -233,6 +241,8 @@ export async function createApp(options = {}) {
       token: _token,
       activeMessageIds = [],
       trustedOwnerMemberId,
+      desktopOwnerAccountId: _desktopOwnerAccountId,
+      desktopOwnerMemberId: _desktopOwnerMemberId,
       ...safe
     } = member;
     if (member.type !== "ai") return safe;
@@ -338,6 +348,78 @@ export async function createApp(options = {}) {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const removed = await store.unlinkAccountMembership(req.account.id, groupId);
       res.json({ removed });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/account/sessions/:groupId/ais", requireAccount, async (req, res, next) => {
+    try {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const { provider } = desktopAiSchema.parse(req.body);
+      const membership = (req.account.memberships ?? []).find((item) => item.groupId === groupId);
+      if (!membership) return res.status(404).json({ error: "group is not linked to this account" });
+      const [group, owner] = await Promise.all([
+        store.getGroup(groupId),
+        store.authenticate(groupId, membership.memberToken).catch(() => null)
+      ]);
+      if (!group || !owner || owner.id !== membership.memberId || owner.type !== "human") {
+        return res.status(403).json({ error: "a human membership is required to attach desktop AI" });
+      }
+      const names = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+      const result = await store.addDesktopAI(groupId, {
+        name: names[provider],
+        provider,
+        ownerName: owner.name,
+        ownerMemberId: owner.id,
+        ownerAccountId: req.account.id
+      });
+      const history = await store.readMessages(groupId, { limit: 1 });
+      if (result.created) publish(groupId, "member_joined", publicMember(result.member));
+      res.status(result.created ? 201 : 200).json({
+        member: publicMember(result.member),
+        worker: {
+          workerId: `desktop-${provider}-${groupId}`,
+          baseUrl: publicBaseUrl(req),
+          groupId,
+          memberId: result.member.id,
+          memberToken: result.member.token,
+          memberName: result.member.name,
+          provider,
+          ownerName: owner.name,
+          sessionId: `desktop-${provider}-${groupId}`,
+          cursor: history.at(-1)?.id ?? null
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete("/api/account/sessions/:groupId/ais/:provider", requireAccount, async (req, res, next) => {
+    try {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const { provider } = desktopAiSchema.parse({ provider: req.params.provider });
+      const membership = (req.account.memberships ?? []).find((item) => item.groupId === groupId);
+      if (!membership) return res.status(404).json({ error: "group is not linked to this account" });
+      const owner = await store.authenticate(groupId, membership.memberToken).catch(() => null);
+      if (!owner || owner.id !== membership.memberId || owner.type !== "human") {
+        return res.status(403).json({ error: "a human membership is required to remove desktop AI" });
+      }
+      const members = await store.listMembers(groupId);
+      const member = members.find((candidate) => (
+        candidate.type === "ai"
+        && candidate.provider === provider
+        && candidate.desktopOwnerAccountId === req.account.id
+      ));
+      if (!member) return res.status(404).json({ error: "desktop AI is not in this group" });
+      await store.removeMember(groupId, member.id);
+      publish(groupId, "member_left", { id: member.id });
+      res.json({
+        disconnected: true,
+        memberId: member.id,
+        workerId: `desktop-${provider}-${groupId}`
+      });
     } catch (error) {
       next(error);
     }

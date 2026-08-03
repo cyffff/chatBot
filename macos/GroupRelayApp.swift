@@ -3,6 +3,9 @@ import ServiceManagement
 import WebKit
 
 private let serverPreferenceKey = "GroupRelayServerURL"
+private extension Notification.Name {
+    static let groupRelayWorkersChanged = Notification.Name("GroupRelayWorkersChanged")
+}
 
 final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     private let webView: WKWebView
@@ -107,24 +110,134 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         guard
             message.name == "relayNative",
             let body = message.body as? [String: Any],
-            body["action"] as? String == "openExternal",
-            let rawURL = body["url"] as? String,
-            let url = URL(string: rawURL),
-            ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-            url.host == serverURL.host,
-            url.path.hasPrefix("/transfer/")
+            let action = body["action"] as? String,
+            message.frameInfo.request.url?.host == serverURL.host
+        else { return }
+        do {
+            switch action {
+            case "openExternal":
+                guard
+                    let rawURL = body["url"] as? String,
+                    let url = URL(string: rawURL),
+                    ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                    url.host == serverURL.host,
+                    url.path.hasPrefix("/transfer/")
+                else { return }
+                if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
+                    NSWorkspace.shared.open(
+                        [url],
+                        withApplicationAt: chrome,
+                        configuration: NSWorkspace.OpenConfiguration()
+                    )
+                } else {
+                    NSWorkspace.shared.open(url)
+                }
+            case "configureAIWorker":
+                guard let worker = body["worker"] as? [String: Any] else { return }
+                try configureAIWorker(worker)
+            case "removeAIWorker":
+                guard let workerId = body["workerId"] as? String else { return }
+                try removeAIWorker(workerId)
+            default:
+                return
+            }
+        } catch {
+            showError("无法更新桌面 AI", detail: error.localizedDescription)
+        }
+    }
+
+    private var workerRegistryURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".group-relay/local-workers.json")
+    }
+
+    private func jsonObject(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private func writeJSONObject(_ value: [String: Any], to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func configureAIWorker(_ incoming: [String: Any]) throws {
+        guard
+            let workerId = incoming["workerId"] as? String,
+            workerId.range(of: #"^[a-z0-9-]{1,160}$"#, options: .regularExpression) != nil,
+            let provider = incoming["provider"] as? String,
+            ["codex", "claude", "cursor"].contains(provider),
+            let baseUrl = incoming["baseUrl"] as? String,
+            let relayURL = URL(string: baseUrl),
+            relayURL.host == serverURL.host,
+            let groupId = incoming["groupId"] as? String,
+            UUID(uuidString: groupId) != nil,
+            incoming["memberToken"] as? String != nil
         else {
-            return
-        }
-        if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
-            NSWorkspace.shared.open(
-                [url],
-                withApplicationAt: chrome,
-                configuration: NSWorkspace.OpenConfiguration()
+            throw NSError(
+                domain: "GroupRelay",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "桌面 AI 配置无效"]
             )
-        } else {
-            NSWorkspace.shared.open(url)
         }
+
+        var registry = jsonObject(at: workerRegistryURL) ?? ["version": 1, "workers": [String: Any]()]
+        var workers = registry["workers"] as? [String: Any] ?? [:]
+        var config = incoming
+        for value in workers.values {
+            guard
+                let entry = value as? [String: Any],
+                entry["provider"] as? String == provider,
+                let configFile = entry["configFile"] as? String,
+                let template = jsonObject(at: URL(fileURLWithPath: configFile))
+            else { continue }
+            for key in ["model", "agentBin", "workspacePath"] where config[key] == nil {
+                config[key] = template[key]
+            }
+            break
+        }
+        if config["workspacePath"] == nil {
+            config["workspacePath"] = FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        let configURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".group-relay/desktop-sessions")
+            .appendingPathComponent("\(workerId).json")
+        try writeJSONObject(config, to: configURL)
+        workers[workerId] = [
+            "configFile": configURL.path,
+            "groupId": groupId,
+            "provider": provider,
+            "enabled": true,
+            "updatedAt": ISO8601DateFormatter().string(from: Date())
+        ]
+        registry["version"] = 1
+        registry["workers"] = workers
+        try writeJSONObject(registry, to: workerRegistryURL)
+        NotificationCenter.default.post(name: .groupRelayWorkersChanged, object: nil)
+    }
+
+    private func removeAIWorker(_ workerId: String) throws {
+        guard workerId.range(of: #"^[a-z0-9-]{1,160}$"#, options: .regularExpression) != nil else {
+            throw NSError(
+                domain: "GroupRelay",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "桌面 AI 标识无效"]
+            )
+        }
+        var registry = jsonObject(at: workerRegistryURL) ?? ["version": 1, "workers": [String: Any]()]
+        var workers = registry["workers"] as? [String: Any] ?? [:]
+        if
+            let entry = workers.removeValue(forKey: workerId) as? [String: Any],
+            let configFile = entry["configFile"] as? String
+        {
+            try? FileManager.default.removeItem(atPath: configFile)
+        }
+        registry["version"] = 1
+        registry["workers"] = workers
+        try writeJSONObject(registry, to: workerRegistryURL)
+        NotificationCenter.default.post(name: .groupRelayWorkersChanged, object: nil)
     }
 
     private func showError(_ title: String, detail: String) {
@@ -228,6 +341,12 @@ final class LocalAIBridgeManager {
 
     func start() {
         registerLoginItem()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(synchronizeWorkers),
+            name: .groupRelayWorkersChanged,
+            object: nil
+        )
         synchronizeWorkers()
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             self?.synchronizeWorkers()
@@ -235,6 +354,7 @@ final class LocalAIBridgeManager {
     }
 
     func stop() {
+        NotificationCenter.default.removeObserver(self, name: .groupRelayWorkersChanged, object: nil)
         timer?.invalidate()
         timer = nil
         for process in processes.values where process.isRunning { process.terminate() }

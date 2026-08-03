@@ -164,6 +164,78 @@ test("email accounts import validated browser sessions and list joined groups", 
   assert.equal(unauthorized.response.status, 401);
 });
 
+test("desktop account AI can join a linked group, answer every member and leave", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Desktop AI Group", ownerName: "Yunfei" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei@example.test" })
+  });
+  const accountHeaders = { "X-Account-Token": account.body.accountToken };
+  await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({
+      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+    })
+  });
+
+  const attached = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ provider: "codex" })
+  });
+  assert.equal(attached.response.status, 201);
+  assert.equal(attached.body.member.ownerName, "Yunfei");
+  assert.equal(attached.body.member.trustedExecutionEnabled, true);
+  assert.equal(attached.body.worker.provider, "codex");
+  assert.equal(attached.body.worker.groupId, created.body.group.id);
+  assert.ok(attached.body.worker.memberToken);
+
+  const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Guest", type: "human" })
+  });
+  const guestMessage = new FormData();
+  guestMessage.set("text", "@Yunfei’s Codex 帮我解释一下");
+  guestMessage.set("mentions", JSON.stringify([attached.body.member.id]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${guest.body.member.token}` },
+    body: guestMessage
+  });
+  const ownerMessage = new FormData();
+  ownerMessage.set("text", "@Yunfei’s Codex 修改项目并测试");
+  ownerMessage.set("mentions", JSON.stringify([attached.body.member.id]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: ownerMessage
+  });
+  const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
+    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+  });
+  assert.deepEqual(routed.body.messages.map((message) => message.executionScope), ["restricted", "trusted"]);
+
+  const sessions = await json(base, "/api/account/sessions", { headers: accountHeaders });
+  assert.equal(sessions.body.sessions[0].desktopAis.length, 1);
+  assert.equal(sessions.body.sessions[0].desktopAis[0].provider, "codex");
+
+  const removed = await json(
+    base,
+    `/api/account/sessions/${created.body.group.id}/ais/codex`,
+    { method: "DELETE", headers: accountHeaders }
+  );
+  assert.equal(removed.body.disconnected, true);
+  const group = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(group.body.members.some((member) => member.type === "ai"), false);
+});
+
 test("one-click browser transfer imports sessions into the current account", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
