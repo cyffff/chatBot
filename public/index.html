@@ -49,20 +49,6 @@
       </section>
 
       <section id="account-view" class="card account-card hidden">
-        <div id="account-register">
-          <p class="eyebrow">GROUP RELAY APP</p>
-          <h1>你的会话客户端</h1>
-          <p class="muted">用邮箱作为唯一身份，在一个页面查看自己加入的全部会话。</p>
-          <form id="account-form">
-            <label>邮箱<input name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@example.com" /></label>
-            <button type="submit">创建本机账户</button>
-          </form>
-          <div class="import-block">
-            <p class="muted">已有账户？导入之前下载的账户备份恢复身份。</p>
-            <label class="file-button centered">导入账户备份<input id="restore-account-file" type="file" accept="application/json,.json" /></label>
-          </div>
-        </div>
-
         <div id="account-dashboard" class="overview-shell hidden">
           <nav class="overview-sidebar" aria-label="首页导航">
             <div class="overview-brand"><span>GR</span><strong>Group Relay</strong></div>
@@ -78,7 +64,7 @@
             </div>
             <div class="overview-sidebar-footer">
               <small id="account-email"></small>
-              <button id="account-logout" class="sidebar-logout" type="button">退出本机</button>
+              <button id="account-logout" class="sidebar-logout" type="button">重置本机</button>
             </div>
           </nav>
 
@@ -103,7 +89,7 @@
               <div class="panel-heading">
                 <div>
                   <strong>创建新群组</strong>
-                  <p class="muted compact">创建后会自动加入当前邮箱账户。</p>
+                  <p class="muted compact">创建后会自动加入当前本机账户。</p>
                 </div>
                 <button id="cancel-account-create" class="text-button" type="button">取消</button>
               </div>

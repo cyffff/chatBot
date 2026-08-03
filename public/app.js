@@ -73,6 +73,22 @@ function saveAccountCredential(account, accountToken) {
   }));
 }
 
+function isAutomaticAccount(account = state.account) {
+  return account?.email?.endsWith("@device.group-relay.example.com") === true;
+}
+
+async function createAutomaticAccount() {
+  const deviceId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const { account, accountToken } = await accountApi("/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: `device-${deviceId}@device.group-relay.example.com` })
+  });
+  saveAccountCredential(account, accountToken);
+  const cached = localBrowserSessionCredentials();
+  if (cached.length) await importSessions(cached);
+  return account;
+}
+
 function localBrowserSessionCredentials() {
   const sessions = [];
   for (let index = 0; index < localStorage.length; index += 1) {
@@ -561,6 +577,7 @@ function renderAccountSessions(sessions) {
 function suggestedAccountMemberName(sessions) {
   const humanSession = sessions.find((session) => session.member.type === "human");
   if (humanSession?.member.name) return humanSession.member.name;
+  if (isAutomaticAccount()) return "我";
   return state.account?.email?.split("@")[0] ?? "";
 }
 
@@ -571,16 +588,16 @@ const taskStatusLabels = {
   failed: "需处理"
 };
 
-function dashboardOwnerName(email) {
-  const first = String(email ?? "Yunfei").split("@")[0].split(/[._-]/)[0] || "Yunfei";
+function dashboardOwnerName(value) {
+  const first = String(value ?? "我").split("@")[0].split(/[._-]/)[0] || "我";
   return first.charAt(0).toLocaleUpperCase() + first.slice(1);
 }
 
-function renderOverviewHeader(account) {
+function renderOverviewHeader(account, sessions) {
   const now = new Date();
   const hour = now.getHours();
   const greeting = hour < 6 ? "夜深了" : hour < 12 ? "早上好" : hour < 18 ? "下午好" : "晚上好";
-  const owner = dashboardOwnerName(account.email);
+  const owner = dashboardOwnerName(suggestedAccountMemberName(sessions));
   $("#overview-greeting").textContent = greeting;
   $("#overview-owner").textContent = owner;
   $("#dashboard-owner").textContent = owner;
@@ -711,8 +728,8 @@ async function loadAccountDashboard() {
   state.account = account;
   state.tasks = taskData.tasks;
   state.taskSummary = taskData.summary;
-  $("#account-email").textContent = account.email;
-  renderOverviewHeader(account);
+  $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
+  renderOverviewHeader(account, sessions);
   renderOverviewCalendar();
   for (const session of sessions) {
     localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
@@ -723,7 +740,6 @@ async function loadAccountDashboard() {
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = suggestedAccountMemberName(sessions);
   $("#account-create-panel").classList.add("hidden");
-  $("#account-register").classList.add("hidden");
   $("#account-dashboard").classList.remove("hidden");
   $("#account-view").classList.add("dashboard-mode");
   show("#account-view");
@@ -733,23 +749,17 @@ async function loadAccountDashboard() {
 
 async function showAccountView() {
   show("#account-view");
-  if (!loadAccountCredential()) {
-    $("#account-view").classList.remove("dashboard-mode");
-    $("#account-register").classList.remove("hidden");
-    $("#account-dashboard").classList.add("hidden");
-    return;
-  }
   try {
+    if (!loadAccountCredential()) await createAutomaticAccount();
     await loadAccountDashboard();
   } catch (error) {
     if (error.message === "invalid account token") {
       localStorage.removeItem(accountStorageKey);
       state.account = null;
       state.accountToken = null;
-      $("#account-register").classList.remove("hidden");
-      $("#account-dashboard").classList.add("hidden");
-      $("#account-view").classList.remove("dashboard-mode");
-      toast("账户密钥已失效，请导入账户备份");
+      await createAutomaticAccount();
+      await loadAccountDashboard();
+      toast("旧账户已失效，已自动恢复本机群组");
       return;
     }
     toast(error.message);
@@ -796,9 +806,7 @@ async function handleBackupInput(event) {
     if (!Array.isArray(backup.sessions)) {
       throw new Error("不是有效的 Group Relay 备份");
     }
-    if (!state.accountToken && !loadAccountCredential()) {
-      throw new Error("请先在客户端创建或恢复邮箱账户");
-    }
+    if (!state.accountToken && !loadAccountCredential()) await createAutomaticAccount();
     const sessions = backup.sessions.map((session) => ({
       groupId: session.groupId ?? session.group?.id,
       memberToken: session.memberToken
@@ -812,24 +820,6 @@ async function handleBackupInput(event) {
     toast(error.message);
   }
 }
-
-$("#account-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const email = new FormData(event.currentTarget).get("email");
-  try {
-    const { account, accountToken } = await accountApi("/api/accounts", {
-      method: "POST",
-      body: JSON.stringify({ email })
-    });
-    saveAccountCredential(account, accountToken);
-    const cached = localBrowserSessionCredentials();
-    const imported = cached.length ? (await importSessions(cached)).imported : 0;
-    await loadAccountDashboard();
-    toast(imported ? `账户已创建，已导入 ${imported} 个会话` : "账户已创建");
-  } catch (error) {
-    toast(error.message);
-  }
-});
 
 async function waitForBrowserTransfer(transferToken) {
   const deadline = Date.now() + 5 * 60_000;
@@ -907,19 +897,21 @@ $("#export-account").addEventListener("click", async () => {
   }
 });
 
-$("#restore-account-file").addEventListener("change", handleBackupInput);
 $("#import-account-file").addEventListener("change", handleBackupInput);
 
-$("#account-logout").addEventListener("click", () => {
+$("#account-logout").addEventListener("click", async () => {
   localStorage.removeItem(accountStorageKey);
   state.account = null;
   state.accountToken = null;
   clearInterval(state.taskRefreshTimer);
   state.taskRefreshTimer = null;
-  $("#account-dashboard").classList.add("hidden");
-  $("#account-register").classList.remove("hidden");
-  $("#account-view").classList.remove("dashboard-mode");
-  toast("已从这台设备退出");
+  try {
+    await createAutomaticAccount();
+    await loadAccountDashboard();
+    toast("已重置并恢复本机群组");
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 for (const button of document.querySelectorAll("[data-task-filter]")) {

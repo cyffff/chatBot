@@ -179,8 +179,6 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 }
 .account-create-panel form button { min-height: 45px; }
 .compact { margin: 10px 0; font-size: 13px; }
-.import-block { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e1e8e1; }
-.centered { width: fit-content; }
 .advanced-recovery { margin-top: 14px; color: #748078; font-size: 13px; }
 .advanced-recovery summary { cursor: pointer; width: fit-content; }
 .advanced-recovery > div { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
