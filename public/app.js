@@ -888,6 +888,7 @@ function renderAISettings(providers) {
       ? (status.credentialStore || "本机安全凭据")
       : "未保存";
     card.querySelector("[data-worker-count]").textContent = `${workerCount} 个`;
+    card.querySelector(".toggle-ai-key").textContent = keyConfigured ? "更换 API Key" : "配置 API Key";
     const help = card.querySelector("[data-provider-help]");
     const badge = card.querySelector(".provider-state");
     badge.classList.remove("ready", "active", "missing");
@@ -914,16 +915,19 @@ function renderAISettings(providers) {
 async function loadAISettings() {
   const notice = $("#ai-settings-notice");
   const forms = document.querySelectorAll(".ai-key-form");
+  const toggles = document.querySelectorAll(".toggle-ai-key");
   if (!desktopNativeBridge()) {
     notice.textContent = "API Key 只允许在 macOS 或 Windows 桌面客户端中配置。网页版不会接收或保存密钥。";
     notice.className = "settings-notice warning";
     forms.forEach((form) => { form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; }); });
+    toggles.forEach((toggle) => { toggle.disabled = true; });
     renderAISettings([]);
     return;
   }
   notice.textContent = "正在读取本机安全凭据和 AI 接入状态…";
   notice.className = "settings-notice";
   forms.forEach((form) => { form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; }); });
+  toggles.forEach((toggle) => { toggle.disabled = false; });
   try {
     const result = await requestNative("getAISettings");
     renderAISettings(result.providers ?? []);
@@ -1255,7 +1259,20 @@ $("#profile-settings-form").addEventListener("submit", async (event) => {
   }
 });
 
+function closeAIKeyForm(form) {
+  form.elements.apiKey.value = "";
+  form.classList.add("hidden");
+  form.closest(".ai-provider-card").querySelector(".toggle-ai-key").classList.remove("hidden");
+}
+
 for (const form of document.querySelectorAll(".ai-key-form")) {
+  const toggle = form.closest(".ai-provider-card").querySelector(".toggle-ai-key");
+  toggle.addEventListener("click", () => {
+    toggle.classList.add("hidden");
+    form.classList.remove("hidden");
+    form.elements.apiKey.focus();
+  });
+  form.querySelector(".cancel-ai-key").addEventListener("click", () => closeAIKeyForm(form));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const provider = form.dataset.provider;
@@ -1269,7 +1286,7 @@ for (const form of document.querySelectorAll(".ai-key-form")) {
     form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
     try {
       const result = await requestNative("saveAIKey", { provider, apiKey });
-      input.value = "";
+      closeAIKeyForm(form);
       renderAISettings(result.providers ?? []);
       toast(`${aiProviderLabels[provider]} API Key 已安全保存`);
     } catch (error) {
@@ -1284,7 +1301,7 @@ for (const form of document.querySelectorAll(".ai-key-form")) {
     form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
     try {
       const result = await requestNative("deleteAIKey", { provider });
-      form.elements.apiKey.value = "";
+      closeAIKeyForm(form);
       renderAISettings(result.providers ?? []);
       toast(`${aiProviderLabels[provider]} API Key 已删除，将改用 CLI 登录`);
     } catch (error) {

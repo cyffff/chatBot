@@ -545,7 +545,8 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 }
 .provider-help.ready { color: #286247; background: #e7f3e9; }
 .provider-help.missing { color: #913e3e; background: #fff0f0; }
-.ai-key-form { gap: 9px; margin: 0; }
+.toggle-ai-key { width: 100%; padding: 9px; font-size: 10px; }
+.ai-key-form { gap: 9px; margin: 10px 0 0; }
 .ai-key-form label { font-size: 11px; }
 .ai-key-form input { padding: 10px 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 .ai-key-form > div { display: flex; gap: 7px; }
