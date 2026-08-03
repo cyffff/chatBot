@@ -7,6 +7,9 @@ const state = {
   rendered: new Set(),
   realtimeStarted: false,
   presenceRefreshStarted: false,
+  eventSource: null,
+  presenceRefreshTimer: null,
+  accountBootstrapPromise: null,
   memberId: null,
   members: [],
   canManageTrustedExecution: false,
@@ -87,6 +90,20 @@ async function createAutomaticAccount() {
   const cached = localBrowserSessionCredentials();
   if (cached.length) await importSessions(cached);
   return account;
+}
+
+async function ensureAccountCredential() {
+  if (loadAccountCredential()) return;
+  if (!state.accountBootstrapPromise) {
+    state.accountBootstrapPromise = createAutomaticAccount()
+      .finally(() => { state.accountBootstrapPromise = null; });
+  }
+  await state.accountBootstrapPromise;
+}
+
+async function ensureAccountForCurrentSession() {
+  await ensureAccountCredential();
+  await linkCurrentSessionToAccount();
 }
 
 function localBrowserSessionCredentials() {
@@ -425,6 +442,7 @@ async function loadChat() {
   });
   startRealtime();
   startPresenceRefresh();
+  ensureAccountForCurrentSession().catch(() => {});
 }
 
 async function refreshMembers() {
@@ -435,7 +453,7 @@ async function refreshMembers() {
 function startPresenceRefresh() {
   if (state.presenceRefreshStarted) return;
   state.presenceRefreshStarted = true;
-  setInterval(() => refreshMembers().catch(() => {}), 30_000);
+  state.presenceRefreshTimer = setInterval(() => refreshMembers().catch(() => {}), 30_000);
 }
 
 function markConnected() {
@@ -451,7 +469,9 @@ function startRealtime() {
 }
 
 function connectEvents() {
+  state.eventSource?.close();
   const events = new EventSource(`/api/groups/${state.groupId}/events?token=${encodeURIComponent(state.token)}`);
+  state.eventSource = events;
   events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
   events.addEventListener("message_updated", (event) => updateRenderedMessage(JSON.parse(event.data)));
@@ -468,9 +488,11 @@ function connectEvents() {
 async function pollMessages() {
   while (state.groupId && state.token) {
     try {
+      const requestedGroupId = state.groupId;
       const query = new URLSearchParams({ timeoutMs: "25000", limit: "200" });
       if (state.cursor) query.set("after", state.cursor);
       const { messages, event, eventPayload } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
+      if (state.groupId !== requestedGroupId) break;
       messages.forEach(renderMessage);
       if (event === "message_updated" && eventPayload) {
         updateRenderedMessage(eventPayload);
@@ -486,9 +508,27 @@ async function pollMessages() {
   }
 }
 
+function stopChatRealtime() {
+  state.eventSource?.close();
+  state.eventSource = null;
+  if (state.presenceRefreshTimer) clearInterval(state.presenceRefreshTimer);
+  state.presenceRefreshTimer = null;
+  state.presenceRefreshStarted = false;
+  state.realtimeStarted = false;
+  state.groupId = null;
+  state.token = null;
+  state.inviteToken = null;
+  state.cursor = null;
+  state.memberId = null;
+  state.members = [];
+  state.rendered.clear();
+}
+
 function renderAccountSessions(sessions) {
   const list = $("#session-list");
   list.innerHTML = "";
+  $("#account-loading").classList.add("hidden");
+  $("#account-loading").classList.remove("error");
   $("#overview-group-count").textContent = sessions.length;
   $("#empty-sessions").classList.toggle("hidden", sessions.length !== 0);
   for (const session of sessions) {
@@ -719,6 +759,19 @@ function setOverviewView(view, { updateHash = true } = {}) {
   if (updateHash) history.replaceState({}, "", `${location.pathname}${location.search}#${nextView}`);
 }
 
+function showAccountDashboardShell(view = overviewViewFromHash()) {
+  $("#account-dashboard").classList.remove("hidden");
+  $("#account-view").classList.add("dashboard-mode");
+  show("#account-view");
+  setOverviewView(view, { updateHash: false });
+  if (!$("#session-list").children.length) {
+    $("#empty-sessions").classList.add("hidden");
+    $("#account-loading").classList.remove("hidden", "error");
+    $("#account-loading strong").textContent = "正在打开我的群组";
+    $("#account-loading small").textContent = "同步本机身份和会话…";
+  }
+}
+
 async function loadAccountDashboard() {
   const [{ account }, { sessions }, taskData] = await Promise.all([
     accountApi("/api/account"),
@@ -748,9 +801,9 @@ async function loadAccountDashboard() {
 }
 
 async function showAccountView() {
-  show("#account-view");
+  showAccountDashboardShell();
   try {
-    if (!loadAccountCredential()) await createAutomaticAccount();
+    await ensureAccountCredential();
     await loadAccountDashboard();
   } catch (error) {
     if (error.message === "invalid account token") {
@@ -762,6 +815,10 @@ async function showAccountView() {
       toast("旧账户已失效，已自动恢复本机群组");
       return;
     }
+    $("#account-loading").classList.remove("hidden");
+    $("#account-loading").classList.add("error");
+    $("#account-loading strong").textContent = "群组加载失败";
+    $("#account-loading small").textContent = error.message;
     toast(error.message);
   }
 }
@@ -1100,6 +1157,14 @@ $("#invite-button").addEventListener("click", async () => {
   } catch (error) {
     toast(error.message);
   }
+});
+
+$("#back-to-groups").addEventListener("click", (event) => {
+  event.preventDefault();
+  history.replaceState({}, "", "/app#groups");
+  stopChatRealtime();
+  showAccountDashboardShell("groups");
+  void showAccountView();
 });
 
 async function boot() {

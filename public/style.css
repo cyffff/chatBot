@@ -84,11 +84,16 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 #known-group-links { display: grid; gap: 8px; }
 #known-group-links .button-link { margin-top: 0; }
 .header-link {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
   color: #24573e;
   font-size: 13px;
   font-weight: 750;
   text-decoration: none;
 }
+.header-link:hover { background: transparent; color: #173e2c; }
 
 .install-tip {
   display: grid;
@@ -241,6 +246,30 @@ button.secondary { color: #24573e; background: #e7f0e8; }
   text-align: center;
 }
 .empty-state p { margin: 4px; }
+.account-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 15px;
+  border: 1px solid #dce6dd;
+  border-radius: 12px;
+  color: #526057;
+  background: #f7faf6;
+}
+.account-loading > span {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 3px solid #d8e5da;
+  border-top-color: #277153;
+  border-radius: 50%;
+  animation: transfer-spin .8s linear infinite;
+}
+.account-loading > div { display: grid; gap: 2px; }
+.account-loading small { color: #7a857d; font-size: 11px; }
+.account-loading.error > span { display: none; }
+.account-loading.error strong { color: #a04b4b; }
 
 /* Desktop overview follows a workspace layout: navigation, summary, work area and rail. */
 .account-card.dashboard-mode {
