@@ -331,7 +331,8 @@ macOS 和 Windows 客户端侧边栏最底部都有独立的“设置”入口�
 
 Key 不会上传到 Group Relay 服务、聊天记录或项目文件。macOS 使用系统钥匙串保存，Windows
 使用 Windows Credential Manager 保存；设置页面只能查看“已配置/未配置”，不能读取原始
-Key。普通浏览器中的设置页只显示状态说明，并禁止输入 Key。
+Key。macOS 客户端会直接更新已存在的钥匙串条目，不需要先删除旧 Key；普通浏览器中的
+设置页只显示状态说明，并禁止输入 Key。
 
 #### 个人 AI 看板与 Jira 任务
 

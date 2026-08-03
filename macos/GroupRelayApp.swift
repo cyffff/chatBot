@@ -159,6 +159,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
                 return
             }
         } catch {
+            writeAppLog("Native action \(action) failed: \(error.localizedDescription)")
             if let requestId {
                 sendNativeResponse(requestId: requestId, error: error.localizedDescription)
             } else {
@@ -170,6 +171,33 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     private var workerRegistryURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".group-relay/local-workers.json")
+    }
+
+    private var appLogURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Group Relay/app.log")
+    }
+
+    private func writeAppLog(_ message: String) {
+        let formatter = ISO8601DateFormatter()
+        let line = "\(formatter.string(from: Date())) \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: appLogURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if !FileManager.default.fileExists(atPath: appLogURL.path) {
+                try data.write(to: appLogURL, options: .atomic)
+            } else {
+                let handle = try FileHandle(forWritingTo: appLogURL)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            }
+        } catch {
+            // Logging must never prevent the native action from returning its real error.
+        }
     }
 
     private func jsonObject(at url: URL) -> [String: Any]? {
@@ -209,6 +237,15 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
+    private func keychainError(_ action: String, status: OSStatus) -> NSError {
+        let systemMessage = SecCopyErrorMessageString(status, nil) as String? ?? "未知错误"
+        return NSError(
+            domain: "GroupRelay",
+            code: Int(status),
+            userInfo: [NSLocalizedDescriptionKey: "无法\(action) macOS 钥匙串（\(status)：\(systemMessage)）"]
+        )
+    }
+
     private func saveAPIKey(_ rawValue: String, provider: String) throws {
         try validateProvider(provider)
         let apiKey = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -216,22 +253,34 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             throw NSError(domain: "GroupRelay", code: 21, userInfo: [NSLocalizedDescriptionKey: "API Key 不能为空或过长"])
         }
         let query = keychainQuery(provider)
-        SecItemDelete(query as CFDictionary)
-        var value = query
-        value[kSecValueData] = Data(apiKey.utf8)
-        value[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
-        let status = SecItemAdd(value as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw NSError(domain: "GroupRelay", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "无法写入 macOS 钥匙串（\(status)）"])
+        let data = Data(apiKey.utf8)
+        let existingStatus = SecItemCopyMatching(query as CFDictionary, nil)
+        var status: OSStatus
+        if existingStatus == errSecSuccess {
+            status = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
+        } else if existingStatus == errSecItemNotFound {
+            var value = query
+            value[kSecValueData] = data
+            value[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+            value[kSecAttrLabel] = "Group Relay \(provider.capitalized) API Key"
+            status = SecItemAdd(value as CFDictionary, nil)
+            if status == errSecDuplicateItem {
+                status = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
+            }
+        } else {
+            throw keychainError("读取", status: existingStatus)
         }
+        guard status == errSecSuccess else { throw keychainError("写入", status: status) }
+        writeAppLog("Saved \(provider) API Key in macOS Keychain")
     }
 
     private func deleteAPIKey(provider: String) throws {
         try validateProvider(provider)
         let status = SecItemDelete(keychainQuery(provider) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw NSError(domain: "GroupRelay", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "无法删除 macOS 钥匙串密钥（\(status)）"])
+            throw keychainError("删除", status: status)
         }
+        writeAppLog("Deleted \(provider) API Key from macOS Keychain")
     }
 
     private func aiSettingsPayload() -> [String: Any] {
