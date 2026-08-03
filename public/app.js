@@ -10,7 +10,11 @@ const state = {
   memberId: null,
   members: [],
   account: null,
-  accountToken: null
+  accountToken: null,
+  tasks: [],
+  taskSummary: {},
+  taskFilter: "all",
+  taskRefreshTimer: null
 };
 
 const accountStorageKey = "relay-account-v1";
@@ -483,17 +487,101 @@ function suggestedAccountMemberName(sessions) {
   return state.account?.email?.split("@")[0] ?? "";
 }
 
+const taskStatusLabels = {
+  assigned: "待开始",
+  in_progress: "进行中",
+  completed: "已完成",
+  failed: "需处理"
+};
+
+function dashboardOwnerName(email) {
+  const first = String(email ?? "Yunfei").split("@")[0].split(/[._-]/)[0] || "Yunfei";
+  return first.charAt(0).toLocaleUpperCase() + first.slice(1);
+}
+
+function taskAssigneeName(assignee) {
+  return assignee.ownerName ? `${assignee.ownerName}’s ${assignee.name}` : assignee.name;
+}
+
+function renderAITasks() {
+  const summary = state.taskSummary;
+  $("#task-count-all").textContent = state.tasks.length;
+  $("#task-count-assigned").textContent = summary.assigned ?? 0;
+  $("#task-count-in-progress").textContent = summary.in_progress ?? 0;
+  $("#task-count-completed").textContent = summary.completed ?? 0;
+  $("#task-count-failed").textContent = summary.failed ?? 0;
+  const visible = state.taskFilter === "all"
+    ? state.tasks
+    : state.tasks.filter((task) => task.status === state.taskFilter);
+  const list = $("#ai-task-list");
+  list.innerHTML = "";
+  $("#empty-ai-tasks").classList.toggle("hidden", visible.length !== 0);
+  for (const task of visible) {
+    const card = document.createElement("article");
+    card.className = `ai-task-card ${task.status}`;
+    const mark = document.createElement("span");
+    mark.className = "task-status-mark";
+    mark.title = taskStatusLabels[task.status] ?? task.status;
+    const body = document.createElement("div");
+    const title = document.createElement("h3");
+    title.className = "task-title";
+    title.textContent = task.title;
+    const meta = document.createElement("p");
+    meta.className = "task-meta";
+    meta.textContent = `${taskStatusLabels[task.status] ?? task.status} · ${taskAssigneeName(task.assignee)} · ${task.group.name} · ${new Date(task.updatedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+    body.append(title, meta);
+    const reportText = task.report || (task.status === "in_progress" ? task.progress : null);
+    if (reportText) {
+      const report = document.createElement("p");
+      report.className = "task-report";
+      report.textContent = reportText;
+      body.append(report);
+    }
+    const links = document.createElement("div");
+    links.className = "task-links";
+    const jira = document.createElement("a");
+    jira.href = task.jira.url;
+    jira.target = "_blank";
+    jira.rel = "noreferrer";
+    jira.textContent = task.jira.key;
+    const group = document.createElement("a");
+    group.href = `/group/${task.group.id}`;
+    group.textContent = "打开群聊";
+    links.append(jira, group);
+    card.append(mark, body, links);
+    list.append(card);
+  }
+}
+
+async function loadAccountTasks() {
+  const result = await accountApi("/api/account/tasks");
+  state.tasks = result.tasks;
+  state.taskSummary = result.summary;
+  renderAITasks();
+}
+
+function startTaskRefresh() {
+  if (state.taskRefreshTimer) return;
+  state.taskRefreshTimer = setInterval(() => loadAccountTasks().catch(() => {}), 10_000);
+}
+
 async function loadAccountDashboard() {
-  const [{ account }, { sessions }] = await Promise.all([
+  const [{ account }, { sessions }, taskData] = await Promise.all([
     accountApi("/api/account"),
-    accountApi("/api/account/sessions")
+    accountApi("/api/account/sessions"),
+    accountApi("/api/account/tasks")
   ]);
   state.account = account;
+  state.tasks = taskData.tasks;
+  state.taskSummary = taskData.summary;
   $("#account-email").textContent = account.email;
+  $("#dashboard-owner").textContent = dashboardOwnerName(account.email);
   for (const session of sessions) {
     localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
   }
   renderAccountSessions(sessions);
+  renderAITasks();
+  startTaskRefresh();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = suggestedAccountMemberName(sessions);
   $("#account-create-panel").classList.add("hidden");
@@ -684,9 +772,33 @@ $("#account-logout").addEventListener("click", () => {
   localStorage.removeItem(accountStorageKey);
   state.account = null;
   state.accountToken = null;
+  clearInterval(state.taskRefreshTimer);
+  state.taskRefreshTimer = null;
   $("#account-dashboard").classList.add("hidden");
   $("#account-register").classList.remove("hidden");
   toast("已从这台设备退出");
+});
+
+for (const button of document.querySelectorAll("[data-task-filter]")) {
+  button.addEventListener("click", () => {
+    state.taskFilter = button.dataset.taskFilter;
+    document.querySelectorAll("[data-task-filter]").forEach((candidate) => {
+      candidate.classList.toggle("active", candidate === button);
+    });
+    renderAITasks();
+  });
+}
+
+$("#refresh-ai-tasks").addEventListener("click", async (event) => {
+  event.currentTarget.disabled = true;
+  try {
+    await loadAccountTasks();
+    toast("AI 看板已更新");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    event.currentTarget.disabled = false;
+  }
 });
 
 $("#show-account-create").addEventListener("click", () => {

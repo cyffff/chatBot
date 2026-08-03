@@ -213,6 +213,75 @@ test("one-click browser transfer imports sessions into the current account", asy
   assert.equal(sessions.body.sessions[0].group.name, "Chrome session");
 });
 
+test("account AI board tracks Jira assignments through AI completion", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Yunfei Tasks", ownerName: "Yunfei" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex", ownerName: "Yunfei" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei@example.com" })
+  });
+  await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers: { "X-Account-Token": account.body.accountToken },
+    body: JSON.stringify({
+      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+    })
+  });
+
+  const assignment = new FormData();
+  assignment.set("text", "@Yunfei’s Codex 完成登录修复 https://acme.atlassian.net/browse/APP-123");
+  assignment.set("mentions", JSON.stringify([joined.body.member.id]));
+  const assignmentResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: assignment
+  });
+  const assignmentBody = await assignmentResponse.json();
+  assert.equal(assignmentResponse.status, 201);
+
+  let board = await json(base, "/api/account/tasks", {
+    headers: { "X-Account-Token": account.body.accountToken }
+  });
+  assert.equal(board.body.tasks.length, 1);
+  assert.equal(board.body.tasks[0].jira.key, "APP-123");
+  assert.equal(board.body.tasks[0].status, "assigned");
+  assert.equal(board.body.summary.assigned, 1);
+
+  const placeholder = new FormData();
+  placeholder.set("text", "正在处理这个 Jira，请稍等…");
+  placeholder.set("status", "processing");
+  placeholder.set("replyTo", assignmentBody.message.id);
+  const placeholderResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    body: placeholder
+  });
+  const placeholderBody = await placeholderResponse.json();
+  board = await json(base, "/api/account/tasks", {
+    headers: { "X-Account-Token": account.body.accountToken }
+  });
+  assert.equal(board.body.tasks[0].status, "in_progress");
+
+  await json(base, `/api/groups/${created.body.group.id}/messages/${placeholderBody.message.id}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    body: JSON.stringify({ text: "APP-123 已完成并通过测试。", status: "complete" })
+  });
+  board = await json(base, "/api/account/tasks", {
+    headers: { "X-Account-Token": account.body.accountToken }
+  });
+  assert.equal(board.body.tasks[0].status, "completed");
+  assert.equal(board.body.tasks[0].report, "APP-123 已完成并通过测试。");
+  assert.equal(board.body.summary.completed, 1);
+});
+
 test("long polling delivers a new message without refreshing", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

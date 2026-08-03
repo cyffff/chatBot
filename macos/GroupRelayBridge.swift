@@ -53,14 +53,21 @@ private final class RelayWorker {
                 try presence("online")
                 let messages = try waitForMessages()
                 if messages.isEmpty { continue }
-                try presence("busy")
-                let placeholder = try sendMessage("正在处理这个问题，请稍等…", status: "processing")
-                do {
-                    let reply = try askLocalAI(messages)
-                    try updateMessage(placeholder, text: reply, status: "complete")
-                } catch {
-                    try? updateMessage(placeholder, text: "处理失败：\(error.localizedDescription)", status: "failed")
-                    throw error
+                for message in messages {
+                    try presence("busy")
+                    let sourceMessageId = message["id"] as? String
+                    let placeholder = try sendMessage(
+                        "正在处理这个问题，请稍等…",
+                        status: "processing",
+                        replyTo: sourceMessageId
+                    )
+                    do {
+                        let reply = try askLocalAI([message])
+                        try updateMessage(placeholder, text: reply, status: "complete")
+                    } catch {
+                        try? updateMessage(placeholder, text: "处理失败：\(error.localizedDescription)", status: "failed")
+                        log("AI task \(sourceMessageId ?? "unknown") failed: \(error.localizedDescription)")
+                    }
                 }
                 try presence("online")
             } catch {
@@ -168,8 +175,10 @@ private final class RelayWorker {
         return (data, "multipart/form-data; boundary=\(boundary)")
     }
 
-    private func sendMessage(_ text: String, status: String) throws -> String {
-        let (body, contentType) = multipart(["text": text, "status": status])
+    private func sendMessage(_ text: String, status: String, replyTo: String? = nil) throws -> String {
+        var fields = ["text": text, "status": status]
+        if let replyTo { fields["replyTo"] = replyTo }
+        let (body, contentType) = multipart(fields)
         let result = try request(
             "/api/groups/\(config.groupId)/messages",
             method: "POST",

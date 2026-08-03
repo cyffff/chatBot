@@ -76,6 +76,27 @@
             <strong id="client-tip-title">安装到 iPhone</strong>
             <span id="client-tip-text">在 Safari 点“分享”，选择“添加到主屏幕”。请使用固定域名，临时 Cloudflare 地址变化后已安装客户端会失效。</span>
           </div>
+          <section class="ai-task-dashboard" aria-labelledby="ai-dashboard-title">
+            <div class="dashboard-heading">
+              <div>
+                <p class="eyebrow">AI WORKBOARD</p>
+                <h2 id="ai-dashboard-title"><span id="dashboard-owner">Yunfei</span> 的 AI 看板</h2>
+                <p class="muted compact">在群聊中发送“@AI + Jira 链接”，任务会自动出现在这里。</p>
+              </div>
+              <button id="refresh-ai-tasks" class="text-button" type="button">刷新</button>
+            </div>
+            <div class="task-summary" aria-label="任务统计">
+              <button class="task-stat active" type="button" data-task-filter="all"><strong id="task-count-all">0</strong><span>全部</span></button>
+              <button class="task-stat" type="button" data-task-filter="assigned"><strong id="task-count-assigned">0</strong><span>待开始</span></button>
+              <button class="task-stat" type="button" data-task-filter="in_progress"><strong id="task-count-in-progress">0</strong><span>进行中</span></button>
+              <button class="task-stat" type="button" data-task-filter="completed"><strong id="task-count-completed">0</strong><span>已完成</span></button>
+              <button class="task-stat" type="button" data-task-filter="failed"><strong id="task-count-failed">0</strong><span>需处理</span></button>
+            </div>
+            <div id="ai-task-list" class="ai-task-list"></div>
+            <div id="empty-ai-tasks" class="task-empty">
+              暂无 Jira 任务。在自己的群组里 @AI 并粘贴 Jira 链接即可分配。
+            </div>
+          </section>
           <div class="account-actions">
             <button id="show-account-create" type="button">创建群组</button>
             <button id="start-browser-transfer" class="secondary" type="button">从浏览器导入会话</button>

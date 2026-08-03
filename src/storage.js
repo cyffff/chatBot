@@ -46,6 +46,7 @@ export class FileStore {
     this.accountsFile = path.join(this.root, "accounts.json");
     this.writeQueues = new Map();
     this.memberQueues = new Map();
+    this.taskQueues = new Map();
     this.accountQueue = Promise.resolve();
   }
 
@@ -82,6 +83,7 @@ export class FileStore {
     await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
     await writeJsonAtomic(path.join(dir, "group.json"), group);
     await writeJsonAtomic(path.join(dir, "members.json"), [owner]);
+    await writeJsonAtomic(path.join(dir, "tasks.json"), []);
     const invites = await readJson(this.invitesFile);
     invites[inviteToken] = groupId;
     await writeJsonAtomic(this.invitesFile, invites);
@@ -178,6 +180,101 @@ export class FileStore {
       const before = account.memberships.length;
       account.memberships = account.memberships.filter((membership) => membership.groupId !== groupId);
       return account.memberships.length !== before;
+    });
+  }
+
+  async listTasks(groupId) {
+    const file = path.join(this.groupDir(groupId), "tasks.json");
+    if (!(await exists(file))) return [];
+    return readJson(file);
+  }
+
+  async updateTasks(groupId, update) {
+    const previous = this.taskQueues.get(groupId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const tasks = await this.listTasks(groupId);
+      const result = await update(tasks);
+      await writeJsonAtomic(path.join(this.groupDir(groupId), "tasks.json"), tasks);
+      return result;
+    });
+    this.taskQueues.set(groupId, next.catch(() => {}));
+    return next;
+  }
+
+  async createAssignmentTasks(groupId, message, assignees, jiraReferences) {
+    if (!assignees.length || !jiraReferences.length) return [];
+    return this.updateTasks(groupId, (tasks) => {
+      const created = [];
+      for (const jira of jiraReferences) {
+        for (const assignee of assignees) {
+          const duplicate = tasks.find((task) => (
+            task.sourceMessageId === message.id
+            && task.assignee.id === assignee.id
+            && task.jira.url === jira.url
+          ));
+          if (duplicate) continue;
+          const task = {
+            id: id(),
+            groupId,
+            sourceMessageId: message.id,
+            responseMessageId: null,
+            title: jira.title,
+            jira: { key: jira.key, url: jira.url },
+            assignee: {
+              id: assignee.id,
+              name: assignee.name,
+              provider: assignee.provider,
+              ownerName: assignee.ownerName ?? null
+            },
+            createdBy: {
+              id: message.sender.id,
+              name: message.sender.name
+            },
+            status: "assigned",
+            progress: null,
+            report: null,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+            startedAt: null,
+            completedAt: null
+          };
+          tasks.push(task);
+          created.push(task);
+        }
+      }
+      return created;
+    });
+  }
+
+  async updateAssignmentTasks(groupId, message) {
+    if (message.sender?.type !== "ai") return [];
+    return this.updateTasks(groupId, (tasks) => {
+      const now = new Date().toISOString();
+      const changed = [];
+      for (const task of tasks) {
+        const matchesSource = message.replyTo && task.sourceMessageId === message.replyTo;
+        const matchesResponse = task.responseMessageId === message.id;
+        if (task.assignee.id !== message.sender.id || (!matchesSource && !matchesResponse)) continue;
+        task.responseMessageId = message.id;
+        task.updatedAt = message.updatedAt ?? message.createdAt ?? now;
+        if (message.status === "processing") {
+          task.status = "in_progress";
+          task.startedAt ??= now;
+          task.progress = message.text || task.progress;
+        } else if (message.status === "failed") {
+          task.status = "failed";
+          task.startedAt ??= now;
+          task.completedAt = now;
+          task.report = message.text || task.report;
+        } else {
+          task.status = "completed";
+          task.startedAt ??= now;
+          task.completedAt = now;
+          task.report = message.text || task.report;
+        }
+        changed.push(task);
+      }
+      return changed;
     });
   }
 

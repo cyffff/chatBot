@@ -315,6 +315,28 @@ App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 sessi
 桌面客户端的 `/app` 首页显示当前邮箱账户加入的全部群组。可在列表页直接点击“创建群组”，
 新群组会自动归入当前账户；进入聊天后点击“返回群组列表”即可回到该首页。
 
+#### Yunfei 的 AI 看板与 Jira 任务
+
+在自己的群组中发送一条同时包含 AI mention 和 Jira issue 链接的消息：
+
+```text
+@Yunfei’s Codex 请处理登录超时问题 https://company.atlassian.net/browse/APP-123
+```
+
+首页会自动生成任务卡并按以下过程更新：
+
+```text
+待开始 → AI 发出处理占位 → 进行中 → AI 回填最终回复 → 已完成 / 需处理
+```
+
+任务卡包含 Jira 链接、群组、AI 负责人和最终汇报，并可返回原群聊。看板只显示当前
+邮箱账户所对应成员亲自分配的任务；普通链接、没有 `@AI` 的消息以及其他成员分配的任务
+不会进入该账户的看板。页面每 10 秒自动同步，也可手动刷新。
+
+任务状态表示 Group Relay 中本轮 AI 处理状态，不会修改或伪造 Jira issue 状态。AI 是否
+能真正读取 Jira、修改代码或部署，取决于该 AI 本机已有的项目、权限和工具配置；服务器
+不保存 Jira 凭证。
+
 #### 构建 Mac DMG
 
 ```bash
@@ -468,6 +490,7 @@ Authorization: Bearer <member-token>
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
+| `GET` | `/api/account/tasks` | 查询当前账户分配的 Jira AI 任务与进度 |
 | `POST` | `/api/groups` | 创建群组 |
 | `GET` | `/api/invites/:inviteToken` | 查询邀请 |
 | `POST` | `/api/invites/:inviteToken/join` | 加入群组 |

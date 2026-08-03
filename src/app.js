@@ -10,6 +10,25 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(here, "../public");
 
 const cleanText = (value, max) => String(value ?? "").trim().slice(0, max);
+const jiraUrlPattern = /https?:\/\/[^\s<>"']+\/browse\/[a-z][a-z0-9_]*-\d+[^\s<>"']*/gi;
+
+function jiraReferences(text) {
+  const references = [];
+  const seen = new Set();
+  for (const match of String(text ?? "").matchAll(jiraUrlPattern)) {
+    const url = match[0].replace(/[),.;!?，。；！？]+$/u, "");
+    const key = url.match(/\/browse\/([a-z][a-z0-9_]*-\d+)/i)?.[1]?.toUpperCase();
+    if (!key || seen.has(url)) continue;
+    seen.add(url);
+    references.push({ key, url });
+  }
+  if (!references.length) return [];
+  const title = cleanText(
+    String(text ?? "").replace(jiraUrlPattern, " ").replace(/\s+/g, " "),
+    180
+  );
+  return references.map((reference) => ({ ...reference, title: title || reference.key }));
+}
 const presenceSchema = z.object({
   status: z.enum(["online", "busy"])
 });
@@ -152,6 +171,27 @@ export async function createApp(options = {}) {
     return sessions;
   }
 
+  async function accountTasks(account) {
+    const tasks = [];
+    for (const membership of account.memberships ?? []) {
+      const [group, member, groupTasks] = await Promise.all([
+        store.getGroup(membership.groupId),
+        store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
+        store.listTasks(membership.groupId).catch(() => [])
+      ]);
+      if (!group || !member || member.id !== membership.memberId) continue;
+      for (const task of groupTasks) {
+        if (task.createdBy?.id !== membership.memberId) continue;
+        tasks.push({
+          ...task,
+          group: { id: group.id, name: group.name }
+        });
+      }
+    }
+    tasks.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    return tasks;
+  }
+
   function activeBrowserTransfer(token) {
     const transfer = browserTransfers.get(token);
     if (!transfer) return null;
@@ -237,6 +277,17 @@ export async function createApp(options = {}) {
   app.get("/api/account/sessions", requireAccount, async (req, res, next) => {
     try {
       res.json({ sessions: await accountSessions(req.account) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/account/tasks", requireAccount, async (req, res, next) => {
+    try {
+      const tasks = await accountTasks(req.account);
+      const summary = { assigned: 0, in_progress: 0, completed: 0, failed: 0 };
+      for (const task of tasks) summary[task.status] = (summary[task.status] ?? 0) + 1;
+      res.json({ tasks, summary });
     } catch (error) {
       next(error);
     }
@@ -557,6 +608,12 @@ export async function createApp(options = {}) {
           message.id,
           status === "processing"
         );
+        await store.updateAssignmentTasks(req.params.groupId, message);
+      } else {
+        const references = jiraReferences(text);
+        if (references.length && mentions.length) {
+          await store.createAssignmentTasks(req.params.groupId, message, mentions, references);
+        }
       }
       publish(req.params.groupId, "message", message);
       await reportActivity(req, status === "processing" ? "busy" : "online");
@@ -589,6 +646,7 @@ export async function createApp(options = {}) {
         result.message.id,
         input.status === "processing"
       );
+      await store.updateAssignmentTasks(req.params.groupId, result.message);
       publish(req.params.groupId, "message_updated", result.message);
       await reportActivity(req, input.status === "processing" ? "busy" : "online");
       res.json({ message: result.message });

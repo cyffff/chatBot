@@ -209,29 +209,31 @@ async function main() {
         if (!messages.length) continue;
         currentStatus = "busy";
         await presence(config, "busy");
-        const placeholder = await sendReply(
-          config,
-          "正在处理这个问题，请稍等…",
-          messages.at(-1)?.id,
-          "processing"
-        );
-        let reply;
-        try {
-          reply = await askCodex(config, messages);
-          if (reply) {
-            await updateReply(config, placeholder.message.id, reply, "complete");
-          } else {
-            await updateReply(config, placeholder.message.id, "暂时没有生成有效回复，请稍后再试。", "failed");
-          }
-          console.log(JSON.stringify({ repliedTo: messages.map((message) => message.id), reply }));
-        } catch (error) {
-          await updateReply(
+        for (const message of messages) {
+          const placeholder = await sendReply(
             config,
-            placeholder.message.id,
-            `处理失败：${error.message}`,
-            "failed"
-          ).catch(() => {});
-          throw error;
+            "正在处理这个问题，请稍等…",
+            message.id,
+            "processing"
+          );
+          let reply;
+          try {
+            reply = await askCodex(config, [message]);
+            if (reply) {
+              await updateReply(config, placeholder.message.id, reply, "complete");
+            } else {
+              await updateReply(config, placeholder.message.id, "暂时没有生成有效回复，请稍后再试。", "failed");
+            }
+            console.log(JSON.stringify({ repliedTo: [message.id], reply }));
+          } catch (error) {
+            await updateReply(
+              config,
+              placeholder.message.id,
+              `处理失败：${error.message}`,
+              "failed"
+            ).catch(() => {});
+            console.error(`Task ${message.id} failed: ${error.message}`);
+          }
         }
         currentStatus = "online";
         await presence(config, "online");
