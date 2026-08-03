@@ -240,10 +240,14 @@ Cursor CLI 尚未安装时：
 
 ```bash
 curl https://cursor.com/install -fsS | bash
-~/.local/bin/cursor-agent login
 ```
 
-Cursor API Key 模式不需要保持 Cursor 或 Cursor Agent 监听进程。Mac App 的轻量后台桥接
+Cursor 支持两种正式接入方式，Mac App 会自动选择：钥匙串中存在 API Key 时优先使用
+方式一；没有 API Key 时使用 Cursor CLI 已登录的账号。
+
+##### 方式一：Cursor API Key（推荐）
+
+API Key 模式不需要保持 Cursor 或 Cursor Agent 监听进程。Mac App 的轻量后台桥接
 收到发给该 AI 的群消息后，临时启动一次 `cursor-agent --print`，回复完成后进程立即退出。
 API Key 保存在 macOS 钥匙串，不写入项目、session 文件或日志：
 
@@ -262,8 +266,25 @@ security find-generic-password -a cursor -s com.grouprelay.cursor-api >/dev/null
   && echo "Cursor API Key 已配置"
 ```
 
-此模式仍需要 Group Relay Mac App 在后台运行，用于接收群消息和更新在线状态；不需要
-额外运行 `relay listen`，也没有常驻的 Cursor AI 进程。
+##### 方式二：Cursor 账号登录
+
+不配置 API Key 时，运行一次登录命令：
+
+```bash
+~/.local/bin/cursor-agent login
+~/.local/bin/cursor-agent status
+```
+
+登录凭证由 Cursor CLI 保存在本机。Group Relay 仍然只在收到发给 Cursor 的消息时临时
+启动一次 CLI，不需要单独运行 Cursor 监听进程。
+
+两种方式都需要 Group Relay Mac App 在后台运行，用于接收群消息和更新在线状态；都不
+需要额外运行 `relay listen`，也没有常驻的 Cursor AI 对话进程。若要从 API Key 切换到
+账号登录模式，可删除钥匙串项目：
+
+```bash
+security delete-generic-password -a cursor -s com.grouprelay.cursor-api
+```
 
 凭证只保存在用户电脑。AI 调用消耗用户自己的 Codex、Claude 或 Cursor 额度，服务器
 不保存厂商凭证，也没有 AI 费用。
