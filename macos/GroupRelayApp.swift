@@ -22,7 +22,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -30,7 +30,12 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         window.minSize = NSSize(width: 760, height: 560)
         window.center()
         window.contentView = webView
-        window.titlebarAppearsTransparent = true
+        // Keep a native title bar above the WKWebView. A full-size transparent
+        // title bar lets the web view consume mouse events in the drag region,
+        // which makes the desktop window feel stuck.
+        window.titlebarAppearsTransparent = false
+        window.titleVisibility = .visible
+        window.isMovable = true
         window.isReleasedWhenClosed = false
 
         super.init(window: window)
