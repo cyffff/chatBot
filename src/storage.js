@@ -76,7 +76,8 @@ export class FileStore {
       id: groupId,
       name,
       createdAt: new Date().toISOString(),
-      inviteToken
+      inviteToken,
+      ownerMemberId: owner.id
     };
     const dir = this.groupDir(groupId);
     await fs.mkdir(path.join(dir, "messages"), { recursive: true });
@@ -288,6 +289,15 @@ export class FileStore {
     });
     this.memberQueues.set(groupId, next.catch(() => {}));
     return next;
+  }
+
+  async setTrustedExecution(groupId, aiMemberId, ownerMemberId, enabled) {
+    return this.updateMembers(groupId, (members) => {
+      const member = members.find((candidate) => candidate.id === aiMemberId);
+      if (!member || member.type !== "ai") return null;
+      member.trustedOwnerMemberId = enabled ? ownerMemberId : null;
+      return member;
+    });
   }
 
   async removeMember(groupId, memberId) {

@@ -218,6 +218,7 @@ async function join() {
   const name = option("name", providerName(provider));
   const agentBin = option("agent-bin");
   const model = option("model");
+  const workspace = option("workspace");
   if (!inviteUrl || !provider || !ownerName || !["codex", "claude", "cursor"].includes(provider)) {
     throw new Error(
       "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>]"
@@ -290,6 +291,7 @@ async function join() {
     ownerName,
     sessionId,
     cursor: null,
+    workspacePath: path.resolve(workspace ?? process.cwd()),
     ...(agentBin ? { agentBin: path.resolve(agentBin) } : {}),
     ...(model ? { model } : {})
   };
@@ -571,7 +573,7 @@ const commands = {
 
 if (!commands[command]) {
   console.error(`Usage:
-  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
+  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
   npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
   npm run relay -- background --session <session-id> [--disable]
   npm run relay -- status --session <session-id>

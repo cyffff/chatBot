@@ -427,6 +427,19 @@ aside {
 aside h2 { margin: 0 0 14px; font-size: 14px; }
 aside ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
+aside li > span:nth-child(2) { min-width: 0; }
+.member-trust {
+  margin-left: auto;
+  padding: 5px 7px;
+  border: 1px solid #d5dfd6;
+  border-radius: 7px;
+  color: #78827a;
+  background: white;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.member-trust:hover { color: #1f6848; background: #edf4ee; }
+.member-trust.enabled { color: #9a6113; border-color: #efd29d; background: #fff4df; }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
   background: #dcecdf; color: #276044; font-size: 11px; font-weight: 850;

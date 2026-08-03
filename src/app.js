@@ -32,6 +32,7 @@ function jiraReferences(text) {
 const presenceSchema = z.object({
   status: z.enum(["online", "busy"])
 });
+const trustedExecutionSchema = z.object({ enabled: z.boolean() });
 const messageUpdateSchema = z.object({
   text: z.string().trim().min(1).max(20_000),
   status: z.enum(["processing", "complete", "failed"]),
@@ -221,16 +222,25 @@ export async function createApp(options = {}) {
         return message.mentions.some((mention) => mention.id === member.id);
       }
       return message.sender?.type !== "ai";
-    });
+    }).map((message) => ({
+      ...message,
+      executionScope: member.trustedOwnerMemberId === message.sender?.id ? "trusted" : "restricted"
+    }));
   }
 
   function publicMember(member) {
-    const { token: _token, activeMessageIds = [], ...safe } = member;
+    const {
+      token: _token,
+      activeMessageIds = [],
+      trustedOwnerMemberId,
+      ...safe
+    } = member;
     if (member.type !== "ai") return safe;
     const lastSeen = Date.parse(member.presence?.lastSeenAt ?? "");
     const active = Number.isFinite(lastSeen) && Date.now() - lastSeen <= presenceTimeoutMs;
     return {
       ...safe,
+      trustedExecutionEnabled: Boolean(trustedOwnerMemberId),
       presence: {
         status: active ? (activeMessageIds.length ? "busy" : member.presence.status) : "offline",
         lastSeenAt: member.presence?.lastSeenAt ?? null
@@ -448,12 +458,49 @@ export async function createApp(options = {}) {
     try {
       const group = await store.getGroup(req.params.groupId);
       if (!group) return res.status(404).json({ error: "group not found" });
-      const members = (await store.listMembers(group.id)).map(publicMember);
-      res.json({ group, members, currentMemberId: req.member.id });
+      const rawMembers = await store.listMembers(group.id);
+      const ownerMemberId = group.ownerMemberId ?? rawMembers.find((member) => member.type === "human")?.id;
+      const members = rawMembers.map(publicMember);
+      res.json({
+        group,
+        members,
+        currentMemberId: req.member.id,
+        canManageTrustedExecution: req.member.id === ownerMemberId
+      });
     } catch (error) {
       next(error);
     }
   });
+
+  app.post(
+    "/api/groups/:groupId/members/:memberId/trusted-execution",
+    requireMember,
+    async (req, res, next) => {
+      try {
+        const input = trustedExecutionSchema.parse(req.body);
+        const [group, members] = await Promise.all([
+          store.getGroup(req.params.groupId),
+          store.listMembers(req.params.groupId)
+        ]);
+        if (!group) return res.status(404).json({ error: "group not found" });
+        const ownerMemberId = group.ownerMemberId ?? members.find((member) => member.type === "human")?.id;
+        if (req.member.id !== ownerMemberId) {
+          return res.status(403).json({ error: "only the group owner can enable trusted execution" });
+        }
+        const member = await store.setTrustedExecution(
+          req.params.groupId,
+          req.params.memberId,
+          ownerMemberId,
+          input.enabled
+        );
+        if (!member) return res.status(404).json({ error: "AI member not found" });
+        publish(req.params.groupId, "member_updated", publicMember(member));
+        res.json({ member: publicMember(member) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   app.delete("/api/groups/:groupId/members/me", requireMember, async (req, res, next) => {
     try {

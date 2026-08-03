@@ -9,6 +9,7 @@ const state = {
   presenceRefreshStarted: false,
   memberId: null,
   members: [],
+  canManageTrustedExecution: false,
   account: null,
   accountToken: null,
   tasks: [],
@@ -226,6 +227,32 @@ function renderMembers(members) {
     }
     text.append(meta);
     item.append(avatar, text);
+    if (member.type === "ai" && state.canManageTrustedExecution) {
+      const trust = document.createElement("button");
+      trust.type = "button";
+      trust.className = `member-trust ${member.trustedExecutionEnabled ? "enabled" : ""}`;
+      trust.textContent = member.trustedExecutionEnabled ? "免审批：开" : "免审批：关";
+      trust.title = member.trustedExecutionEnabled
+        ? "只有你的消息可以让该 AI 在项目中免审批执行；点击关闭"
+        : "允许该 AI 对你的消息在绑定项目中免审批执行";
+      trust.addEventListener("click", async () => {
+        trust.disabled = true;
+        try {
+          const result = await api(
+            `/api/groups/${state.groupId}/members/${member.id}/trusted-execution`,
+            { method: "POST", body: JSON.stringify({ enabled: !member.trustedExecutionEnabled }) }
+          );
+          const index = state.members.findIndex((candidate) => candidate.id === member.id);
+          if (index >= 0) state.members[index] = result.member;
+          renderMembers(state.members);
+          toast(result.member.trustedExecutionEnabled ? "已开启群主免审批执行" : "已关闭免审批执行");
+        } catch (error) {
+          trust.disabled = false;
+          toast(error.message);
+        }
+      });
+      item.append(trust);
+    }
     $("#member-list").append(item);
   }
 }
@@ -242,7 +269,7 @@ function applyMemberEvent(eventName, payload) {
     renderMembers(state.members.filter((member) => member.id !== payload.id));
     return Promise.resolve();
   }
-  if (eventName === "member_joined") return refreshMembers();
+  if (eventName === "member_joined" || eventName === "member_updated") return refreshMembers();
   return Promise.resolve();
 }
 
@@ -363,12 +390,13 @@ function renderMessage(message) {
 }
 
 async function loadChat() {
-  const [{ group, members, currentMemberId }, { messages, cursor }] = await Promise.all([
+  const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor }] = await Promise.all([
     api(`/api/groups/${state.groupId}`),
     api(`/api/groups/${state.groupId}/messages?limit=200`)
   ]);
   state.inviteToken = group.inviteToken;
   state.memberId = currentMemberId;
+  state.canManageTrustedExecution = canManageTrustedExecution === true;
   $("#group-name").textContent = group.name;
   renderMembers(members);
   messages.forEach(renderMessage);
@@ -410,7 +438,7 @@ function connectEvents() {
   events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
   events.addEventListener("message_updated", (event) => updateRenderedMessage(JSON.parse(event.data)));
-  for (const eventName of ["member_joined", "member_left", "member_presence"]) {
+  for (const eventName of ["member_joined", "member_left", "member_presence", "member_updated"]) {
     events.addEventListener(eventName, (event) => {
       applyMemberEvent(eventName, JSON.parse(event.data)).catch(() => {});
     });

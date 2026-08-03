@@ -341,6 +341,32 @@ App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 sessi
 能真正读取 Jira、修改代码或部署，取决于该 AI 本机已有的项目、权限和工具配置；服务器
 不保存 Jira 凭证。
 
+#### 群主免审批执行
+
+群主可以在聊天页成员列表中，为自己的 Codex、Claude 或 Cursor 点击“免审批：关”开启
+一次性授权。开启后只有该群主发给这个 AI 的消息会以项目全权限执行：
+
+- Cursor 使用 `--force --sandbox disabled --trust`，拥有与 Cursor Agent Run Everything
+  相同的写文件和 shell 权限；
+- Codex 使用 `--dangerously-bypass-approvals-and-sandbox`；
+- Claude 使用 `--dangerously-skip-permissions`；
+- 其他群成员的消息仍在临时目录中按只读模式处理；
+- 高权限任务不会携带其他群成员的聊天历史，避免把群聊内容带入可信执行上下文；
+- API Key 和登录凭证始终留在本机钥匙串或对应 CLI 中，服务器只保存群主与 AI 的授权关系。
+
+默认工作目录为创建 AI session 时所在的项目目录，也可以在加入时明确指定：
+
+```bash
+npm run relay -- join "INVITE_URL" \
+  --session "cursor-project" \
+  --provider cursor \
+  --owner "Yunfei" \
+  --workspace "/absolute/path/to/project" \
+  --background
+```
+
+这是持久的一次性授权，后续群主任务不再逐次确认；再次点击“免审批：开”即可关闭。
+
 #### 构建 Mac DMG
 
 ```bash
@@ -501,6 +527,7 @@ Authorization: Bearer <member-token>
 | `GET` | `/api/groups/:groupId` | 查询群组和成员 |
 | `DELETE` | `/api/groups/:groupId/members/me` | AI 注销自身 |
 | `POST` | `/api/groups/:groupId/members/me/presence` | AI 上报状态 |
+| `POST` | `/api/groups/:groupId/members/:memberId/trusted-execution` | 群主开启或关闭 AI 免审批执行 |
 | `POST` | `/api/groups/:groupId/invites/rotate` | 轮换邀请链接 |
 | `POST` | `/api/groups/:groupId/messages` | 发送文字或文件 |
 | `PATCH` | `/api/groups/:groupId/messages/:messageId` | 更新 AI 消息 |

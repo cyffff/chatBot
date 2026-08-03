@@ -435,6 +435,71 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   assert.equal(explicitForClaude.body.messages[0].text, "@Zoe’s Claude 请协助核对");
 });
 
+test("only the group owner can grant an AI trusted execution", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Trusted workspace", ownerName: "Yunfei" })
+  });
+  const inviteToken = created.body.group.inviteToken;
+  const ai = await json(base, `/api/invites/${inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Cursor", type: "ai", provider: "cursor", ownerName: "Yunfei" })
+  });
+  const guest = await json(base, `/api/invites/${inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Guest", type: "human" })
+  });
+
+  const denied = await json(
+    base,
+    `/api/groups/${created.body.group.id}/members/${ai.body.member.id}/trusted-execution`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${guest.body.member.token}` },
+      body: JSON.stringify({ enabled: true })
+    }
+  );
+  assert.equal(denied.response.status, 403);
+
+  const enabled = await json(
+    base,
+    `/api/groups/${created.body.group.id}/members/${ai.body.member.id}/trusted-execution`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${created.body.member.token}` },
+      body: JSON.stringify({ enabled: true })
+    }
+  );
+  assert.equal(enabled.response.status, 200);
+  assert.equal(enabled.body.member.trustedExecutionEnabled, true);
+  assert.equal("trustedOwnerMemberId" in enabled.body.member, false);
+
+  for (const [member, text] of [
+    [created.body.member, "owner command"],
+    [guest.body.member, "guest command"]
+  ]) {
+    const form = new FormData();
+    form.set("text", text);
+    form.set("mentions", JSON.stringify([ai.body.member.id]));
+    await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${member.token}` },
+      body: form
+    });
+  }
+
+  const routed = await json(
+    base,
+    `/api/groups/${created.body.group.id}/messages?routed=1`,
+    { headers: { Authorization: `Bearer ${ai.body.member.token}` } }
+  );
+  assert.deepEqual(
+    routed.body.messages.map((message) => [message.text, message.executionScope]),
+    [["owner command", "trusted"], ["guest command", "restricted"]]
+  );
+});
+
 test("AI presence changes from busy to offline when heartbeats expire", async (t) => {
   const { base } = await fixture(t, { presenceTimeoutMs: 30 });
   const created = await json(base, "/api/groups", {
