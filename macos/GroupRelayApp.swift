@@ -809,11 +809,12 @@ final class LocalAIBridgeManager {
             _ = try? log.seekToEnd()
             process.standardOutput = log
             process.standardError = log
-            process.terminationHandler = { [weak self] _ in
+            process.terminationHandler = { [weak self] terminatedProcess in
                 try? log.close()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                    self?.processes.removeValue(forKey: workerId)
-                    self?.synchronizeWorkers()
+                    guard let self, self.processes[workerId] === terminatedProcess else { return }
+                    self.processes.removeValue(forKey: workerId)
+                    self.synchronizeWorkers()
                 }
             }
         }
