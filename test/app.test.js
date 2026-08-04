@@ -396,6 +396,75 @@ test("trusted desktop AIs from the same owner can delegate work to each other", 
   assert.equal(routed.body.messages[0].executionScope, "trusted");
 });
 
+test("desktop AI approval requests appear in the owner queue and batch approval redelivers once as trusted", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Approval queue", ownerName: "Other owner" })
+  });
+  const yunfei = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Yunfei", type: "human" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei-approvals@example.test" })
+  });
+  const accountHeaders = { "X-Account-Token": account.body.accountToken };
+  await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({
+      sessions: [{ groupId: created.body.group.id, memberToken: yunfei.body.member.token }]
+    })
+  });
+  const attached = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ provider: "claude" })
+  });
+  const command = new FormData();
+  command.set("text", "请读取本机项目并运行测试");
+  command.set("mentions", JSON.stringify([attached.body.member.id]));
+  const commandResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: command
+  });
+  const commandBody = await commandResponse.json();
+  const requested = await json(base, `/api/groups/${created.body.group.id}/approvals`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` },
+    body: JSON.stringify({
+      sourceMessageId: commandBody.message.id,
+      summary: "读取项目并运行测试"
+    })
+  });
+  assert.equal(requested.response.status, 201);
+
+  const inbox = await json(base, "/api/account/approvals", { headers: accountHeaders });
+  assert.equal(inbox.body.pendingCount, 1);
+  assert.equal(inbox.body.approvals[0].group.name, "Approval queue");
+  assert.equal(inbox.body.approvals[0].aiMember.provider, "claude");
+
+  const resolved = await json(base, "/api/account/approvals/resolve", {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ approvalIds: [requested.body.approval.id], action: "approve" })
+  });
+  assert.equal(resolved.response.status, 200);
+  assert.equal(resolved.body.results[0].status, "approved");
+  assert.equal(resolved.body.approvals[0].status, "approved");
+
+  const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
+    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+  });
+  const redelivery = routed.body.messages.find((message) => message.approval?.id === requested.body.approval.id);
+  assert.ok(redelivery);
+  assert.equal(redelivery.executionScope, "trusted");
+  assert.equal(redelivery.mentions[0].id, attached.body.member.id);
+});
+
 test("one-click browser transfer imports sessions into the current account", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

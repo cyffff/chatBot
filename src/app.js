@@ -34,6 +34,14 @@ const presenceSchema = z.object({
   recoverInterrupted: z.boolean().optional().default(false)
 });
 const trustedExecutionSchema = z.object({ enabled: z.boolean() });
+const approvalRequestSchema = z.object({
+  sourceMessageId: z.string().uuid(),
+  summary: z.string().trim().min(1).max(500)
+});
+const approvalBatchSchema = z.object({
+  approvalIds: z.array(z.string().uuid()).min(1).max(100),
+  action: z.enum(["approve", "reject"])
+});
 const messageUpdateSchema = z.object({
   text: z.string().trim().min(1).max(20_000),
   status: z.enum(["processing", "complete", "failed"]),
@@ -216,6 +224,24 @@ export async function createApp(options = {}) {
     return tasks;
   }
 
+  async function accountApprovals(account) {
+    const approvals = [];
+    for (const membership of account.memberships ?? []) {
+      const [group, member, groupApprovals] = await Promise.all([
+        store.getGroup(membership.groupId),
+        store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
+        store.listApprovals(membership.groupId).catch(() => [])
+      ]);
+      if (!group || !member || member.id !== membership.memberId) continue;
+      for (const approval of groupApprovals) {
+        if (approval.ownerMemberId !== membership.memberId) continue;
+        approvals.push({ ...approval, group: { id: group.id, name: group.name } });
+      }
+    }
+    approvals.sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    return approvals;
+  }
+
   function activeBrowserTransfer(token) {
     const transfer = browserTransfers.get(token);
     if (!transfer) return null;
@@ -266,9 +292,10 @@ export async function createApp(options = {}) {
         && sender.trustedOwnerMemberId === member.trustedOwnerMemberId
         && sender.desktopOwnerAccountId === member.desktopOwnerAccountId
       );
+      const approvedOnce = message.approval?.targetMemberId === member.id;
       return {
         ...message,
-        executionScope: directlyTrusted || delegatedBySiblingAI ? "trusted" : "restricted"
+        executionScope: directlyTrusted || delegatedBySiblingAI || approvedOnce ? "trusted" : "restricted"
       };
     });
   }
@@ -391,6 +418,77 @@ export async function createApp(options = {}) {
       const summary = { assigned: 0, in_progress: 0, completed: 0, failed: 0 };
       for (const task of tasks) summary[task.status] = (summary[task.status] ?? 0) + 1;
       res.json({ tasks, summary });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/account/approvals", requireAccount, async (req, res, next) => {
+    try {
+      const approvals = await accountApprovals(req.account);
+      res.json({
+        approvals,
+        pendingCount: approvals.filter((approval) => approval.status === "pending").length
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/account/approvals/resolve", requireAccount, async (req, res, next) => {
+    try {
+      const { approvalIds, action } = approvalBatchSchema.parse(req.body);
+      const requested = new Set(approvalIds);
+      const results = [];
+      for (const membership of req.account.memberships ?? []) {
+        if (!requested.size) break;
+        const [group, owner, approvals, members] = await Promise.all([
+          store.getGroup(membership.groupId),
+          store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
+          store.listApprovals(membership.groupId).catch(() => []),
+          store.listMembers(membership.groupId).catch(() => [])
+        ]);
+        if (!group || !owner || owner.id !== membership.memberId) continue;
+        for (const approval of approvals) {
+          if (!requested.has(approval.id) || approval.ownerMemberId !== owner.id) continue;
+          requested.delete(approval.id);
+          if (approval.status !== "pending") {
+            results.push({ id: approval.id, status: approval.status, unchanged: true });
+            continue;
+          }
+          const resolution = await store.resolveApproval(
+            group.id,
+            approval.id,
+            owner.id,
+            action === "approve" ? "approved" : "rejected"
+          );
+          if (!resolution?.approval) continue;
+          if (action === "approve") {
+            const target = members.find((member) => member.id === approval.aiMember.id && member.type === "ai");
+            if (target) {
+              const redelivery = await store.appendMessage(group.id, owner, {
+                text: `【已批准执行】${approval.source.text || approval.summary}`,
+                attachments: approval.source.attachments ?? [],
+                mentions: [{
+                  id: target.id,
+                  name: target.name,
+                  provider: target.provider,
+                  ownerName: target.ownerName ?? null
+                }],
+                replyTo: approval.sourceMessageId,
+                approval: { id: approval.id, targetMemberId: target.id }
+              });
+              publish(group.id, "message", redelivery);
+            }
+          }
+          publish(group.id, "approval_updated", resolution.approval);
+          results.push({ id: approval.id, status: resolution.approval.status });
+        }
+      }
+      if (requested.size) {
+        return res.status(404).json({ error: "one or more approval requests were not found" });
+      }
+      res.json({ results, approvals: await accountApprovals(req.account) });
     } catch (error) {
       next(error);
     }
@@ -753,6 +851,28 @@ export async function createApp(options = {}) {
         presence
       });
       res.json({ presence });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/groups/:groupId/approvals", requireMember, async (req, res, next) => {
+    try {
+      if (req.member.type !== "ai" || !req.member.desktopOwnerMemberId) {
+        return res.status(403).json({ error: "only a desktop AI can request approval" });
+      }
+      const input = approvalRequestSchema.parse(req.body);
+      const messages = await store.readMessages(req.params.groupId, { limit: 500 });
+      const sourceMessage = messages.find((message) => message.id === input.sourceMessageId);
+      if (!sourceMessage) return res.status(404).json({ error: "source message not found" });
+      const result = await store.createApproval(req.params.groupId, {
+        aiMember: req.member,
+        ownerMemberId: req.member.desktopOwnerMemberId,
+        sourceMessage,
+        summary: input.summary
+      });
+      publish(req.params.groupId, "approval_requested", result.approval);
+      res.status(result.created ? 201 : 200).json(result);
     } catch (error) {
       next(error);
     }

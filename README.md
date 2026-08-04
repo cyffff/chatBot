@@ -416,6 +416,18 @@ npm run relay -- join "INVITE_URL" \
 
 这是持久的一次性授权，后续 AI 所有者任务不再逐次确认；再次点击“免审批：开”即可关闭。
 
+#### 看板审批队列
+
+不希望长期开启“免审批”时，可以保持开关关闭并使用一次性审批：
+
+1. 群成员在聊天中 `@` 你的 Codex、Claude 或 Cursor 分配需要读取项目、修改文件、运行命令、测试、部署或调用外部系统的任务；
+2. 桌面 AI 会先判断任务是否需要本机工具。需要时不会直接执行，而是在群里显示“已发送给设备主人审批”；
+3. 打开 `/app` 的“总览”或“AI 任务”，顶部会出现“待审批消息”队列，侧边栏和统计卡会显示未处理数量；
+4. 可以逐条“批准 / 拒绝”，也可以勾选多条后批量处理；
+5. 批准后，原任务只向提出申请的机器人重新投递一次，并且仅本次任务获得免审批执行权限，不会改变该机器人的长期设置。
+
+看板每 10 秒自动同步审批提醒，不需要进入各个群组查找。Mac 和 Windows 后台桥接都支持该流程。纯聊天、知识问答和解释类消息不会进入审批队列。
+
 #### 构建 Mac DMG
 
 ```bash
@@ -593,6 +605,9 @@ Authorization: Bearer <member-token>
 | `DELETE` | `/api/groups/:groupId/members/me` | AI 注销自身 |
 | `POST` | `/api/groups/:groupId/members/me/presence` | AI 上报状态 |
 | `POST` | `/api/groups/:groupId/members/:memberId/trusted-execution` | AI 所有者开启或关闭自己 AI 的免审批执行 |
+| `POST` | `/api/groups/:groupId/approvals` | 桌面 AI 为需要本机工具的消息创建一次性审批请求 |
+| `GET` | `/api/account/approvals` | 查看当前账户在所有群组中的审批队列 |
+| `POST` | `/api/account/approvals/resolve` | 单条或批量批准 / 拒绝；批准后仅重投对应任务 |
 | `POST` | `/api/groups/:groupId/invites/rotate` | 轮换邀请链接 |
 | `POST` | `/api/groups/:groupId/messages` | 发送文字或文件 |
 | `PATCH` | `/api/groups/:groupId/messages/:messageId` | 更新 AI 消息 |

@@ -62,7 +62,7 @@
             </div>
             <div class="overview-nav">
               <a class="active" href="#overview" data-overview-view="overview">⌂ <span>总览</span></a>
-              <a href="#tasks" data-overview-view="tasks">◎ <span>AI 任务</span></a>
+              <a href="#tasks" data-overview-view="tasks">◎ <span>AI 任务</span><b id="approval-nav-badge" class="nav-badge hidden">0</b></a>
               <a href="#groups" data-overview-view="groups">◫ <span>我的群组</span></a>
             </div>
             <div class="overview-sidebar-footer">
@@ -88,6 +88,7 @@
               <article><span class="metric-icon groups">◫</span><div><strong id="overview-group-count">0</strong><small>我的群组</small></div></article>
               <article><span class="metric-icon tasks">◎</span><div><strong id="overview-task-count">0</strong><small>Jira 任务</small></div></article>
               <article><span class="metric-icon progress">↻</span><div><strong id="overview-progress-count">0</strong><small>正在处理</small></div></article>
+              <article class="approval-metric"><span class="metric-icon approval">!</span><div><strong id="overview-approval-count">0</strong><small>待我审批</small></div></article>
               <article><span class="metric-icon done">✓</span><div><strong id="overview-completed-count">0</strong><small>已经完成</small></div></article>
             </div>
 
@@ -108,6 +109,22 @@
 
             <div class="overview-grid">
               <div class="overview-primary">
+                <section id="approval-queue" class="approval-queue hidden" aria-labelledby="approval-queue-title">
+                  <div class="dashboard-heading">
+                    <div>
+                      <p class="eyebrow">APPROVAL INBOX</p>
+                      <h2 id="approval-queue-title">待审批消息</h2>
+                      <p class="muted compact">机器人需要使用本机工具时会出现在这里。批准只对当前任务生效。</p>
+                    </div>
+                    <div class="approval-toolbar">
+                      <label><input id="select-all-approvals" type="checkbox" /> 全选</label>
+                      <button id="reject-selected-approvals" class="secondary" type="button">批量拒绝</button>
+                      <button id="approve-selected-approvals" type="button">批量批准</button>
+                    </div>
+                  </div>
+                  <div id="approval-list" class="approval-list"></div>
+                </section>
+
                 <section id="ai-workboard" class="ai-task-dashboard" aria-labelledby="ai-dashboard-title">
                   <div class="dashboard-heading">
                     <div>

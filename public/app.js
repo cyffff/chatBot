@@ -21,6 +21,8 @@ const state = {
   aiProviderStatus: [],
   tasks: [],
   taskSummary: {},
+  approvals: [],
+  approvalPendingCount: 0,
   taskFilter: "all",
   taskRefreshTimer: null,
   profileAvatarDataUrl: null,
@@ -1050,6 +1052,90 @@ function renderAITasks() {
   }
 }
 
+function approvalAIName(approval) {
+  const ai = approval.aiMember ?? {};
+  return ai.ownerName ? `${ai.ownerName}’s ${ai.name}` : ai.name || "AI";
+}
+
+function selectedApprovalIds() {
+  return [...document.querySelectorAll("[data-approval-id]:checked")].map((input) => input.dataset.approvalId);
+}
+
+function renderApprovals({ announce = false } = {}) {
+  const pending = state.approvals.filter((approval) => approval.status === "pending");
+  const previousCount = state.approvalPendingCount;
+  state.approvalPendingCount = pending.length;
+  $("#overview-approval-count").textContent = pending.length;
+  const badge = $("#approval-nav-badge");
+  badge.textContent = pending.length;
+  badge.classList.toggle("hidden", pending.length === 0);
+  $("#approval-queue").classList.toggle("hidden", pending.length === 0);
+  document.title = pending.length ? `(${pending.length}) 待审批 · Group Relay` : "Group Relay";
+  if (announce && pending.length > previousCount) toast(`有 ${pending.length - previousCount} 条新的 AI 审批请求`);
+  const list = $("#approval-list");
+  list.innerHTML = "";
+  for (const approval of pending) {
+    const card = document.createElement("article");
+    card.className = "approval-card";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.dataset.approvalId = approval.id;
+    checkbox.setAttribute("aria-label", `选择 ${approval.summary}`);
+    const body = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = `${approvalAIName(approval)} 请求执行`;
+    const meta = document.createElement("p");
+    meta.textContent = `${approval.group.name} · ${new Date(approval.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+    const summary = document.createElement("p");
+    summary.className = "approval-source";
+    summary.textContent = approval.summary;
+    body.append(title, meta, summary);
+    const actions = document.createElement("div");
+    actions.className = "approval-card-actions";
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "secondary";
+    reject.textContent = "拒绝";
+    reject.addEventListener("click", () => resolveApprovals([approval.id], "reject"));
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.textContent = "批准";
+    approve.addEventListener("click", () => resolveApprovals([approval.id], "approve"));
+    actions.append(reject, approve);
+    card.append(checkbox, body, actions);
+    list.append(card);
+  }
+  $("#select-all-approvals").checked = pending.length > 0 && selectedApprovalIds().length === pending.length;
+}
+
+async function loadApprovals({ announce = false } = {}) {
+  const result = await accountApi("/api/account/approvals");
+  state.approvals = result.approvals;
+  renderApprovals({ announce });
+}
+
+async function resolveApprovals(approvalIds, action) {
+  if (!approvalIds.length) {
+    toast("请先选择要处理的审批");
+    return;
+  }
+  const controls = document.querySelectorAll("#approval-queue button, #approval-queue input");
+  controls.forEach((control) => { control.disabled = true; });
+  try {
+    const result = await accountApi("/api/account/approvals/resolve", {
+      method: "POST",
+      body: JSON.stringify({ approvalIds, action })
+    });
+    state.approvals = result.approvals;
+    renderApprovals();
+    toast(action === "approve" ? `已批准 ${approvalIds.length} 条任务` : `已拒绝 ${approvalIds.length} 条任务`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    controls.forEach((control) => { control.disabled = false; });
+  }
+}
+
 async function loadAccountTasks() {
   const result = await accountApi("/api/account/tasks");
   state.tasks = result.tasks;
@@ -1059,7 +1145,10 @@ async function loadAccountTasks() {
 
 function startTaskRefresh() {
   if (state.taskRefreshTimer) return;
-  state.taskRefreshTimer = setInterval(() => loadAccountTasks().catch(() => {}), 10_000);
+  state.taskRefreshTimer = setInterval(() => {
+    loadAccountTasks().catch(() => {});
+    loadApprovals({ announce: true }).catch(() => {});
+  }, 10_000);
 }
 
 function overviewViewFromHash() {
@@ -1253,15 +1342,17 @@ function showAccountDashboardShell(view = overviewViewFromHash()) {
 }
 
 async function loadAccountDashboard() {
-  const [{ account }, { sessions }, taskData] = await Promise.all([
+  const [{ account }, { sessions }, taskData, approvalData] = await Promise.all([
     accountApi("/api/account"),
     accountApi("/api/account/sessions"),
-    accountApi("/api/account/tasks")
+    accountApi("/api/account/tasks"),
+    accountApi("/api/account/approvals")
   ]);
   state.account = account;
   state.accountSessions = sessions;
   state.tasks = taskData.tasks;
   state.taskSummary = taskData.summary;
+  state.approvals = approvalData.approvals;
   $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
   renderOverviewHeader(account);
   renderOverviewCalendar();
@@ -1270,6 +1361,7 @@ async function loadAccountDashboard() {
   }
   renderAccountSessions(sessions);
   renderAITasks();
+  renderApprovals();
   startTaskRefresh();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
@@ -1626,13 +1718,27 @@ window.addEventListener("hashchange", () => {
 $("#refresh-ai-tasks").addEventListener("click", async (event) => {
   event.currentTarget.disabled = true;
   try {
-    await loadAccountTasks();
+    await Promise.all([loadAccountTasks(), loadApprovals()]);
     toast("AI 看板已更新");
   } catch (error) {
     toast(error.message);
   } finally {
     event.currentTarget.disabled = false;
   }
+});
+
+$("#select-all-approvals").addEventListener("change", (event) => {
+  document.querySelectorAll("[data-approval-id]").forEach((input) => {
+    input.checked = event.currentTarget.checked;
+  });
+});
+
+$("#approve-selected-approvals").addEventListener("click", () => {
+  void resolveApprovals(selectedApprovalIds(), "approve");
+});
+
+$("#reject-selected-approvals").addEventListener("click", () => {
+  void resolveApprovals(selectedApprovalIds(), "reject");
 });
 
 function showAccountCreatePanel() {

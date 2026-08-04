@@ -47,6 +47,7 @@ export class FileStore {
     this.writeQueues = new Map();
     this.memberQueues = new Map();
     this.taskQueues = new Map();
+    this.approvalQueues = new Map();
     this.accountQueue = Promise.resolve();
   }
 
@@ -85,6 +86,7 @@ export class FileStore {
     await writeJsonAtomic(path.join(dir, "group.json"), group);
     await writeJsonAtomic(path.join(dir, "members.json"), [owner]);
     await writeJsonAtomic(path.join(dir, "tasks.json"), []);
+    await writeJsonAtomic(path.join(dir, "approvals.json"), []);
     const invites = await readJson(this.invitesFile);
     invites[inviteToken] = groupId;
     await writeJsonAtomic(this.invitesFile, invites);
@@ -236,6 +238,73 @@ export class FileStore {
     });
     this.taskQueues.set(groupId, next.catch(() => {}));
     return next;
+  }
+
+  async listApprovals(groupId) {
+    const file = path.join(this.groupDir(groupId), "approvals.json");
+    if (!(await exists(file))) return [];
+    return readJson(file);
+  }
+
+  async updateApprovals(groupId, update) {
+    const previous = this.approvalQueues.get(groupId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const approvals = await this.listApprovals(groupId);
+      const result = await update(approvals);
+      await writeJsonAtomic(path.join(this.groupDir(groupId), "approvals.json"), approvals);
+      return result;
+    });
+    this.approvalQueues.set(groupId, next.catch(() => {}));
+    return next;
+  }
+
+  async createApproval(groupId, { aiMember, ownerMemberId, sourceMessage, summary }) {
+    return this.updateApprovals(groupId, (approvals) => {
+      const existing = approvals.find((approval) => (
+        approval.status === "pending"
+        && approval.aiMember.id === aiMember.id
+        && approval.sourceMessageId === sourceMessage.id
+      ));
+      if (existing) return { approval: existing, created: false };
+      const createdAt = new Date().toISOString();
+      const approval = {
+        id: id(),
+        groupId,
+        ownerMemberId,
+        sourceMessageId: sourceMessage.id,
+        source: {
+          text: sourceMessage.text,
+          sender: sourceMessage.sender,
+          attachments: sourceMessage.attachments ?? []
+        },
+        aiMember: {
+          id: aiMember.id,
+          name: aiMember.name,
+          provider: aiMember.provider,
+          ownerName: aiMember.ownerName ?? null
+        },
+        summary,
+        status: "pending",
+        createdAt,
+        updatedAt: createdAt,
+        resolvedAt: null
+      };
+      approvals.push(approval);
+      return { approval, created: true };
+    });
+  }
+
+  async resolveApproval(groupId, approvalId, ownerMemberId, status) {
+    return this.updateApprovals(groupId, (approvals) => {
+      const approval = approvals.find((candidate) => candidate.id === approvalId);
+      if (!approval) return null;
+      if (approval.ownerMemberId !== ownerMemberId) return { forbidden: true };
+      if (approval.status !== "pending") return { approval, unchanged: true };
+      approval.status = status;
+      approval.updatedAt = new Date().toISOString();
+      approval.resolvedAt = approval.updatedAt;
+      return { approval };
+    });
   }
 
   async createAssignmentTasks(groupId, message, assignees, jiraReferences) {
@@ -460,7 +529,9 @@ export class FileStore {
     );
   }
 
-  async appendMessage(groupId, member, { text, attachments, replyTo, mentions = [], status = "complete" }) {
+  async appendMessage(groupId, member, {
+    text, attachments, replyTo, mentions = [], status = "complete", approval = null
+  }) {
     const createdAt = new Date().toISOString();
     const message = {
       id: id(),
@@ -477,6 +548,7 @@ export class FileStore {
       mentions,
       replyTo: replyTo || null,
       status,
+      approval,
       createdAt
     };
     const file = path.join(this.groupDir(groupId), "messages", `${dayOf(createdAt)}.jsonl`);
