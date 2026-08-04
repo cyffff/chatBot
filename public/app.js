@@ -850,10 +850,6 @@ function renderAccountSessions(sessions) {
         : `把本机已登录的 ${labels[provider]} 加入这个群组`;
       toggle.addEventListener("click", async () => {
         const nativeBridge = window.webkit?.messageHandlers?.relayNative ?? window.chrome?.webview;
-        if (!nativeBridge) {
-          toast("请在 Group Relay 桌面客户端中管理本机 AI");
-          return;
-        }
         toggle.disabled = true;
         try {
           if (attached) {
@@ -861,15 +857,17 @@ function renderAccountSessions(sessions) {
               `/api/account/sessions/${session.group.id}/ais/${provider}`,
               { method: "DELETE" }
             );
-            nativeBridge.postMessage({ action: "removeAIWorker", workerId: result.workerId });
+            nativeBridge?.postMessage({ action: "removeAIWorker", workerId: result.workerId });
             toast(`${labels[provider]} 已离开 ${session.group.name}`);
           } else {
             const result = await accountApi(`/api/account/sessions/${session.group.id}/ais`, {
               method: "POST",
               body: JSON.stringify({ provider })
             });
-            nativeBridge.postMessage({ action: "configureAIWorker", worker: result.worker });
-            toast(`${labels[provider]} 已加入 ${session.group.name}`);
+            nativeBridge?.postMessage({ action: "configureAIWorker", worker: result.worker });
+            toast(nativeBridge
+              ? `${labels[provider]} 已加入 ${session.group.name}`
+              : `${labels[provider]} 已加入，等待桌面客户端自动连接`);
           }
           await loadAccountDashboard();
         } catch (error) {
@@ -1162,18 +1160,21 @@ function renderChatAIControls(session, providers) {
   const panel = $("#chat-ai-panel");
   const actions = $("#chat-ai-actions");
   const attachedProviders = new Set((session.desktopAis ?? []).map((member) => member.provider));
-  const usableProviders = providers.filter((provider) => provider.cliAvailable === true);
+  const native = Boolean(desktopNativeBridge());
+  const usableProviders = providers.filter((provider) => provider.cliAvailable === true || provider.remoteAvailable === true);
   panel.classList.remove("hidden");
   actions.innerHTML = "";
   $("#chat-ai-help").textContent = usableProviders.length
-    ? "选择已经在本机接入的 AI 加入当前群组。群成员随后可以直接 @ 它。"
+    ? native
+      ? "选择已经在本机接入的 AI 加入当前群组。群成员随后可以直接 @ 它。"
+      : "可把你的 AI 加入这个群组；已登录的桌面客户端会自动启动后台连接。"
     : "当前没有可运行的本机 AI。请先在“接入设置”中配置并安装对应 CLI。";
 
   for (const provider of ["codex", "claude", "cursor"]) {
     const label = aiProviderLabels[provider];
     const status = providers.find((item) => item.provider === provider) ?? {};
     const attached = attachedProviders.has(provider);
-    const usable = status.cliAvailable === true;
+    const usable = status.cliAvailable === true || status.remoteAvailable === true;
     const button = document.createElement("button");
     button.type = "button";
     button.className = `secondary ${attached ? "attached" : ""}`;
@@ -1186,18 +1187,17 @@ function renderChatAIControls(session, providers) {
       button.disabled = true;
       try {
         const bridge = desktopNativeBridge();
-        if (!bridge) throw new Error("请在 Group Relay 桌面客户端中管理本机 AI");
         if (attached) {
           const result = await accountApi(`/api/account/sessions/${state.groupId}/ais/${provider}`, { method: "DELETE" });
-          bridge.postMessage({ action: "removeAIWorker", workerId: result.workerId });
+          bridge?.postMessage({ action: "removeAIWorker", workerId: result.workerId });
           toast(`${label} 已离开当前群组`);
         } else {
           const result = await accountApi(`/api/account/sessions/${state.groupId}/ais`, {
             method: "POST",
             body: JSON.stringify({ provider })
           });
-          bridge.postMessage({ action: "configureAIWorker", worker: result.worker });
-          toast(`${label} 已加入当前群组`);
+          bridge?.postMessage({ action: "configureAIWorker", worker: result.worker });
+          toast(bridge ? `${label} 已加入当前群组` : `${label} 已加入，等待桌面客户端自动连接`);
         }
         await Promise.all([refreshMembers(), refreshChatAIControls()]);
       } catch (error) {
@@ -1211,7 +1211,7 @@ function renderChatAIControls(session, providers) {
 
 async function refreshChatAIControls() {
   const requestedGroupId = state.groupId;
-  if (!requestedGroupId || !desktopNativeBridge()) {
+  if (!requestedGroupId) {
     $("#chat-ai-panel").classList.add("hidden");
     return;
   }
@@ -1220,9 +1220,12 @@ async function refreshChatAIControls() {
   $("#chat-ai-actions").innerHTML = "";
   try {
     await ensureAccountForCurrentSession();
+    const native = Boolean(desktopNativeBridge());
     const [{ sessions }, settings] = await Promise.all([
       accountApi("/api/account/sessions"),
-      requestNative("getAISettings")
+      native
+        ? requestNative("getAISettings")
+        : Promise.resolve({ providers: Object.keys(aiProviderLabels).map((provider) => ({ provider, remoteAvailable: true })) })
     ]);
     if (state.groupId !== requestedGroupId) return;
     state.accountSessions = sessions;

@@ -39,6 +39,9 @@ internal sealed class WindowsAiBridgeManager : IDisposable
     );
     private readonly Dictionary<string, (CancellationTokenSource Cancellation, Task Task)> workers = [];
     private readonly object workersLock = new();
+    private System.Threading.Timer? remoteSyncTimer;
+    private Func<string>? serverUrlProvider;
+    private int remoteSyncInFlight;
 
     public int RunningCount
     {
@@ -59,8 +62,9 @@ internal sealed class WindowsAiBridgeManager : IDisposable
         });
     }
 
-    public void Start()
+    public void Start(Func<string> currentServerUrl)
     {
+        serverUrlProvider = currentServerUrl;
         Directory.CreateDirectory(sessionsDirectory);
         RegisterStartup();
         foreach (var file in Directory.EnumerateFiles(sessionsDirectory, "desktop-*.json"))
@@ -75,6 +79,83 @@ internal sealed class WindowsAiBridgeManager : IDisposable
                 // A malformed local session must not prevent the app from starting.
             }
         }
+        remoteSyncTimer = new System.Threading.Timer(
+            async _ => await SynchronizeRemoteWorkers(),
+            null,
+            TimeSpan.Zero,
+            TimeSpan.FromSeconds(10)
+        );
+    }
+
+    private async Task SynchronizeRemoteWorkers()
+    {
+        if (Interlocked.Exchange(ref remoteSyncInFlight, 1) != 0) return;
+        try
+        {
+            var credential = WindowsAccountCredentials.Read();
+            var rawServerUrl = serverUrlProvider?.Invoke();
+            if (credential is null || string.IsNullOrWhiteSpace(rawServerUrl)) return;
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"{rawServerUrl.TrimEnd('/')}/api/account/desktop-workers"
+            );
+            request.Headers.Add("X-Account-Token", credential.Value.AccountToken);
+            using var response = await client.SendAsync(request);
+            if (!response.IsSuccessStatusCode) return;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var desired = document.RootElement.GetProperty("workers")
+                .EnumerateArray()
+                .Select(worker => worker.Clone())
+                .ToList();
+            var desiredIds = desired
+                .Select(worker => worker.GetProperty("workerId").GetString())
+                .Where(workerId => !string.IsNullOrWhiteSpace(workerId))
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (var worker in desired)
+            {
+                if (!IsAlreadyConfigured(worker)) Configure(worker);
+            }
+
+            var serverHost = new Uri(rawServerUrl).Host;
+            foreach (var file in Directory.EnumerateFiles(sessionsDirectory, "desktop-*.json"))
+            {
+                DesktopAiWorkerConfig? config;
+                try { config = JsonSerializer.Deserialize<DesktopAiWorkerConfig>(File.ReadAllText(file), JsonOptions); }
+                catch { continue; }
+                if (config is null || desiredIds.Contains(config.WorkerId)) continue;
+                if (!Uri.TryCreate(config.BaseUrl, UriKind.Absolute, out var baseUrl)
+                    || !string.Equals(baseUrl.Host, serverHost, StringComparison.OrdinalIgnoreCase)) continue;
+                Remove(config.WorkerId);
+            }
+        }
+        catch
+        {
+            // The desktop bridge keeps its last known workers while the relay is unreachable.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref remoteSyncInFlight, 0);
+        }
+    }
+
+    private bool IsAlreadyConfigured(JsonElement worker)
+    {
+        var workerId = worker.GetProperty("workerId").GetString();
+        if (string.IsNullOrWhiteSpace(workerId)) return false;
+        var file = ConfigFile(workerId);
+        if (!File.Exists(file)) return false;
+        try
+        {
+            var existing = JsonSerializer.Deserialize<DesktopAiWorkerConfig>(File.ReadAllText(file), JsonOptions);
+            return existing is not null
+                && existing.GroupId == worker.GetProperty("groupId").GetString()
+                && existing.MemberId == worker.GetProperty("memberId").GetString()
+                && existing.MemberToken == worker.GetProperty("memberToken").GetString()
+                && existing.Provider == worker.GetProperty("provider").GetString()
+                && existing.BaseUrl.TrimEnd('/') == (worker.GetProperty("baseUrl").GetString() ?? "").TrimEnd('/');
+        }
+        catch { return false; }
     }
 
     public void Configure(JsonElement worker)
@@ -189,6 +270,8 @@ internal sealed class WindowsAiBridgeManager : IDisposable
 
     public void Dispose()
     {
+        remoteSyncTimer?.Dispose();
+        remoteSyncTimer = null;
         lock (workersLock)
         {
             foreach (var running in workers.Values) running.Cancellation.Cancel();

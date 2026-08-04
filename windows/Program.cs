@@ -54,7 +54,7 @@ internal sealed class RelayForm : Form
             Hide();
             trayIcon.ShowBalloonTip(1500, "Group Relay", "窗口已隐藏，桌面 AI 仍在后台运行。", ToolTipIcon.Info);
         };
-        aiBridge.Start();
+        aiBridge.Start(() => serverUrl);
     }
 
     private MenuStrip BuildMenu()

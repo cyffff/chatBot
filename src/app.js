@@ -349,6 +349,39 @@ export async function createApp(options = {}) {
     }
   });
 
+  app.get("/api/account/desktop-workers", requireAccount, async (req, res, next) => {
+    try {
+      const workers = [];
+      for (const membership of req.account.memberships ?? []) {
+        const [group, owner, members, history] = await Promise.all([
+          store.getGroup(membership.groupId),
+          store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
+          store.listMembers(membership.groupId).catch(() => []),
+          store.readMessages(membership.groupId, { limit: 1 }).catch(() => [])
+        ]);
+        if (!group || !owner || owner.id !== membership.memberId || owner.type !== "human") continue;
+        for (const member of members) {
+          if (member.type !== "ai" || member.desktopOwnerAccountId !== req.account.id) continue;
+          workers.push({
+            workerId: `desktop-${member.provider}-${group.id}`,
+            baseUrl: publicBaseUrl(req),
+            groupId: group.id,
+            memberId: member.id,
+            memberToken: member.token,
+            memberName: member.name,
+            provider: member.provider,
+            ownerName: owner.name,
+            sessionId: `desktop-${member.provider}-${group.id}`,
+            cursor: history.at(-1)?.id ?? null
+          });
+        }
+      }
+      res.json({ workers });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/account/tasks", requireAccount, async (req, res, next) => {
     try {
       const tasks = await accountTasks(req.account);

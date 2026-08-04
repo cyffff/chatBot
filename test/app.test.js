@@ -265,6 +265,43 @@ test("desktop account AI can join a linked group, answer every member and leave"
   assert.equal(group.body.members.some((member) => member.type === "ai"), false);
 });
 
+test("a guest account can attach its desktop AI to somebody else's group", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Somebody else's group", ownerName: "Owner" })
+  });
+  const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Yunfei", type: "human" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei-guest@example.test" })
+  });
+  const headers = { "X-Account-Token": account.body.accountToken };
+  await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ sessions: [{ groupId: created.body.group.id, memberToken: guest.body.member.token }] })
+  });
+
+  const attached = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ provider: "codex" })
+  });
+  assert.equal(attached.response.status, 201);
+  assert.equal(attached.body.member.ownerName, "Yunfei");
+
+  const desired = await json(base, "/api/account/desktop-workers", { headers });
+  assert.equal(desired.response.status, 200);
+  assert.equal(desired.body.workers.length, 1);
+  assert.equal(desired.body.workers[0].groupId, created.body.group.id);
+  assert.equal(desired.body.workers[0].provider, "codex");
+  assert.ok(desired.body.workers[0].memberToken);
+});
+
 test("trusted desktop AIs from the same owner can delegate work to each other", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

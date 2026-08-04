@@ -8,9 +8,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>GroupRelay</AssemblyName>
     <RootNamespace>GroupRelay.Windows</RootNamespace>
-    <Version>1.2.5</Version>
-    <AssemblyVersion>1.2.5.0</AssemblyVersion>
-    <FileVersion>1.2.5.0</FileVersion>
+    <Version>1.2.6</Version>
+    <AssemblyVersion>1.2.6.0</AssemblyVersion>
+    <FileVersion>1.2.6.0</FileVersion>
     <Product>Group Relay</Product>
     <Company>Group Relay</Company>
     <Description>Group Relay desktop client for Windows</Description>

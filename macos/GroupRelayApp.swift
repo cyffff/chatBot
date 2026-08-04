@@ -604,6 +604,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
 final class LocalAIBridgeManager {
     private var processes: [String: Process] = [:]
     private var timer: Timer?
+    private var remoteSyncInFlight = false
     private(set) var statusText = "后台 AI：0 个运行中"
     var onStatusChanged: ((String) -> Void)?
 
@@ -615,8 +616,10 @@ final class LocalAIBridgeManager {
             name: .groupRelayWorkersChanged,
             object: nil
         )
+        synchronizeRemoteWorkers()
         synchronizeWorkers()
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            self?.synchronizeRemoteWorkers()
             self?.synchronizeWorkers()
         }
     }
@@ -653,6 +656,138 @@ final class LocalAIBridgeManager {
         }
         stopRemovedWorkers(active: active)
         updateStatus()
+    }
+
+    private func synchronizeRemoteWorkers() {
+        guard !remoteSyncInFlight else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let credentialURL = home.appendingPathComponent(".group-relay/account-credential.json")
+        guard
+            let credentialData = try? Data(contentsOf: credentialURL),
+            let credential = try? JSONSerialization.jsonObject(with: credentialData) as? [String: Any],
+            let accountToken = credential["accountToken"] as? String,
+            !accountToken.isEmpty
+        else { return }
+        let configured = UserDefaults.standard.string(forKey: serverPreferenceKey)
+        let bundled = Bundle.main.object(forInfoDictionaryKey: "DefaultRelayURL") as? String
+        guard
+            let serverURL = URL(string: (configured ?? bundled ?? "http://127.0.0.1:8787").trimmingCharacters(in: .whitespacesAndNewlines)),
+            let endpoint = URL(string: "/api/account/desktop-workers", relativeTo: serverURL)?.absoluteURL
+        else { return }
+        var request = URLRequest(url: endpoint)
+        request.setValue(accountToken, forHTTPHeaderField: "X-Account-Token")
+        remoteSyncInFlight = true
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.remoteSyncInFlight = false
+                guard
+                    let http = response as? HTTPURLResponse,
+                    (200..<300).contains(http.statusCode),
+                    let data,
+                    let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let workers = payload["workers"] as? [[String: Any]]
+                else { return }
+                do {
+                    try self.applyRemoteWorkers(workers, serverURL: serverURL)
+                    self.synchronizeWorkers()
+                } catch {
+                    self.statusText = "后台 AI 同步失败：\(error.localizedDescription)"
+                    self.onStatusChanged?(self.statusText)
+                }
+            }
+        }.resume()
+    }
+
+    private func applyRemoteWorkers(_ desiredWorkers: [[String: Any]], serverURL: URL) throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let registryURL = home.appendingPathComponent(".group-relay/local-workers.json")
+        var registry: [String: Any] = [:]
+        if
+            let data = try? Data(contentsOf: registryURL),
+            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        { registry = value }
+        var workers = registry["workers"] as? [String: Any] ?? [:]
+        let desiredIds = Set(desiredWorkers.compactMap { $0["workerId"] as? String })
+
+        for incoming in desiredWorkers {
+            guard
+                let workerId = incoming["workerId"] as? String,
+                workerId.range(of: #"^[a-z0-9-]{1,160}$"#, options: .regularExpression) != nil,
+                let provider = incoming["provider"] as? String,
+                ["codex", "claude", "cursor"].contains(provider),
+                let rawBaseURL = incoming["baseUrl"] as? String,
+                URL(string: rawBaseURL)?.host == serverURL.host,
+                let groupId = incoming["groupId"] as? String,
+                UUID(uuidString: groupId) != nil,
+                incoming["memberToken"] as? String != nil
+            else { continue }
+            if
+                let entry = workers[workerId] as? [String: Any],
+                let existingFile = entry["configFile"] as? String,
+                let existingData = try? Data(contentsOf: URL(fileURLWithPath: existingFile)),
+                let existing = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any],
+                existing["groupId"] as? String == groupId,
+                existing["memberId"] as? String == incoming["memberId"] as? String,
+                existing["memberToken"] as? String == incoming["memberToken"] as? String,
+                existing["provider"] as? String == provider,
+                (existing["baseUrl"] as? String)?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    == rawBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            { continue }
+            var config = incoming
+            for value in workers.values {
+                guard
+                    let entry = value as? [String: Any],
+                    entry["provider"] as? String == provider,
+                    let configFile = entry["configFile"] as? String,
+                    let data = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
+                    let template = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+                for key in ["model", "agentBin", "workspacePath"] where config[key] == nil {
+                    config[key] = template[key]
+                }
+                break
+            }
+            if config["workspacePath"] == nil { config["workspacePath"] = home.path }
+            let configURL = home
+                .appendingPathComponent(".group-relay/desktop-sessions")
+                .appendingPathComponent("\(workerId).json")
+            try writeJSON(config, to: configURL)
+            workers[workerId] = [
+                "configFile": configURL.path,
+                "groupId": groupId,
+                "provider": provider,
+                "enabled": true,
+                "updatedAt": ISO8601DateFormatter().string(from: Date())
+            ]
+        }
+
+        var removedWorkers: [(String, String)] = []
+        for (workerId, value) in workers where workerId.hasPrefix("desktop-") && !desiredIds.contains(workerId) {
+            guard
+                let entry = value as? [String: Any],
+                let configFile = entry["configFile"] as? String,
+                let data = try? Data(contentsOf: URL(fileURLWithPath: configFile)),
+                let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let rawBaseURL = config["baseUrl"] as? String,
+                URL(string: rawBaseURL)?.host == serverURL.host
+            else { continue }
+            removedWorkers.append((workerId, configFile))
+        }
+        for (workerId, configFile) in removedWorkers {
+            workers.removeValue(forKey: workerId)
+            try? FileManager.default.removeItem(atPath: configFile)
+        }
+        registry["version"] = 1
+        registry["workers"] = workers
+        try writeJSON(registry, to: registryURL)
+    }
+
+    private func writeJSON(_ value: [String: Any], to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func launch(workerId: String, configFile: String) {

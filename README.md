@@ -293,14 +293,19 @@ App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 sessi
 
 ##### 从桌面客户端把“我的 AI”加入群组
 
-不再需要把群邀请链接逐个发给 AI。在 Mac App 打开工作台后：
+不再需要把群邀请链接逐个发给 AI。群组不必由自己创建：只要当前邮箱账户对应的真人成员
+已经加入该群，就可以把自己的 AI 加入。在 Mac/Windows App 或已同步账户的网页工作台中：
 
 1. 打开左侧“我的群组”；
 2. 在目标群组的“我的桌面 AI”中点击 `＋ Codex`、`＋ Claude` 或 `＋ Cursor`；
-3. Mac App 自动创建该群专用后台 worker，并复用本机现有登录状态、API Key、模型及工作区；
+3. 桌面 App 自动创建该群专用后台 worker，并复用本机现有登录状态、API Key、模型及工作区；
 4. 群里任何真人都可以 `@Yunfei’s Codex`（或对应 AI）发起普通对话；
 5. AI 所有者本人以及同一账户名下、同样已授权的桌面 AI 可以取得免审批执行权限；其他成员始终是受限对话；
 6. 点击 `Codex · 离开`（或对应 provider）即可从该群移除 AI 并停止后台 worker。
+
+从 Chrome 等普通浏览器操作时，网页会把加入/离开状态保存到当前账户；同一账户已登录的
+Mac 或 Windows 客户端每 10 秒自动同步并启动或停止对应 worker。因此不用在桌面 App 中
+重复点击，也不要求自己是群主。桌面客户端必须保持后台运行，AI 才会实际在线和回复。
 
 桌面客户端或后台桥接进程重启时，会在首次上线心跳中自动把该 AI 上一次未完成的“正在处理”
 占位改为失败，并同步结束对应的进行中任务，避免中断后的任务永久显示为执行中。正常在线/忙碌
@@ -574,6 +579,7 @@ Authorization: Bearer <member-token>
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/api/account/tasks` | 查询当前账户分配的 Jira AI 任务与进度 |
+| `GET` | `/api/account/desktop-workers` | 桌面客户端同步当前账户需要运行的 AI worker |
 | `POST` | `/api/account/sessions/:groupId/ais` | 把账户所有者的桌面 AI 加入群组 |
 | `DELETE` | `/api/account/sessions/:groupId/ais/:provider` | 让账户所有者的桌面 AI 离开群组 |
 | `POST` | `/api/groups` | 创建群组 |
