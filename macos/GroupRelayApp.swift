@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Security
 import ServiceManagement
 import WebKit
@@ -548,7 +549,7 @@ final class LocalAIBridgeManager {
         NotificationCenter.default.removeObserver(self, name: .groupRelayWorkersChanged, object: nil)
         timer?.invalidate()
         timer = nil
-        for process in processes.values where process.isRunning { process.terminate() }
+        for process in processes.values where process.isRunning { terminateProcessTree(process) }
         processes.removeAll()
         updateStatus()
     }
@@ -617,10 +618,38 @@ final class LocalAIBridgeManager {
     private func stopRemovedWorkers(active: Set<String>) {
         for workerId in processes.keys.filter({ !active.contains($0) }) {
             guard let process = processes[workerId] else { continue }
-            if process.isRunning { process.terminate() }
+            if process.isRunning { terminateProcessTree(process) }
             processes.removeValue(forKey: workerId)
         }
         updateStatus()
+    }
+
+    private func directChildProcessIDs(_ parent: pid_t) -> [pid_t] {
+        let query = Process()
+        query.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        query.arguments = ["-P", String(parent)]
+        let output = Pipe()
+        query.standardOutput = output
+        query.standardError = FileHandle.nullDevice
+        guard (try? query.run()) != nil else { return [] }
+        query.waitUntilExit()
+        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return text.split(whereSeparator: { $0.isWhitespace }).compactMap { pid_t($0) }
+    }
+
+    private func descendantProcessIDs(_ parent: pid_t) -> [pid_t] {
+        directChildProcessIDs(parent).flatMap { child in [child] + descendantProcessIDs(child) }
+    }
+
+    private func terminateProcessTree(_ process: Process) {
+        let root = process.processIdentifier
+        let descendants = descendantProcessIDs(root)
+        for pid in descendants.reversed() { _ = Darwin.kill(pid, SIGTERM) }
+        _ = Darwin.kill(root, SIGTERM)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+            for pid in descendants.reversed() where Darwin.kill(pid, 0) == 0 { _ = Darwin.kill(pid, SIGKILL) }
+            if Darwin.kill(root, 0) == 0 { _ = Darwin.kill(root, SIGKILL) }
+        }
     }
 
     private func updateStatus() {

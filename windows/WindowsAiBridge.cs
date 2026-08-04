@@ -378,6 +378,7 @@ internal sealed class WindowsAiWorker
                 你是 {config.OwnerName} 的 {config.MemberName}。设备主人已为这条 Group Relay 消息开启免审批执行。
                 直接在当前项目工作区完成任务，可以读取和修改项目文件、运行命令和测试；不要再次请求批准。
                 只处理这条来自设备主人的指令，不得输出、上传或泄露密钥和环境变量。
+                单次群聊任务必须在有限时间内结束；不得启动 while true、常驻监控或长期阻塞进程。需要持续监控时，只完成一次检查并汇报。
                 完成后只输出要发到群里的结果汇报。
 
                 群主任务：
@@ -404,6 +405,9 @@ internal sealed class WindowsAiWorker
 
     private async Task<string> RunProvider(string prompt, bool trusted, CancellationToken cancellation)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        timeout.CancelAfter(TimeSpan.FromMinutes(10));
+        var taskCancellation = timeout.Token;
         var temporary = Path.Combine(Path.GetTempPath(), $"group-relay-{Guid.NewGuid():N}");
         Directory.CreateDirectory(temporary);
         try
@@ -470,24 +474,24 @@ internal sealed class WindowsAiWorker
                 if (variable is not null) start.Environment[variable] = apiKey;
             }
             using var process = Process.Start(start) ?? throw new InvalidOperationException($"无法启动 {config.Provider}");
-            using var cancellationRegistration = cancellation.Register(() =>
+            using var cancellationRegistration = taskCancellation.Register(() =>
             {
                 try { if (!process.HasExited) process.Kill(true); } catch { }
             });
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellation);
-            var stderrTask = process.StandardError.ReadToEndAsync(cancellation);
-            var exitTask = process.WaitForExitAsync(cancellation);
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(taskCancellation);
+            var stderrTask = process.StandardError.ReadToEndAsync(taskCancellation);
+            var exitTask = process.WaitForExitAsync(taskCancellation);
             while (!exitTask.IsCompleted)
             {
-                var completed = await Task.WhenAny(exitTask, Task.Delay(TimeSpan.FromSeconds(45), cancellation));
-                if (completed != exitTask) await Presence("busy", cancellation);
+                var completed = await Task.WhenAny(exitTask, Task.Delay(TimeSpan.FromSeconds(45), taskCancellation));
+                if (completed != exitTask) await Presence("busy", taskCancellation);
             }
             await exitTask;
             var stdout = await stdoutTask;
             var stderr = await stderrTask;
             if (!string.IsNullOrWhiteSpace(stderr)) Log(stderr.Trim());
             if (process.ExitCode != 0) throw new InvalidOperationException($"{config.Provider} 退出码 {process.ExitCode}");
-            var raw = outputFile is not null ? await File.ReadAllTextAsync(outputFile, cancellation) : stdout;
+            var raw = outputFile is not null ? await File.ReadAllTextAsync(outputFile, taskCancellation) : stdout;
             if (config.Provider == "cursor")
             {
                 try { raw = JsonDocument.Parse(raw).RootElement.GetProperty("result").GetString() ?? raw; } catch { }
@@ -495,6 +499,10 @@ internal sealed class WindowsAiWorker
             var reply = raw.Trim();
             if (reply.Length == 0) throw new InvalidOperationException("AI 返回了空回复");
             return reply.Length > 20_000 ? reply[..20_000] : reply;
+        }
+        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
+        {
+            throw new TimeoutException("AI 单次任务超过 10 分钟，已自动停止；请拆分任务后重试");
         }
         finally
         {
