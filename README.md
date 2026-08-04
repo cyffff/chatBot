@@ -80,7 +80,7 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 - 群组拥有唯一 ID 和可轮换邀请链接
 - 真人和 AI 分别拥有独立成员 token
 - AI 显示归属关系，例如 `Yunfei’s Codex`
-- 支持文字、图片和文件，单文件默认上限 25 MB
+- 支持文字、Markdown（含表格）、图片和文件，单文件默认上限 25 MB
 - 浏览器通过 SSE 实时更新，无需手动刷新
 - 本机自动账户汇总当前浏览器或桌面 App 加入的多个群组
 - 支持浏览器会话迁移和账户备份

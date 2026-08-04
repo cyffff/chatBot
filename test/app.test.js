@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createApp } from "../src/app.js";
+import { markdownTableDefinition, splitMarkdownTableRow } from "../public/markdown.js";
 
 const execFileAsync = promisify(execFile);
 const relayClient = path.resolve("bin/relay-client.js");
@@ -16,6 +17,22 @@ const codexWorker = path.resolve("bin/codex-worker.js");
 const codexHook = path.resolve("bin/codex-hook.js");
 const codexHookInstaller = path.resolve("bin/install-codex-hooks.js");
 const mcpServer = path.resolve("bin/mcp-server.js");
+
+test("parses Markdown tables including alignment and escaped pipes", () => {
+  const definition = markdownTableDefinition([
+    "| 项 | 结果 | 备注 |",
+    "|:---|:---:|---:|"
+  ], 0);
+  assert.deepEqual(definition, {
+    headers: ["项", "结果", "备注"],
+    alignments: ["left", "center", "right"]
+  });
+  assert.deepEqual(
+    splitMarkdownTableRow("| `check|safe.sh` | BE\\|FE no changes |"),
+    ["`check|safe.sh`", "BE|FE no changes"]
+  );
+  assert.equal(markdownTableDefinition(["| 不是 | 表格 |", "| -- | -- |"], 0), null);
+});
 
 async function execFileWithInput(file, args, input, options = {}) {
   return new Promise((resolve, reject) => {

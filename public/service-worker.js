@@ -1,5 +1,5 @@
-const cacheName = "group-relay-shell-v1";
-const shell = ["/app", "/style.css", "/app.js", "/manifest.json", "/icon-180.png", "/icon-512.png"];
+const cacheName = "group-relay-shell-v2";
+const shell = ["/app", "/style.css", "/app.js", "/markdown.js", "/manifest.json", "/icon-180.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(cacheName).then((cache) => cache.addAll(shell)));

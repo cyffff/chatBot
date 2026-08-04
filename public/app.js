@@ -1,3 +1,5 @@
+import { markdownTableDefinition, splitMarkdownTableRow } from "./markdown.js";
+
 const $ = (selector) => document.querySelector(selector);
 const state = {
   groupId: null,
@@ -491,9 +493,46 @@ function renderMarkdown(target, source) {
       target.append(quote);
       continue;
     }
+    const tableDefinition = markdownTableDefinition(lines, index);
+    if (tableDefinition) {
+      const scroll = document.createElement("div");
+      scroll.className = "markdown-table-scroll";
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const headingRow = document.createElement("tr");
+      tableDefinition.headers.forEach((content, cellIndex) => {
+        const cell = document.createElement("th");
+        cell.style.textAlign = tableDefinition.alignments[cellIndex];
+        appendInlineMarkdown(cell, content);
+        headingRow.append(cell);
+      });
+      head.append(headingRow);
+      table.append(head);
+      const body = document.createElement("tbody");
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        const values = splitMarkdownTableRow(lines[index]);
+        const row = document.createElement("tr");
+        tableDefinition.headers.forEach((_, cellIndex) => {
+          const cell = document.createElement("td");
+          cell.style.textAlign = tableDefinition.alignments[cellIndex];
+          appendInlineMarkdown(cell, values[cellIndex] ?? "");
+          row.append(cell);
+        });
+        body.append(row);
+        index += 1;
+      }
+      table.append(body);
+      scroll.append(table);
+      target.append(scroll);
+      continue;
+    }
     const paragraph = document.createElement("p");
     let firstLine = true;
-    while (index < lines.length && lines[index].trim() && !markdownBlockStart(lines[index])) {
+    while (index < lines.length
+      && lines[index].trim()
+      && !markdownBlockStart(lines[index])
+      && !markdownTableDefinition(lines, index)) {
       if (!firstLine) paragraph.append(document.createElement("br"));
       appendInlineMarkdown(paragraph, lines[index]);
       firstLine = false;

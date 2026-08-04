@@ -735,6 +735,19 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   margin: 10px 0 12px; padding: 7px 12px; border-left: 3px solid #78a48c;
   color: #536158; background: #f3f7f3;
 }
+.markdown-table-scroll {
+  max-width: 100%; margin: 10px 0 14px; overflow-x: auto;
+  border: 1px solid #dbe4dc; border-radius: 10px; background: white;
+}
+.markdown-body table { width: 100%; min-width: 360px; border-collapse: collapse; font-size: 13px; }
+.markdown-body th,
+.markdown-body td { padding: 9px 11px; border-right: 1px solid #e0e7e1; border-bottom: 1px solid #e0e7e1; vertical-align: top; }
+.markdown-body th:last-child,
+.markdown-body td:last-child { border-right: 0; }
+.markdown-body tbody tr:last-child td { border-bottom: 0; }
+.markdown-body th { color: #183c2c; background: #eef5ef; font-weight: 800; white-space: nowrap; }
+.markdown-body tbody tr:nth-child(even) { background: #f8faf8; }
+.markdown-body td code { white-space: nowrap; }
 .attachments { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
 .attachment { color: #245f42; background: #edf5ee; padding: 8px 10px; border-radius: 9px; text-decoration: none; font-size: 12px; }
 .attachment img { display: block; max-width: min(420px, 100%); max-height: 320px; border-radius: 8px; margin-bottom: 6px; }
