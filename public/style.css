@@ -610,7 +610,22 @@ aside {
 aside h2 { margin: 0 0 14px; font-size: 14px; }
 aside ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
-aside li > span:nth-child(2) { min-width: 0; }
+.member-mention {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: -4px;
+  padding: 4px;
+  border-radius: 9px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+.member-mention:hover { color: inherit; background: #e9f1ea; }
+.member-mention:focus-visible { outline: 2px solid #78a48c; outline-offset: 2px; }
+.member-mention > span:nth-child(2) { min-width: 0; }
 .member-trust {
   margin-left: auto;
   padding: 5px 7px;

@@ -741,8 +741,8 @@ export async function createApp(options = {}) {
       const members = await store.listMembers(req.params.groupId);
       const uniqueMentionIds = [...new Set(mentionIds)];
       const mentions = uniqueMentionIds.map((id) => members.find((member) => member.id === id));
-      if (mentions.some((member) => !member || member.type !== "ai")) {
-        return res.status(400).json({ error: "mentioned member must be an AI in this group" });
+      if (mentions.some((member) => !member)) {
+        return res.status(400).json({ error: "mentioned member must be in this group" });
       }
       const message = await store.appendMessage(req.params.groupId, req.member, {
         text,
@@ -766,8 +766,9 @@ export async function createApp(options = {}) {
         await store.updateAssignmentTasks(req.params.groupId, message);
       } else {
         const references = jiraReferences(text);
-        if (references.length && mentions.length) {
-          await store.createAssignmentTasks(req.params.groupId, message, mentions, references);
+        const mentionedAIs = mentions.filter((member) => member.type === "ai");
+        if (references.length && mentionedAIs.length) {
+          await store.createAssignmentTasks(req.params.groupId, message, mentionedAIs, references);
         }
       }
       publish(req.params.groupId, "message", message);

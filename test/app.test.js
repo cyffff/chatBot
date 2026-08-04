@@ -519,6 +519,30 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   assert.equal(explicitForClaude.body.messages[0].text, "@Zoe’s Claude 请协助核对");
 });
 
+test("allows mentioning a human group member", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Human mentions", ownerName: "Owner" })
+  });
+  const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Guest", type: "human" })
+  });
+  const form = new FormData();
+  form.set("text", "@Guest 请看一下");
+  form.set("mentions", JSON.stringify([guest.body.member.id]));
+  const response = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    body: form
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.message.mentions[0].id, guest.body.member.id);
+  assert.equal(body.message.mentions[0].name, "Guest");
+});
+
 test("only the group owner can grant an AI trusted execution", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

@@ -278,6 +278,29 @@ function displayName(member) {
   return member.name;
 }
 
+function insertMemberMention(member, { replaceActiveQuery = false } = {}) {
+  const textarea = $("#message-form [name=text]");
+  const cursorStart = textarea.selectionStart ?? textarea.value.length;
+  const cursorEnd = textarea.selectionEnd ?? cursorStart;
+  let replaceStart = cursorStart;
+  let replaceEnd = cursorEnd;
+  if (replaceActiveQuery) {
+    const beforeCursor = textarea.value.slice(0, cursorStart);
+    const activeQuery = beforeCursor.match(/(^|\s)@[^@\n]*$/);
+    if (activeQuery) replaceStart = activeQuery.index + activeQuery[1].length;
+  }
+  const before = textarea.value.slice(0, replaceStart);
+  const after = textarea.value.slice(replaceEnd);
+  const leadingSpace = before && !/\s$/.test(before) ? " " : "";
+  const trailingSpace = !after || !/^\s/.test(after) ? " " : "";
+  const insertion = `${leadingSpace}@${displayName(member)}${trailingSpace}`;
+  textarea.value = `${before}${insertion}${after}`;
+  const nextCursor = before.length + insertion.length;
+  textarea.focus();
+  textarea.setSelectionRange(nextCursor, nextCursor);
+  $("#mention-menu").classList.add("hidden");
+}
+
 function renderMembers(members) {
   state.members = members;
   $("#member-list").innerHTML = "";
@@ -298,7 +321,14 @@ function renderMembers(members) {
       meta.textContent = memberLabel(member);
     }
     text.append(meta);
-    item.append(avatar, text);
+    const mention = document.createElement("button");
+    mention.type = "button";
+    mention.className = "member-mention";
+    mention.title = `点击 @${displayName(member)}`;
+    mention.setAttribute("aria-label", `@${displayName(member)}`);
+    mention.append(avatar, text);
+    mention.addEventListener("click", () => insertMemberMention(member));
+    item.append(mention);
     if (member.type === "ai" && state.canManageTrustedExecution) {
       const trust = document.createElement("button");
       trust.type = "button";
@@ -1632,31 +1662,29 @@ $("#message-form [name=files]").addEventListener("change", (event) => {
   $("#file-count").textContent = event.target.files.length ? `${event.target.files.length} 个文件` : "";
 });
 
-function matchingAiMembers(text) {
-  const match = text.match(/(?:^|\s)@([^@\n]*)$/);
+function matchingMentionMembers(textarea) {
+  const beforeCursor = textarea.value.slice(0, textarea.selectionStart ?? textarea.value.length);
+  const match = beforeCursor.match(/(?:^|\s)@([^@\n]*)$/);
   if (!match) return [];
   const query = match[1].trim().toLocaleLowerCase();
-  return state.members.filter((member) => (
-    member.type === "ai" && displayName(member).toLocaleLowerCase().includes(query)
-  ));
+  if (/\s$/.test(match[1]) && state.members.some((member) => displayName(member).toLocaleLowerCase() === query)) {
+    return [];
+  }
+  return state.members.filter((member) => displayName(member).toLocaleLowerCase().includes(query));
 }
 
 function renderMentionMenu() {
   const textarea = $("#message-form [name=text]");
   const menu = $("#mention-menu");
-  const members = matchingAiMembers(textarea.value);
+  const members = matchingMentionMembers(textarea);
   menu.innerHTML = "";
   for (const member of members) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "mention-option";
     button.setAttribute("role", "option");
-    button.textContent = `@${displayName(member)}`;
-    button.addEventListener("click", () => {
-      textarea.value = textarea.value.replace(/(^|\s)@[^@\n]*$/, `$1@${displayName(member)} `);
-      menu.classList.add("hidden");
-      textarea.focus();
-    });
+    button.textContent = `@${displayName(member)} · ${memberLabel(member)}`;
+    button.addEventListener("click", () => insertMemberMention(member, { replaceActiveQuery: true }));
     menu.append(button);
   }
   menu.classList.toggle("hidden", members.length === 0);
@@ -1673,7 +1701,7 @@ $("#message-form").addEventListener("submit", async (event) => {
   const form = new FormData(formElement);
   const text = String(form.get("text") || "");
   const mentionIds = state.members
-    .filter((member) => member.type === "ai" && text.includes(`@${displayName(member)}`))
+    .filter((member) => text.includes(`@${displayName(member)}`))
     .map((member) => member.id);
   form.set("mentions", JSON.stringify(mentionIds));
   try {
