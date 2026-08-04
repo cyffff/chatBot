@@ -87,7 +87,38 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     }
 
     @objc func openInBrowser() {
-        NSWorkspace.shared.open(serverURL.appendingPathComponent("app"))
+        guard let credential = accountCredential(), let accountToken = credential["accountToken"] as? String else {
+            showError("还没有可同步的账户", detail: "请先在 Group Relay 客户端完成邮箱账户登录。")
+            return
+        }
+        var request = URLRequest(url: serverURL.appendingPathComponent("api/account/web-logins"))
+        request.httpMethod = "POST"
+        request.setValue(accountToken, forHTTPHeaderField: "X-Account-Token")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            guard
+                error == nil,
+                let http = response as? HTTPURLResponse,
+                (200..<300).contains(http.statusCode),
+                let data,
+                let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let rawURL = value["loginUrl"] as? String,
+                let loginURL = URL(string: rawURL),
+                loginURL.host == self.serverURL.host,
+                loginURL.path.hasPrefix("/web-login/")
+            else {
+                DispatchQueue.main.async {
+                    self.showError(
+                        "无法打开已登录网页",
+                        detail: error?.localizedDescription ?? "服务器未能创建一次性网页登录链接。"
+                    )
+                }
+                return
+            }
+            DispatchQueue.main.async { NSWorkspace.shared.open(loginURL) }
+        }.resume()
     }
 
     @objc func showServerSettings() {

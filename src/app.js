@@ -104,6 +104,7 @@ export async function createApp(options = {}) {
   const subscribers = new Map();
   const waiters = new Map();
   const browserTransfers = new Map();
+  const webLogins = new Map();
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: maxFileSize, files: 10 }
@@ -221,6 +222,13 @@ export async function createApp(options = {}) {
       transfer.status = "expired";
     }
     return transfer;
+  }
+
+  function activeWebLogin(token) {
+    const login = webLogins.get(token);
+    if (!login) return null;
+    if (Date.now() > login.expiresAt) login.status = "expired";
+    return login;
   }
 
   function publish(groupId, event, payload) {
@@ -480,6 +488,41 @@ export async function createApp(options = {}) {
       transferUrl: `${publicBaseUrl(req)}/transfer/${transferToken}`,
       expiresAt: new Date(transfer.expiresAt).toISOString()
     });
+  });
+
+  app.post("/api/account/web-logins", requireAccount, (req, res) => {
+    const loginToken = crypto.randomBytes(24).toString("base64url");
+    const login = {
+      token: loginToken,
+      accountId: req.account.id,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      expiresAt: Date.now() + 5 * 60_000
+    };
+    webLogins.set(loginToken, login);
+    res.status(201).json({
+      loginToken,
+      loginUrl: `${publicBaseUrl(req)}/web-login/${loginToken}`,
+      expiresAt: new Date(login.expiresAt).toISOString()
+    });
+  });
+
+  app.post("/api/web-logins/:loginToken/claim", async (req, res, next) => {
+    try {
+      const login = activeWebLogin(req.params.loginToken);
+      if (!login) return res.status(404).json({ error: "web login not found" });
+      if (login.status === "expired") return res.status(410).json({ error: "web login expired" });
+      if (login.status !== "pending") return res.status(409).json({ error: "web login already used" });
+      const account = (await store.accounts())[login.accountId];
+      if (!account) return res.status(404).json({ error: "account not found" });
+      login.status = "claimed";
+      res.json({
+        account: publicAccount(account),
+        accountToken: account.token
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/api/account/browser-transfers/:transferToken", requireAccount, (req, res) => {
@@ -869,6 +912,7 @@ export async function createApp(options = {}) {
   app.get("/group/:groupId", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/app", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/transfer/:transferToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
+  app.get("/web-login/:loginToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
 
   app.use((error, _req, res, _next) => {
     if (error instanceof z.ZodError) {

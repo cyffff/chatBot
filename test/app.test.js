@@ -359,6 +359,54 @@ test("one-click browser transfer imports sessions into the current account", asy
   assert.equal(sessions.body.sessions[0].group.name, "Chrome session");
 });
 
+test("desktop client creates a one-time web login for the same account", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Desktop synced group", ownerName: "Yunfei" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "desktop-web@example.com" })
+  });
+  const headers = { "X-Account-Token": account.body.accountToken };
+  await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+    })
+  });
+
+  const login = await json(base, "/api/account/web-logins", {
+    method: "POST",
+    headers,
+    body: "{}"
+  });
+  assert.equal(login.response.status, 201);
+  assert.match(login.body.loginUrl, /\/web-login\//);
+
+  const claimed = await json(base, `/api/web-logins/${login.body.loginToken}/claim`, {
+    method: "POST",
+    body: "{}"
+  });
+  assert.equal(claimed.response.status, 200);
+  assert.equal(claimed.body.account.email, "desktop-web@example.com");
+  assert.equal(claimed.body.accountToken, account.body.accountToken);
+
+  const sessions = await json(base, "/api/account/sessions", {
+    headers: { "X-Account-Token": claimed.body.accountToken }
+  });
+  assert.equal(sessions.body.sessions.length, 1);
+  assert.equal(sessions.body.sessions[0].group.name, "Desktop synced group");
+
+  const replayed = await json(base, `/api/web-logins/${login.body.loginToken}/claim`, {
+    method: "POST",
+    body: "{}"
+  });
+  assert.equal(replayed.response.status, 409);
+});
+
 test("account AI board tracks Jira assignments through AI completion", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

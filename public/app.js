@@ -1844,6 +1844,31 @@ async function boot() {
     }
     return;
   }
+  if (parts[0] === "web-login" && parts[1]) {
+    show("#transfer-view");
+    $("#transfer-title").textContent = "正在同步桌面账户";
+    $("#transfer-message").textContent = "正在安全读取客户端授权的昵称、群组和任务，请稍候…";
+    try {
+      const response = await fetch(`/api/web-logins/${encodeURIComponent(parts[1])}/claim`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "桌面账户同步失败");
+      saveAccountCredential(result.account, result.accountToken);
+      $("#transfer-title").textContent = "桌面账户已同步";
+      $("#transfer-message").textContent = "昵称、群组和 AI 任务已载入，正在打开工作台…";
+      $(".transfer-loader").classList.add("complete");
+      history.replaceState({}, "", "/app");
+      setTimeout(() => { void showAccountView(); }, 350);
+    } catch (error) {
+      $("#transfer-title").textContent = "无法同步桌面账户";
+      $("#transfer-message").textContent = error.message;
+      $(".transfer-loader").classList.add("failed");
+    }
+    return;
+  }
   if (parts[0] === "app") {
     await showAccountView();
     return;

@@ -62,7 +62,7 @@ internal sealed class RelayForm : Form
         var menu = new MenuStrip();
         var app = new ToolStripMenuItem("Group Relay");
         app.DropDownItems.Add("服务器设置…", null, (_, _) => ShowServerSettings());
-        app.DropDownItems.Add("在浏览器中打开", null, (_, _) => OpenExternal($"{serverUrl}/app"));
+        app.DropDownItems.Add("在浏览器中打开", null, async (_, _) => await OpenAccountInBrowser());
         app.DropDownItems.Add(new ToolStripSeparator());
         app.DropDownItems.Add("退出", null, (_, _) => ExitApplication());
 
@@ -278,6 +278,50 @@ internal sealed class RelayForm : Form
             return;
         }
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    private async Task OpenAccountInBrowser()
+    {
+        var credential = WindowsAccountCredentials.Read();
+        if (credential is null)
+        {
+            MessageBox.Show(
+                this,
+                "请先在 Group Relay 客户端完成邮箱账户登录。",
+                "还没有可同步的账户",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information
+            );
+            return;
+        }
+        try
+        {
+            using var client = new HttpClient();
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{serverUrl.TrimEnd('/')}/api/account/web-logins");
+            request.Headers.Add("X-Account-Token", credential.Value.AccountToken);
+            request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            using var response = await client.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            var loginUrl = document.RootElement.GetProperty("loginUrl").GetString();
+            if (!Uri.TryCreate(loginUrl, UriKind.Absolute, out var url)
+                || !string.Equals(url.Host, new Uri(serverUrl).Host, StringComparison.OrdinalIgnoreCase)
+                || !url.AbsolutePath.StartsWith("/web-login/", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("服务器返回了无效的网页登录链接");
+            }
+            OpenExternal(url.AbsoluteUri);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show(
+                this,
+                $"无法创建一次性网页登录链接：{error.Message}",
+                "网页同步失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning
+            );
+        }
     }
 
     private static string? FindChrome()

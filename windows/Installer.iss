@@ -3,7 +3,7 @@
 #endif
 
 #define MyAppName "Group Relay"
-#define MyAppVersion "1.2.3"
+#define MyAppVersion "1.2.4"
 #define MyAppPublisher "Group Relay"
 #define MyAppExeName "GroupRelay.exe"
 
