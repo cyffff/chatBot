@@ -1758,17 +1758,32 @@ function renderMentionMenu() {
 $("#message-form [name=text]").addEventListener("input", renderMentionMenu);
 $("#message-form [name=text]").addEventListener("keydown", (event) => {
   if (event.key === "Escape") $("#mention-menu").classList.add("hidden");
+  if (
+    event.key === "Enter"
+    && !event.shiftKey
+    && !event.isComposing
+    && event.keyCode !== 229
+  ) {
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  }
 });
 
 $("#message-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const formElement = event.currentTarget;
+  if (formElement.dataset.sending === "true") return;
   const form = new FormData(formElement);
   const text = String(form.get("text") || "");
+  const files = form.getAll("files").filter((file) => file instanceof File && file.size > 0);
+  if (!text.trim() && files.length === 0) return;
   const mentionIds = state.members
     .filter((member) => text.includes(`@${displayName(member)}`))
     .map((member) => member.id);
   form.set("mentions", JSON.stringify(mentionIds));
+  formElement.dataset.sending = "true";
+  const submitButton = formElement.querySelector("button[type=submit]");
+  submitButton.disabled = true;
   try {
     const { message } = await api(`/api/groups/${state.groupId}/messages`, { method: "POST", body: form });
     renderMessage(message);
@@ -1777,6 +1792,9 @@ $("#message-form").addEventListener("submit", async (event) => {
     $("#file-count").textContent = "";
   } catch (error) {
     toast(error.message);
+  } finally {
+    formElement.dataset.sending = "false";
+    submitButton.disabled = false;
   }
 });
 
