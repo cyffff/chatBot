@@ -294,7 +294,7 @@ App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 sessi
 2. 在目标群组的“我的桌面 AI”中点击 `＋ Codex`、`＋ Claude` 或 `＋ Cursor`；
 3. Mac App 自动创建该群专用后台 worker，并复用本机现有登录状态、API Key、模型及工作区；
 4. 群里任何真人都可以 `@Yunfei’s Codex`（或对应 AI）发起普通对话；
-5. 只有 AI 所有者本人的消息会取得已授权项目的免审批执行权限，其他成员始终是受限对话；
+5. AI 所有者本人以及同一账户名下、同样已授权的桌面 AI 可以取得免审批执行权限；其他成员始终是受限对话；
 6. 点击 `Codex · 离开`（或对应 provider）即可从该群移除 AI 并停止后台 worker。
 
 也可以直接在群聊左侧成员栏的“我的 AI”区域操作，无需返回群组列表。桌面客户端会读取
@@ -372,13 +372,16 @@ Key。macOS 客户端会直接更新已存在的钥匙串条目，不需要先�
 #### 群主免审批执行
 
 群主可以在聊天页成员列表中，为自己的 Codex、Claude 或 Cursor 点击“免审批：关”开启
-一次性授权。开启后只有该群主发给这个 AI 的消息会以项目全权限执行：
+一次性授权。开启后该群主直接发给 AI 的消息会以项目全权限执行；同一账户名下、同样开启
+免审批的 AI 之间也可以继承群主授权进行任务分派，例如 Cursor 主管可以把工作交给 Codex
+或 Claude：
 
 - Cursor 使用 `--force --sandbox disabled --trust`，拥有与 Cursor Agent Run Everything
   相同的写文件和 shell 权限；
 - Codex 使用 `--dangerously-bypass-approvals-and-sandbox`；
 - Claude 使用 `--dangerously-skip-permissions`；
 - 其他群成员的消息仍在临时目录中按只读模式处理；
+- 其他账户的 AI、未开启免审批的 AI 以及未绑定桌面账户的机器人不能继承授权；
 - 高权限任务不会携带其他群成员的聊天历史，避免把群聊内容带入可信执行上下文；
 - API Key 和登录凭证始终留在本机钥匙串或对应 CLI 中，服务器只保存群主与 AI 的授权关系。
 

@@ -265,6 +265,51 @@ test("desktop account AI can join a linked group, answer every member and leave"
   assert.equal(group.body.members.some((member) => member.type === "ai"), false);
 });
 
+test("trusted desktop AIs from the same owner can delegate work to each other", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "AI delegation", ownerName: "Yunfei" })
+  });
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei-delegation@example.test" })
+  });
+  const accountHeaders = { "X-Account-Token": account.body.accountToken };
+  await json(base, "/api/account/sessions/import", {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({
+      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+    })
+  });
+  const cursor = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ provider: "cursor" })
+  });
+  const claude = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ provider: "claude" })
+  });
+
+  const delegated = new FormData();
+  delegated.set("text", "@Yunfei’s Claude 按主管要求完成开发");
+  delegated.set("mentions", JSON.stringify([claude.body.member.id]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${cursor.body.worker.memberToken}` },
+    body: delegated
+  });
+
+  const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
+    headers: { Authorization: `Bearer ${claude.body.worker.memberToken}` }
+  });
+  assert.equal(routed.body.messages.length, 1);
+  assert.equal(routed.body.messages[0].executionScope, "trusted");
+});
+
 test("one-click browser transfer imports sessions into the current account", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

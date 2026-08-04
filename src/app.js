@@ -235,18 +235,30 @@ export async function createApp(options = {}) {
     }
   }
 
-  function routedMessages(messages, member, enabled) {
+  function routedMessages(messages, member, enabled, groupMembers = []) {
     if (!enabled || member.type !== "ai") return messages;
+    const membersById = new Map(groupMembers.map((candidate) => [candidate.id, candidate]));
     return messages.filter((message) => {
       if (message.sender?.id === member.id) return false;
       if (message.mentions?.length) {
         return message.mentions.some((mention) => mention.id === member.id);
       }
       return message.sender?.type !== "ai";
-    }).map((message) => ({
-      ...message,
-      executionScope: member.trustedOwnerMemberId === message.sender?.id ? "trusted" : "restricted"
-    }));
+    }).map((message) => {
+      const sender = membersById.get(message.sender?.id);
+      const directlyTrusted = member.trustedOwnerMemberId === message.sender?.id;
+      const delegatedBySiblingAI = Boolean(
+        member.trustedOwnerMemberId
+        && member.desktopOwnerAccountId
+        && sender?.type === "ai"
+        && sender.trustedOwnerMemberId === member.trustedOwnerMemberId
+        && sender.desktopOwnerAccountId === member.desktopOwnerAccountId
+      );
+      return {
+        ...message,
+        executionScope: directlyTrusted || delegatedBySiblingAI ? "trusted" : "restricted"
+      };
+    });
   }
 
   function publicMember(member) {
@@ -658,7 +670,8 @@ export async function createApp(options = {}) {
         limit: req.query.limit
       });
       const isRouted = req.query.routed === "1";
-      const routed = routedMessages(messages, req.member, isRouted);
+      const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
+      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
       if (isRouted && routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,
@@ -677,7 +690,9 @@ export async function createApp(options = {}) {
         limit: req.query.limit ?? 100
       });
       if (existing.length) {
-        const routed = routedMessages(existing, req.member, req.query.routed === "1");
+        const isRouted = req.query.routed === "1";
+        const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
+        const routed = routedMessages(existing, req.member, isRouted, groupMembers);
         if (routed.length) await reportActivity(req, "busy");
         return res.json({
           messages: routed,
@@ -706,7 +721,9 @@ export async function createApp(options = {}) {
         waiters.set(groupId, groupWaiters);
       });
       const messages = update?.event === "message" ? [update.payload] : [];
-      const routed = routedMessages(messages, req.member, req.query.routed === "1");
+      const isRouted = req.query.routed === "1";
+      const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
+      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
       if (routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,
