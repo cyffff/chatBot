@@ -1376,28 +1376,24 @@ async function waitForBrowserTransfer(transferToken) {
 
 $("#start-browser-transfer").addEventListener("click", async (event) => {
   const button = event.currentTarget;
+  const nativeBridge = desktopNativeBridge();
+  if (!nativeBridge) {
+    const guidance = "请在 Group Relay 客户端选择“显示 → 在浏览器中打开”，网页会自动同步客户端账户和会话。";
+    $("#import-result").textContent = guidance;
+    toast("请从客户端打开网页进行自动同步");
+    return;
+  }
   button.disabled = true;
   $("#import-result").textContent = "正在打开浏览器…";
-  let browserWindow = null;
-  const nativeBridge = window.webkit?.messageHandlers?.relayNative ?? window.chrome?.webview;
-  if (!nativeBridge) browserWindow = window.open("about:blank", "_blank");
   try {
     const transfer = await accountApi("/api/account/browser-transfers", {
       method: "POST",
       body: "{}"
     });
-    if (nativeBridge) {
-      nativeBridge.postMessage({ action: "openExternal", url: transfer.transferUrl });
-    } else if (browserWindow) {
-      browserWindow.location = transfer.transferUrl;
-    } else {
-      location.href = transfer.transferUrl;
-      return;
-    }
+    nativeBridge.postMessage({ action: "openExternal", url: transfer.transferUrl });
     $("#import-result").textContent = "浏览器已打开，正在等待自动导入…";
     await waitForBrowserTransfer(transfer.transferToken);
   } catch (error) {
-    browserWindow?.close();
     $("#import-result").textContent = error.message;
     toast(error.message);
   } finally {
@@ -1811,11 +1807,13 @@ async function boot() {
   const nativeWindowsClient = navigator.userAgent.includes("GroupRelayWindows/");
   const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
   if (nativeMacClient || nativeWindowsClient) {
+    $("#start-browser-transfer").textContent = "从浏览器导入会话";
     $("#client-tip-title").textContent = "一键从浏览器导入";
     $("#client-tip-text").textContent = "点击下方按钮会自动打开 Chrome；Chrome 读取自己的会话后自动传回客户端，无需下载或选择文件。";
-  } else if (desktopMacBrowser) {
-    $("#client-tip-title").textContent = "浏览器会话";
-    $("#client-tip-text").textContent = "这个页面会在 Mac 客户端发起迁移时自动打开并导入，无需手工导出文件。";
+  } else {
+    $("#start-browser-transfer").textContent = "从客户端导入会话";
+    $("#client-tip-title").textContent = desktopMacBrowser ? "客户端会话" : "桌面客户端会话";
+    $("#client-tip-text").textContent = "在 Group Relay 客户端选择“显示 → 在浏览器中打开”，网页会自动同步相同的账户和会话。";
   }
   const parts = location.pathname.split("/").filter(Boolean);
   if (parts[0] === "transfer" && parts[1]) {
