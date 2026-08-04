@@ -70,9 +70,11 @@ private final class RelayWorker {
 
     func run() {
         log("Starting \(config.provider) worker for group \(config.groupId)")
+        var needsInterruptedRecovery = true
         while true {
             do {
-                try presence("online")
+                try presence("online", recoverInterrupted: needsInterruptedRecovery)
+                needsInterruptedRecovery = false
                 let messages = try waitForMessages()
                 if messages.isEmpty { continue }
                 for message in messages {
@@ -154,11 +156,11 @@ private final class RelayWorker {
         return try result.get()
     }
 
-    private func presence(_ status: String) throws {
+    private func presence(_ status: String, recoverInterrupted: Bool = false) throws {
         _ = try request(
             "/api/groups/\(config.groupId)/members/me/presence",
             method: "POST",
-            json: ["status": status]
+            json: ["status": status, "recoverInterrupted": recoverInterrupted]
         )
     }
 

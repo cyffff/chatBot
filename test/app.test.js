@@ -756,6 +756,43 @@ test("AI presence changes from busy to offline when heartbeats expire", async (t
   assert.equal(expired.body.members.find((member) => member.type === "ai").presence.status, "offline");
 });
 
+test("AI reconnect marks interrupted processing placeholders as failed", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Interrupted work", ownerName: "Yunfei" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex", ownerName: "Yunfei" })
+  });
+  const headers = { Authorization: `Bearer ${joined.body.member.token}` };
+  const placeholder = new FormData();
+  placeholder.set("text", "正在处理…");
+  placeholder.set("status", "processing");
+  const sent = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers,
+    body: placeholder
+  });
+  assert.equal(sent.status, 201);
+
+  const online = await json(base, `/api/groups/${created.body.group.id}/members/me/presence`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ status: "online", recoverInterrupted: true })
+  });
+  assert.equal(online.response.status, 200);
+  assert.equal(online.body.presence.status, "online");
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(history.body.messages.length, 1);
+  assert.equal(history.body.messages[0].status, "failed");
+  assert.match(history.body.messages[0].text, /客户端重启或连接中断/);
+});
+
 test("AI polling renews presence and routed work marks it busy", async (t) => {
   const { base } = await fixture(t, { presenceTimeoutMs: 1500 });
   const created = await json(base, "/api/groups", {

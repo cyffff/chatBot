@@ -507,6 +507,33 @@ export class FileStore {
     return next;
   }
 
+  async failProcessingMessages(groupId, memberId, text) {
+    const previous = this.writeQueues.get(groupId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const updated = [];
+      const files = (await this.messageFiles(groupId)).filter((file) => !file.endsWith(".gz"));
+      for (const file of files) {
+        const messages = parseJsonl(await fs.readFile(file, "utf8"));
+        let changed = false;
+        for (const message of messages) {
+          if (message.sender?.id !== memberId || message.status !== "processing") continue;
+          message.text = text;
+          message.status = "failed";
+          message.updatedAt = new Date().toISOString();
+          updated.push(message);
+          changed = true;
+        }
+        if (!changed) continue;
+        const temp = `${file}.${id()}.tmp`;
+        await fs.writeFile(temp, `${messages.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+        await fs.rename(temp, file);
+      }
+      return updated;
+    });
+    this.writeQueues.set(groupId, next.catch(() => {}));
+    return next;
+  }
+
   async messageFiles(groupId) {
     const dir = path.join(this.groupDir(groupId), "messages");
     const names = await fs.readdir(dir);

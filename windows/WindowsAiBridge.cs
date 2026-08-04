@@ -225,11 +225,13 @@ internal sealed class WindowsAiWorker
     public async Task Run(CancellationToken cancellation)
     {
         Log($"Starting {config.Provider} worker for group {config.GroupId}");
+        var needsInterruptedRecovery = true;
         while (!cancellation.IsCancellationRequested)
         {
             try
             {
-                await Presence("online", cancellation);
+                await Presence("online", cancellation, needsInterruptedRecovery);
+                needsInterruptedRecovery = false;
                 var messages = await WaitForMessages(cancellation);
                 foreach (var message in messages)
                 {
@@ -272,12 +274,12 @@ internal sealed class WindowsAiWorker
         }
     }
 
-    private async Task Presence(string status, CancellationToken cancellation)
+    private async Task Presence(string status, CancellationToken cancellation, bool recoverInterrupted = false)
     {
         await Request(
             HttpMethod.Post,
             $"api/groups/{config.GroupId}/members/me/presence",
-            JsonContent.Create(new { status }),
+            JsonContent.Create(new { status, recoverInterrupted }),
             cancellation
         );
     }

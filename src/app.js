@@ -30,7 +30,8 @@ function jiraReferences(text) {
   return references.map((reference) => ({ ...reference, title: title || reference.key }));
 }
 const presenceSchema = z.object({
-  status: z.enum(["online", "busy"])
+  status: z.enum(["online", "busy"]),
+  recoverInterrupted: z.boolean().optional().default(false)
 });
 const trustedExecutionSchema = z.object({ enabled: z.boolean() });
 const messageUpdateSchema = z.object({
@@ -683,7 +684,19 @@ export async function createApp(options = {}) {
       if (req.member.type !== "ai") {
         return res.status(403).json({ error: "only AI members report presence" });
       }
-      const { status } = presenceSchema.parse(req.body);
+      const { status, recoverInterrupted } = presenceSchema.parse(req.body);
+      if (status === "online" && recoverInterrupted) {
+        const interrupted = await store.failProcessingMessages(
+          req.params.groupId,
+          req.member.id,
+          "任务因客户端重启或连接中断而停止，请重新发送任务。"
+        );
+        for (const message of interrupted) {
+          await store.setMessageActivity(req.params.groupId, req.member.id, message.id, false);
+          await store.updateAssignmentTasks(req.params.groupId, message);
+          publish(req.params.groupId, "message_updated", message);
+        }
+      }
       const presence = await store.updatePresence(req.params.groupId, req.member.id, status);
       if (!presence) return res.status(404).json({ error: "member not found" });
       publish(req.params.groupId, "member_presence", {
