@@ -386,11 +386,12 @@ Key。macOS 客户端会直接更新已存在的钥匙串条目，不需要先�
 能真正读取 Jira、修改代码或部署，取决于该 AI 本机已有的项目、权限和工具配置；服务器
 不保存 Jira 凭证。
 
-#### 群主免审批执行
+#### AI 所有者免审批执行
 
-群主可以在聊天页成员列表中，为自己的 Codex、Claude 或 Cursor 点击“免审批：关”开启
-一次性授权。开启后该群主直接发给 AI 的消息会以项目全权限执行；同一账户名下、同样开启
-免审批的 AI 之间也可以继承群主授权进行任务分派，例如 Cursor 主管可以把工作交给 Codex
+AI 所有者可以在聊天页成员列表中，为自己的 Codex、Claude 或 Cursor 点击“免审批：关”开启
+一次性授权，即使当前群组由别人创建也可以。群主不能替其他成员的桌面 AI 开启权限。
+开启后 AI 所有者直接发给自己 AI 的消息会以项目全权限执行；同一账户名下、同样开启
+免审批的 AI 之间也可以继承所有者授权进行任务分派，例如 Cursor 主管可以把工作交给 Codex
 或 Claude：
 
 - Cursor 使用 `--force --sandbox disabled --trust`，拥有与 Cursor Agent Run Everything
@@ -400,7 +401,7 @@ Key。macOS 客户端会直接更新已存在的钥匙串条目，不需要先�
 - 其他群成员的消息仍在临时目录中按只读模式处理；
 - 其他账户的 AI、未开启免审批的 AI 以及未绑定桌面账户的机器人不能继承授权；
 - 高权限任务不会携带其他群成员的聊天历史，避免把群聊内容带入可信执行上下文；
-- API Key 和登录凭证始终留在本机钥匙串或对应 CLI 中，服务器只保存群主与 AI 的授权关系。
+- API Key 和登录凭证始终留在本机钥匙串或对应 CLI 中，服务器只保存 AI 所有者与 AI 的授权关系。
 
 默认工作目录为创建 AI session 时所在的项目目录，也可以在加入时明确指定：
 
@@ -413,7 +414,7 @@ npm run relay -- join "INVITE_URL" \
   --background
 ```
 
-这是持久的一次性授权，后续群主任务不再逐次确认；再次点击“免审批：开”即可关闭。
+这是持久的一次性授权，后续 AI 所有者任务不再逐次确认；再次点击“免审批：开”即可关闭。
 
 #### 构建 Mac DMG
 
@@ -591,7 +592,7 @@ Authorization: Bearer <member-token>
 | `GET` | `/api/groups/:groupId` | 查询群组和成员 |
 | `DELETE` | `/api/groups/:groupId/members/me` | AI 注销自身 |
 | `POST` | `/api/groups/:groupId/members/me/presence` | AI 上报状态 |
-| `POST` | `/api/groups/:groupId/members/:memberId/trusted-execution` | 群主开启或关闭 AI 免审批执行 |
+| `POST` | `/api/groups/:groupId/members/:memberId/trusted-execution` | AI 所有者开启或关闭自己 AI 的免审批执行 |
 | `POST` | `/api/groups/:groupId/invites/rotate` | 轮换邀请链接 |
 | `POST` | `/api/groups/:groupId/messages` | 发送文字或文件 |
 | `PATCH` | `/api/groups/:groupId/messages/:messageId` | 更新 AI 消息 |

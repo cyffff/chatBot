@@ -266,7 +266,7 @@ test("desktop account AI can join a linked group, answer every member and leave"
 });
 
 test("a guest account can attach its desktop AI to somebody else's group", async (t) => {
-  const { base, store } = await fixture(t);
+  const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
     body: JSON.stringify({ name: "Somebody else's group", ownerName: "Owner" })
@@ -302,14 +302,41 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   assert.equal(desired.body.workers[0].provider, "codex");
   assert.ok(desired.body.workers[0].memberToken);
 
-  // Simulate a guest AI persisted by the previous buggy default and verify the
-  // routing boundary still refuses to grant it trusted project execution.
-  await store.setTrustedExecution(
-    created.body.group.id,
-    attached.body.member.id,
-    guest.body.member.id,
+  const guestView = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${guest.body.member.token}` }
+  });
+  assert.equal(
+    guestView.body.members.find((member) => member.id === attached.body.member.id).canManageTrustedExecution,
     true
   );
+  const ownerView = await json(base, `/api/groups/${created.body.group.id}`, {
+    headers: { Authorization: `Bearer ${created.body.member.token}` }
+  });
+  assert.equal(
+    ownerView.body.members.find((member) => member.id === attached.body.member.id).canManageTrustedExecution,
+    false
+  );
+  const ownerDenied = await json(
+    base,
+    `/api/groups/${created.body.group.id}/members/${attached.body.member.id}/trusted-execution`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${created.body.member.token}` },
+      body: JSON.stringify({ enabled: true })
+    }
+  );
+  assert.equal(ownerDenied.response.status, 403);
+  const enabled = await json(
+    base,
+    `/api/groups/${created.body.group.id}/members/${attached.body.member.id}/trusted-execution`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${guest.body.member.token}` },
+      body: JSON.stringify({ enabled: true })
+    }
+  );
+  assert.equal(enabled.response.status, 200);
+  assert.equal(enabled.body.member.trustedExecutionEnabled, true);
   const guestMessage = new FormData();
   guestMessage.set("text", "@Yunfei’s Codex 修改项目");
   guestMessage.set("mentions", JSON.stringify([attached.body.member.id]));
@@ -321,7 +348,7 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
     headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
   });
-  assert.equal(routed.body.messages.at(-1).executionScope, "restricted");
+  assert.equal(routed.body.messages.at(-1).executionScope, "trusted");
 });
 
 test("trusted desktop AIs from the same owner can delegate work to each other", async (t) => {
@@ -712,7 +739,7 @@ test("allows mentioning a human group member", async (t) => {
   assert.equal(body.message.mentions[0].name, "Guest");
 });
 
-test("only the group owner can grant an AI trusted execution", async (t) => {
+test("the group owner can grant trusted execution to a legacy AI", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",

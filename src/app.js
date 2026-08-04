@@ -244,7 +244,7 @@ export async function createApp(options = {}) {
     }
   }
 
-  function routedMessages(messages, member, enabled, groupMembers = [], groupOwnerMemberId = null) {
+  function routedMessages(messages, member, enabled, groupMembers = []) {
     if (!enabled || member.type !== "ai") return messages;
     const membersById = new Map(groupMembers.map((candidate) => [candidate.id, candidate]));
     return messages.filter((message) => {
@@ -255,16 +255,15 @@ export async function createApp(options = {}) {
       return message.sender?.type !== "ai";
     }).map((message) => {
       const sender = membersById.get(message.sender?.id);
-      const hasOwnerTrust = Boolean(
-        groupOwnerMemberId
-        && member.trustedOwnerMemberId === groupOwnerMemberId
+      const directlyTrusted = Boolean(
+        member.trustedOwnerMemberId
+        && member.trustedOwnerMemberId === message.sender?.id
       );
-      const directlyTrusted = hasOwnerTrust && groupOwnerMemberId === message.sender?.id;
       const delegatedBySiblingAI = Boolean(
-        hasOwnerTrust
+        member.trustedOwnerMemberId
         && member.desktopOwnerAccountId
         && sender?.type === "ai"
-        && sender.trustedOwnerMemberId === groupOwnerMemberId
+        && sender.trustedOwnerMemberId === member.trustedOwnerMemberId
         && sender.desktopOwnerAccountId === member.desktopOwnerAccountId
       );
       return {
@@ -662,7 +661,14 @@ export async function createApp(options = {}) {
       if (!group) return res.status(404).json({ error: "group not found" });
       const rawMembers = await store.listMembers(group.id);
       const ownerMemberId = group.ownerMemberId ?? rawMembers.find((member) => member.type === "human")?.id;
-      const members = rawMembers.map(publicMember);
+      const members = rawMembers.map((member) => ({
+        ...publicMember(member),
+        canManageTrustedExecution: member.type === "ai" && (
+          member.desktopOwnerMemberId
+            ? member.desktopOwnerMemberId === req.member.id
+            : req.member.id === ownerMemberId
+        )
+      }));
       res.json({
         group,
         members,
@@ -686,18 +692,23 @@ export async function createApp(options = {}) {
         ]);
         if (!group) return res.status(404).json({ error: "group not found" });
         const ownerMemberId = group.ownerMemberId ?? members.find((member) => member.type === "human")?.id;
-        if (req.member.id !== ownerMemberId) {
-          return res.status(403).json({ error: "only the group owner can enable trusted execution" });
+        const target = members.find((member) => member.id === req.params.memberId && member.type === "ai");
+        if (!target) return res.status(404).json({ error: "AI member not found" });
+        const canManage = target.desktopOwnerMemberId
+          ? target.desktopOwnerMemberId === req.member.id
+          : req.member.id === ownerMemberId;
+        if (!canManage) {
+          return res.status(403).json({ error: "only the AI owner can enable trusted execution" });
         }
         const member = await store.setTrustedExecution(
           req.params.groupId,
           req.params.memberId,
-          ownerMemberId,
+          req.member.id,
           input.enabled
         );
         if (!member) return res.status(404).json({ error: "AI member not found" });
         publish(req.params.groupId, "member_updated", publicMember(member));
-        res.json({ member: publicMember(member) });
+        res.json({ member: { ...publicMember(member), canManageTrustedExecution: true } });
       } catch (error) {
         next(error);
       }
@@ -764,16 +775,8 @@ export async function createApp(options = {}) {
         limit: req.query.limit
       });
       const isRouted = req.query.routed === "1";
-      const [groupMembers, group] = isRouted
-        ? await Promise.all([
-            store.listMembers(req.params.groupId),
-            store.getGroup(req.params.groupId)
-          ])
-        : [[], null];
-      const groupOwnerMemberId = group?.ownerMemberId
-        ?? groupMembers.find((member) => member.type === "human")?.id
-        ?? null;
-      const routed = routedMessages(messages, req.member, isRouted, groupMembers, groupOwnerMemberId);
+      const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
+      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
       if (isRouted && routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,
@@ -793,16 +796,8 @@ export async function createApp(options = {}) {
       });
       if (existing.length) {
         const isRouted = req.query.routed === "1";
-        const [groupMembers, group] = isRouted
-          ? await Promise.all([
-              store.listMembers(req.params.groupId),
-              store.getGroup(req.params.groupId)
-            ])
-          : [[], null];
-        const groupOwnerMemberId = group?.ownerMemberId
-          ?? groupMembers.find((member) => member.type === "human")?.id
-          ?? null;
-        const routed = routedMessages(existing, req.member, isRouted, groupMembers, groupOwnerMemberId);
+        const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
+        const routed = routedMessages(existing, req.member, isRouted, groupMembers);
         if (routed.length) await reportActivity(req, "busy");
         return res.json({
           messages: routed,
@@ -832,16 +827,8 @@ export async function createApp(options = {}) {
       });
       const messages = update?.event === "message" ? [update.payload] : [];
       const isRouted = req.query.routed === "1";
-      const [groupMembers, group] = isRouted
-        ? await Promise.all([
-            store.listMembers(req.params.groupId),
-            store.getGroup(req.params.groupId)
-          ])
-        : [[], null];
-      const groupOwnerMemberId = group?.ownerMemberId
-        ?? groupMembers.find((member) => member.type === "human")?.id
-        ?? null;
-      const routed = routedMessages(messages, req.member, isRouted, groupMembers, groupOwnerMemberId);
+      const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
+      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
       if (routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,

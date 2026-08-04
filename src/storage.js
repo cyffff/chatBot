@@ -346,12 +346,7 @@ export class FileStore {
         && member.provider === provider
         && member.desktopOwnerAccountId === ownerAccountId
       ));
-      if (existing) {
-        if (!trustedOwnerMemberId && existing.trustedOwnerMemberId === ownerMemberId) {
-          existing.trustedOwnerMemberId = null;
-        }
-        return { member: existing, created: false };
-      }
+      if (existing) return { member: existing, created: false };
       const member = {
         id: id(),
         name,

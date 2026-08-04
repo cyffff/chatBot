@@ -353,7 +353,7 @@ function renderMembers(members) {
     mention.append(avatar, text);
     mention.addEventListener("click", () => insertMemberMention(member));
     item.append(mention);
-    if (member.type === "ai" && state.canManageTrustedExecution) {
+    if (member.type === "ai" && member.canManageTrustedExecution) {
       const trust = document.createElement("button");
       trust.type = "button";
       trust.className = `member-trust ${member.trustedExecutionEnabled ? "enabled" : ""}`;
@@ -371,7 +371,7 @@ function renderMembers(members) {
           const index = state.members.findIndex((candidate) => candidate.id === member.id);
           if (index >= 0) state.members[index] = result.member;
           renderMembers(state.members);
-          toast(result.member.trustedExecutionEnabled ? "已开启群主免审批执行" : "已关闭免审批执行");
+          toast(result.member.trustedExecutionEnabled ? "已开启我的 AI 免审批执行" : "已关闭免审批执行");
         } catch (error) {
           trust.disabled = false;
           toast(error.message);
