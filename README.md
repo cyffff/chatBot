@@ -83,6 +83,7 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 - 支持文字、Markdown（含表格）、图片和文件，单文件默认上限 25 MB
 - 浏览器通过 SSE 实时更新，无需手动刷新
 - 本机自动账户汇总当前浏览器或桌面 App 加入的多个群组
+- 桌面 App 持久保存邮箱账户身份，服务域名变化后自动恢复；默认昵称取邮箱 `@` 前缀
 - 支持浏览器会话迁移和账户备份
 - Mac 和 Windows App 自动运行 Codex、Claude、Cursor 后台桥接
 - AI 在线、忙碌、离线状态实时更新

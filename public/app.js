@@ -98,6 +98,9 @@ function loadAccountCredential() {
   try {
     const credential = JSON.parse(localStorage.getItem(accountStorageKey) || "null");
     if (!credential?.accountToken) return false;
+    if (desktopNativeBridge() && String(credential.email ?? "").endsWith("@device.group-relay.example.com")) {
+      return false;
+    }
     state.accountToken = credential.accountToken;
     return true;
   } catch {
@@ -113,6 +116,9 @@ function saveAccountCredential(account, accountToken) {
     email: account.email,
     accountToken
   }));
+  if (desktopNativeBridge() && !isAutomaticAccount(account)) {
+    void requestNative("saveAccountCredential", { email: account.email, accountToken }).catch(() => {});
+  }
 }
 
 function isAutomaticAccount(account = state.account) {
@@ -131,10 +137,26 @@ async function createAutomaticAccount() {
   return account;
 }
 
+async function restoreNativeAccountCredential() {
+  if (!desktopNativeBridge()) return false;
+  try {
+    const credential = await requestNative("getAccountCredential");
+    if (!credential?.accountToken) return false;
+    state.accountToken = credential.accountToken;
+    const { account } = await accountApi("/api/account");
+    saveAccountCredential(account, credential.accountToken);
+    return true;
+  } catch {
+    state.accountToken = null;
+    return false;
+  }
+}
+
 async function ensureAccountCredential() {
   if (loadAccountCredential()) return;
   if (!state.accountBootstrapPromise) {
-    state.accountBootstrapPromise = createAutomaticAccount()
+    state.accountBootstrapPromise = restoreNativeAccountCredential()
+      .then((restored) => restored || createAutomaticAccount())
       .finally(() => { state.accountBootstrapPromise = null; });
   }
   await state.accountBootstrapPromise;
@@ -890,12 +912,15 @@ const taskStatusLabels = {
 };
 
 function accountEmailNickname(account) {
-  return String(account?.email ?? "").split("@")[0].trim() || "我";
+  if (isAutomaticAccount(account)) return "我";
+  const prefix = String(account?.email ?? "").split("@")[0].trim();
+  return prefix && !prefix.toLocaleLowerCase().startsWith("device-") ? prefix : "我";
 }
 
 function accountOwnerName(account) {
   const saved = String(account?.displayName ?? "").trim();
-  return saved || accountEmailNickname(account);
+  if (saved && !saved.toLocaleLowerCase().startsWith("device-")) return saved;
+  return accountEmailNickname(account);
 }
 
 function renderAvatar(imageSelector, fallbackSelector, avatarDataUrl, owner) {
@@ -1261,6 +1286,7 @@ async function showAccountView() {
   } catch (error) {
     if (error.message === "invalid account token") {
       localStorage.removeItem(accountStorageKey);
+      if (desktopNativeBridge()) void requestNative("deleteAccountCredential").catch(() => {});
       state.account = null;
       state.accountToken = null;
       await createAutomaticAccount();
@@ -1411,6 +1437,7 @@ $("#import-account-file").addEventListener("change", handleBackupInput);
 
 $("#account-logout").addEventListener("click", async () => {
   localStorage.removeItem(accountStorageKey);
+  if (desktopNativeBridge()) await requestNative("deleteAccountCredential").catch(() => {});
   state.account = null;
   state.accountToken = null;
   clearInterval(state.taskRefreshTimer);

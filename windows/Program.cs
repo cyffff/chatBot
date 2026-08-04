@@ -18,7 +18,7 @@ internal static class Program
 
 internal sealed class RelayForm : Form
 {
-    private const string DefaultServerUrl = "https://troops-prospects-dictionary-metals.trycloudflare.com";
+    private const string DefaultServerUrl = "https://ferry-cams-mention-montreal.trycloudflare.com";
     private readonly WebView2 webView = new() { Dock = DockStyle.Fill };
     private readonly WindowsAiBridgeManager aiBridge = new();
     private readonly NotifyIcon trayIcon = new();
@@ -165,6 +165,26 @@ internal sealed class RelayForm : Form
                     if (requestId is null) return;
                     WindowsAiCredentials.Delete(root.GetProperty("provider").GetString() ?? "");
                     SendNativeResponse(requestId, AiSettingsPayload());
+                    break;
+                case "getAccountCredential":
+                    if (requestId is null) return;
+                    var credential = WindowsAccountCredentials.Read();
+                    SendNativeResponse(requestId, credential is null
+                        ? new { }
+                        : new { email = credential.Value.Email, accountToken = credential.Value.AccountToken });
+                    break;
+                case "saveAccountCredential":
+                    if (requestId is null) return;
+                    WindowsAccountCredentials.Save(
+                        root.GetProperty("email").GetString() ?? "",
+                        root.GetProperty("accountToken").GetString() ?? ""
+                    );
+                    SendNativeResponse(requestId, new { saved = true });
+                    break;
+                case "deleteAccountCredential":
+                    if (requestId is null) return;
+                    WindowsAccountCredentials.Delete();
+                    SendNativeResponse(requestId, new { deleted = true });
                     break;
             }
         }

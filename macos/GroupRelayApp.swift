@@ -161,6 +161,21 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
                 guard let requestId, let provider = body["provider"] as? String else { return }
                 try deleteAPIKey(provider: provider)
                 sendNativeResponse(requestId: requestId, result: aiSettingsPayload())
+            case "getAccountCredential":
+                guard let requestId else { return }
+                sendNativeResponse(requestId: requestId, result: accountCredential() ?? [:])
+            case "saveAccountCredential":
+                guard
+                    let requestId,
+                    let email = body["email"] as? String,
+                    let accountToken = body["accountToken"] as? String
+                else { return }
+                try saveAccountCredential(email: email, accountToken: accountToken)
+                sendNativeResponse(requestId: requestId, result: ["saved": true])
+            case "deleteAccountCredential":
+                guard let requestId else { return }
+                try? FileManager.default.removeItem(at: accountCredentialURL)
+                sendNativeResponse(requestId: requestId, result: ["deleted": true])
             default:
                 return
             }
@@ -182,6 +197,36 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     private var appLogURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Group Relay/app.log")
+    }
+
+    private var accountCredentialURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".group-relay/account-credential.json")
+    }
+
+    private func accountCredential() -> [String: Any]? {
+        guard
+            let value = jsonObject(at: accountCredentialURL),
+            let email = value["email"] as? String,
+            email.contains("@"),
+            let accountToken = value["accountToken"] as? String,
+            !accountToken.isEmpty
+        else { return nil }
+        return ["email": email, "accountToken": accountToken]
+    }
+
+    private func saveAccountCredential(email: String, accountToken: String) throws {
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let token = accountToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            normalizedEmail.contains("@"),
+            normalizedEmail.utf8.count <= 254,
+            !token.isEmpty,
+            token.utf8.count <= 10_000
+        else {
+            throw NSError(domain: "GroupRelay", code: 24, userInfo: [NSLocalizedDescriptionKey: "账户凭证无效"])
+        }
+        try writeJSONObject(["email": normalizedEmail, "accountToken": token], to: accountCredentialURL)
     }
 
     private func writeAppLog(_ message: String) {

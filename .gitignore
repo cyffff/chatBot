@@ -3,6 +3,8 @@ data/
 build/
 dist/
 windows/publish/
+windows/bin/
+windows/obj/
 .env
 .group-relay-agent.json
 .group-relay-agent.json.presence
