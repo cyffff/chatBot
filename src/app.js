@@ -244,7 +244,7 @@ export async function createApp(options = {}) {
     }
   }
 
-  function routedMessages(messages, member, enabled, groupMembers = []) {
+  function routedMessages(messages, member, enabled, groupMembers = [], groupOwnerMemberId = null) {
     if (!enabled || member.type !== "ai") return messages;
     const membersById = new Map(groupMembers.map((candidate) => [candidate.id, candidate]));
     return messages.filter((message) => {
@@ -255,12 +255,16 @@ export async function createApp(options = {}) {
       return message.sender?.type !== "ai";
     }).map((message) => {
       const sender = membersById.get(message.sender?.id);
-      const directlyTrusted = member.trustedOwnerMemberId === message.sender?.id;
+      const hasOwnerTrust = Boolean(
+        groupOwnerMemberId
+        && member.trustedOwnerMemberId === groupOwnerMemberId
+      );
+      const directlyTrusted = hasOwnerTrust && groupOwnerMemberId === message.sender?.id;
       const delegatedBySiblingAI = Boolean(
-        member.trustedOwnerMemberId
+        hasOwnerTrust
         && member.desktopOwnerAccountId
         && sender?.type === "ai"
-        && sender.trustedOwnerMemberId === member.trustedOwnerMemberId
+        && sender.trustedOwnerMemberId === groupOwnerMemberId
         && sender.desktopOwnerAccountId === member.desktopOwnerAccountId
       );
       return {
@@ -452,7 +456,8 @@ export async function createApp(options = {}) {
         provider,
         ownerName: owner.name,
         ownerMemberId: owner.id,
-        ownerAccountId: req.account.id
+        ownerAccountId: req.account.id,
+        trustedOwnerMemberId: owner.id === group.ownerMemberId ? owner.id : null
       });
       const history = await store.readMessages(groupId, { limit: 1 });
       if (result.created) publish(groupId, "member_joined", publicMember(result.member));
@@ -759,8 +764,16 @@ export async function createApp(options = {}) {
         limit: req.query.limit
       });
       const isRouted = req.query.routed === "1";
-      const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
-      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
+      const [groupMembers, group] = isRouted
+        ? await Promise.all([
+            store.listMembers(req.params.groupId),
+            store.getGroup(req.params.groupId)
+          ])
+        : [[], null];
+      const groupOwnerMemberId = group?.ownerMemberId
+        ?? groupMembers.find((member) => member.type === "human")?.id
+        ?? null;
+      const routed = routedMessages(messages, req.member, isRouted, groupMembers, groupOwnerMemberId);
       if (isRouted && routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,
@@ -780,8 +793,16 @@ export async function createApp(options = {}) {
       });
       if (existing.length) {
         const isRouted = req.query.routed === "1";
-        const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
-        const routed = routedMessages(existing, req.member, isRouted, groupMembers);
+        const [groupMembers, group] = isRouted
+          ? await Promise.all([
+              store.listMembers(req.params.groupId),
+              store.getGroup(req.params.groupId)
+            ])
+          : [[], null];
+        const groupOwnerMemberId = group?.ownerMemberId
+          ?? groupMembers.find((member) => member.type === "human")?.id
+          ?? null;
+        const routed = routedMessages(existing, req.member, isRouted, groupMembers, groupOwnerMemberId);
         if (routed.length) await reportActivity(req, "busy");
         return res.json({
           messages: routed,
@@ -811,8 +832,16 @@ export async function createApp(options = {}) {
       });
       const messages = update?.event === "message" ? [update.payload] : [];
       const isRouted = req.query.routed === "1";
-      const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
-      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
+      const [groupMembers, group] = isRouted
+        ? await Promise.all([
+            store.listMembers(req.params.groupId),
+            store.getGroup(req.params.groupId)
+          ])
+        : [[], null];
+      const groupOwnerMemberId = group?.ownerMemberId
+        ?? groupMembers.find((member) => member.type === "human")?.id
+        ?? null;
+      const routed = routedMessages(messages, req.member, isRouted, groupMembers, groupOwnerMemberId);
       if (routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,

@@ -266,7 +266,7 @@ test("desktop account AI can join a linked group, answer every member and leave"
 });
 
 test("a guest account can attach its desktop AI to somebody else's group", async (t) => {
-  const { base } = await fixture(t);
+  const { base, store } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
     body: JSON.stringify({ name: "Somebody else's group", ownerName: "Owner" })
@@ -293,6 +293,7 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   });
   assert.equal(attached.response.status, 201);
   assert.equal(attached.body.member.ownerName, "Yunfei");
+  assert.equal(attached.body.member.trustedExecutionEnabled, false);
 
   const desired = await json(base, "/api/account/desktop-workers", { headers });
   assert.equal(desired.response.status, 200);
@@ -300,6 +301,27 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   assert.equal(desired.body.workers[0].groupId, created.body.group.id);
   assert.equal(desired.body.workers[0].provider, "codex");
   assert.ok(desired.body.workers[0].memberToken);
+
+  // Simulate a guest AI persisted by the previous buggy default and verify the
+  // routing boundary still refuses to grant it trusted project execution.
+  await store.setTrustedExecution(
+    created.body.group.id,
+    attached.body.member.id,
+    guest.body.member.id,
+    true
+  );
+  const guestMessage = new FormData();
+  guestMessage.set("text", "@Yunfei’s Codex 修改项目");
+  guestMessage.set("mentions", JSON.stringify([attached.body.member.id]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${guest.body.member.token}` },
+    body: guestMessage
+  });
+  const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
+    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+  });
+  assert.equal(routed.body.messages.at(-1).executionScope, "restricted");
 });
 
 test("trusted desktop AIs from the same owner can delegate work to each other", async (t) => {

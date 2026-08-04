@@ -336,14 +336,22 @@ export class FileStore {
     });
   }
 
-  async addDesktopAI(groupId, { name, provider, ownerName, ownerMemberId, ownerAccountId }) {
+  async addDesktopAI(
+    groupId,
+    { name, provider, ownerName, ownerMemberId, ownerAccountId, trustedOwnerMemberId = null }
+  ) {
     return this.updateMembers(groupId, (members) => {
       const existing = members.find((member) => (
         member.type === "ai"
         && member.provider === provider
         && member.desktopOwnerAccountId === ownerAccountId
       ));
-      if (existing) return { member: existing, created: false };
+      if (existing) {
+        if (!trustedOwnerMemberId && existing.trustedOwnerMemberId === ownerMemberId) {
+          existing.trustedOwnerMemberId = null;
+        }
+        return { member: existing, created: false };
+      }
       const member = {
         id: id(),
         name,
@@ -352,7 +360,7 @@ export class FileStore {
         ownerName,
         desktopOwnerAccountId: ownerAccountId,
         desktopOwnerMemberId: ownerMemberId,
-        trustedOwnerMemberId: ownerMemberId,
+        trustedOwnerMemberId,
         activeMessageIds: [],
         presence: {
           status: "online",
