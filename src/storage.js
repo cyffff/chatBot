@@ -191,10 +191,11 @@ export class FileStore {
   }
 
   groupIdsFor(account) {
-    return [
+    // 去重是不变式:建群和加入两边理论上不该有同一个 id,真出现了也不该把群列两遍。
+    return [...new Set([
       ...(account.createdGroups ?? []).map((group) => group.id),
       ...(account.joinedGroups ?? [])
-    ];
+    ])];
   }
 
   // ── 任务与审批(存 id 引用,不存正文)─────────────────────────────────────────
@@ -386,6 +387,125 @@ export class FileStore {
       if (payload) payloads.push(payload);
     }
     return payloads;
+  }
+
+  /// 旧的本机账号(device-…)回来登录时,把它名下的一切并到真正的邮箱账号:群、加入关系、
+  /// 名下的 AI,连缓冲区里的成员 id 一起改写。不做的话这个人绑了邮箱也看不到自己的群 ——
+  /// 那些群是挂在设备身份下的。
+  async claimDeviceAccount(deviceEmail, targetEmail) {
+    const from = normalizeEmail(deviceEmail);
+    const to = normalizeEmail(targetEmail);
+    if (!from || !to || from === to) return null;
+    const accounts = await this.accounts();
+    if (!accounts[from]) return null;
+    await this.ensureAccount(to);
+
+    const moved = { groups: 0, joined: 0, ais: 0, rewritten: 0 };
+    const touchedGroups = new Set();
+    const result = await this.updateAccounts((current) => {
+      const source = current[from];
+      const target = current[to];
+      if (!source || !target) return null;
+      for (const group of source.createdGroups) {
+        // 这个群可能已经在目标账号的「加入」里(claim 之前他是以成员身份在里面的)。
+        // 不摘掉的话建群和加入两处都有同一个 id,群列表会重复一条。
+        target.joinedGroups = target.joinedGroups.filter((id) => id !== group.id);
+        if (target.createdGroups.some((candidate) => candidate.id === group.id)) continue;
+        target.createdGroups.push(group);
+        touchedGroups.add(group.id);
+        moved.groups += 1;
+      }
+      for (const groupId of source.joinedGroups) {
+        const known = target.createdGroups.some((group) => group.id === groupId)
+          || target.joinedGroups.includes(groupId);
+        touchedGroups.add(groupId);
+        if (known) continue;
+        target.joinedGroups.push(groupId);
+        moved.joined += 1;
+      }
+      for (const ai of source.ais) {
+        touchedGroups.add(ai.groupId);
+        const clash = target.ais
+          .some((candidate) => candidate.groupId === ai.groupId && candidate.provider === ai.provider);
+        if (clash) continue;
+        target.ais.push(ai);
+        moved.ais += 1;
+      }
+      // 设备账号留成空壳:删掉的话,还拿着它登录的客户端会直接 404,不如让它变成一个
+      // 什么都没有的身份,绑定后的邮箱才是本体。
+      source.createdGroups = [];
+      source.joinedGroups = [];
+      source.ais = [];
+      return moved;
+    });
+    if (!result) return null;
+
+    const renames = new Map([[humanMemberId(from), humanMemberId(to)]]);
+    for (const provider of ["codex", "claude", "cursor"]) {
+      renames.set(aiMemberId(from, provider), aiMemberId(to, provider));
+    }
+    for (const groupId of touchedGroups) {
+      moved.rewritten += await this.rewriteMemberIds(groupId, renames);
+    }
+    return { from, to, ...moved };
+  }
+
+  /// 缓冲区里的消息、任务和审批都按成员 id 引用发言人和 @ 对象。身份换了不跟着改的话,
+  /// 旧消息的 @mention 全部失配,AI 会把答过的再答一遍。
+  async rewriteMemberIds(groupId, renames) {
+    const swap = (value) => (typeof value === "string" ? renames.get(value) ?? value : value);
+    let changed = 0;
+    const messagesDir = path.join(this.groupDir(groupId), "messages");
+    for (const name of await fs.readdir(messagesDir).catch(() => [])) {
+      if (!/^\d{4}-\d{2}-\d{2}\.jsonl(?:\.gz)?$/.test(name)) continue;
+      const file = path.join(messagesDir, name);
+      const compressed = name.endsWith(".gz");
+      const messages = await this.readMessageFile(file);
+      let touched = false;
+      for (const message of messages) {
+        if (message.sender?.id && swap(message.sender.id) !== message.sender.id) {
+          message.sender.id = swap(message.sender.id);
+          touched = true;
+        }
+        for (const mention of message.mentions ?? []) {
+          if (swap(mention.id) !== mention.id) {
+            mention.id = swap(mention.id);
+            touched = true;
+          }
+        }
+        if (message.approval?.targetMemberId && swap(message.approval.targetMemberId) !== message.approval.targetMemberId) {
+          message.approval.targetMemberId = swap(message.approval.targetMemberId);
+          touched = true;
+        }
+      }
+      if (!touched) continue;
+      const body = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
+      await fs.writeFile(file, compressed ? await gzip(Buffer.from(body)) : body);
+      changed += messages.length;
+    }
+    for (const name of ["tasks.json", "approvals.json"]) {
+      const file = path.join(this.groupDir(groupId), name);
+      const records = await readJson(file);
+      if (!Array.isArray(records) || !records.length) continue;
+      let touched = false;
+      for (const record of records) {
+        if (record.ownerMemberId && swap(record.ownerMemberId) !== record.ownerMemberId) {
+          record.ownerMemberId = swap(record.ownerMemberId);
+          touched = true;
+        }
+        for (const key of ["assignee", "createdBy", "aiMember", "sender"]) {
+          if (record[key]?.id && swap(record[key].id) !== record[key].id) {
+            record[key].id = swap(record[key].id);
+            touched = true;
+          }
+        }
+      }
+      if (touched) {
+        await writeJsonAtomic(file, records);
+        changed += records.length;
+      }
+    }
+    return changed;
   }
 
   async importAccount(payload) {

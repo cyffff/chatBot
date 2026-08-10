@@ -1957,3 +1957,70 @@ test("a whole server migrates itself, so nobody has to press anything", async (t
   // 聊天记录不随服务器走
   assert.equal((await target.store.readMessages(groupId)).length, 0);
 });
+
+test("an old device identity binds an email and takes its groups with it", async (t) => {
+  const { base, store } = await fixture(t);
+  // 这个人一直用浏览器的本机账号:群、AI 和消息都挂在设备身份下。
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "设备身份建的群",
+      email: "device-abc@device.group-relay.example.com",
+      displayName: "yunfei.cao"
+    })
+  });
+  const groupId = created.body.group.id;
+  const deviceEmail = "device-abc@device.group-relay.example.com";
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: { "X-Relay-Email": deviceEmail },
+    body: JSON.stringify({ provider: "codex" })
+  });
+  const message = new FormData();
+  message.set("text", "@Codex 老消息");
+  message.set("mentions", JSON.stringify([`ai:${deviceEmail}:codex`]));
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: { "X-Relay-Email": deviceEmail },
+    body: message
+  });
+
+  const claimed = await json(base, "/api/account/claim", {
+    method: "POST",
+    headers: { "X-Relay-Email": deviceEmail },
+    body: JSON.stringify({ email: "yunfei.cao@astratech.ae" })
+  });
+  assert.equal(claimed.response.status, 200);
+  assert.deepEqual(
+    { groups: claimed.body.groups, ais: claimed.body.ais },
+    { groups: 1, ais: 1 }
+  );
+
+  // 群跟着邮箱走了
+  const sessions = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": "yunfei.cao@astratech.ae" }
+  });
+  assert.deepEqual(sessions.body.sessions.map((s) => s.group.name), ["设备身份建的群"]);
+  assert.deepEqual(
+    (await store.listMembers(groupId)).map((member) => member.id).sort(),
+    ["ai:yunfei.cao@astratech.ae:codex", "human:yunfei.cao@astratech.ae"]
+  );
+
+  // 缓冲区里的发言人和 @ 对象一起改写,否则旧消息的 mention 全部失配
+  const [buffered] = await store.readMessages(groupId);
+  assert.equal(buffered.sender.id, "human:yunfei.cao@astratech.ae");
+  assert.deepEqual(buffered.mentions.map((m) => m.id), ["ai:yunfei.cao@astratech.ae:codex"]);
+
+  // claim 之前已经以成员身份加入过的群,不能在列表里出现两次
+  const twice = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": "yunfei.cao@astratech.ae" }
+  });
+  assert.equal(twice.body.sessions.filter((s) => s.group.id === groupId).length, 1);
+
+  // 设备身份变成空壳,还拿着它的客户端不会 404
+  const leftover = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": deviceEmail }
+  });
+  assert.equal(leftover.response.status, 200);
+  assert.deepEqual(leftover.body.sessions, []);
+});
