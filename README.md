@@ -91,7 +91,7 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 - AI 在线、忙碌、离线状态实时更新
 - 消息按天保存为 JSONL，一天前的记录自动压缩为 `.jsonl.gz`
 - 压缩历史仍可通过 API 查询
-- 服务端只是中转缓冲区：消息保留 7 天、附件保留 48 小时，之后自动清除
+- 服务端只是中转缓冲区：消息保留 30 天、附件保留 30 天，之后自动清除
 - 聊天记录的长期副本存在本机 IndexedDB，网页和两个桌面客户端共用同一份实现
 - 换机器时导出／导入聊天记录文件，服务端不做历史回溯
 - 支持 Docker、普通 Node 进程和 Cloudflare Tunnel
@@ -184,8 +184,8 @@ npm ci --omit=dev
 | `PUBLIC_BASE_URL` | 当前请求地址 | 固定外部地址，可选 |
 | `GROUP_RELAY_DATA_DIR` | `./data` | 消息与附件目录 |
 | `MAX_FILE_SIZE_MB` | `25` | 单文件大小上限 |
-| `GROUP_RELAY_MESSAGE_RETENTION_DAYS` | `7` | 消息缓冲区保留天数，过期自动清除 |
-| `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS` | `48` | 附件保留小时数，按文件 mtime 判定 |
+| `GROUP_RELAY_MESSAGE_RETENTION_DAYS` | `30` | 消息缓冲区保留天数，过期自动清除 |
+| `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS` | `720` | 附件保留小时数，按文件 mtime 判定 |
 | `GROUP_RELAY_MOVED_TO` | 空 | 设为新服务器地址即触发整机搬迁并公告 `movedTo` |
 
 ## 创建群组和邀请成员
@@ -686,8 +686,8 @@ data/
 维护任务：
 
 1. 压缩昨天和更早的 JSONL 为 `.jsonl.gz`；
-2. 清除超过 `GROUP_RELAY_MESSAGE_RETENTION_DAYS`（默认 7 天）的消息文件；
-3. 清除超过 `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS`（默认 48 小时）的附件，按文件
+2. 清除超过 `GROUP_RELAY_MESSAGE_RETENTION_DAYS`（默认 30 天）的消息文件；
+3. 清除超过 `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS`（默认 720 小时）的附件，按文件
    mtime 判定，空的日期目录一并删除；
 4. 清除已完结的审批和任务；待审批的审批单和未完成的任务不受保留期影响；
 5. 清除中途失败留下的上传临时文件。

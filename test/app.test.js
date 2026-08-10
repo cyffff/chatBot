@@ -2011,6 +2011,9 @@ test("an old device identity binds an email and takes its groups with it", async
   assert.equal(buffered.sender.id, "human:yunfei.cao@astratech.ae");
   assert.deepEqual(buffered.mentions.map((m) => m.id), ["ai:yunfei.cao@astratech.ae:codex"]);
 
+  // 群里的人认的是设备身份那个昵称,继承过来(目标账号从没设过昵称时)
+  assert.equal((await store.accountByEmail("yunfei.cao@astratech.ae")).displayName, "yunfei.cao");
+
   // claim 之前已经以成员身份加入过的群,不能在列表里出现两次
   const twice = await json(base, "/api/account/sessions", {
     headers: { "X-Relay-Email": "yunfei.cao@astratech.ae" }

@@ -32,8 +32,8 @@ const server = app.listen(port, host, () => {
   console.log(`Group Relay listening on http://${host}:${port}`);
 });
 
-const messageDays = Number(process.env.GROUP_RELAY_MESSAGE_RETENTION_DAYS ?? 7);
-const attachmentHours = Number(process.env.GROUP_RELAY_ATTACHMENT_RETENTION_HOURS ?? 48);
+const messageDays = Number(process.env.GROUP_RELAY_MESSAGE_RETENTION_DAYS ?? 30);
+const attachmentHours = Number(process.env.GROUP_RELAY_ATTACHMENT_RETENTION_HOURS ?? 720);
 
 // 服务端只是中转缓冲区。每小时跑一次:先把昨天及更早的 JSONL 压成 .gz,再回收过了保留期的
 // 消息、附件和已完结的审批/任务。长期副本在各人自己的客户端里。

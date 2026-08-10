@@ -20,8 +20,8 @@ services:
     # 1G 内存的机器上留出余量给系统和 cloudflared,并且让 OOM 落在容器而不是整机。
     mem_limit: 512m
     environment:
-      GROUP_RELAY_MESSAGE_RETENTION_DAYS: "7"
-      GROUP_RELAY_ATTACHMENT_RETENTION_HOURS: "48"
+      GROUP_RELAY_MESSAGE_RETENTION_DAYS: "30"
+      GROUP_RELAY_ATTACHMENT_RETENTION_HOURS: "720"
       NODE_OPTIONS: "--max-old-space-size=384"
       # 整机搬迁地址,平时留空。填了之后这台启动时把所有账号推给新服务器并公告 movedTo。
       GROUP_RELAY_MOVED_TO: "${GROUP_RELAY_MOVED_TO:-}"
