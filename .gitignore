@@ -13,3 +13,4 @@ windows/obj/
 .claude-relay.json
 .cursor-relay.json
 npm-debug.log*
+data-dev/

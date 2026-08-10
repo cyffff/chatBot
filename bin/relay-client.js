@@ -80,11 +80,12 @@ async function loadCodexConnection(name) {
   const config = {
     baseUrl: value("GROUP_RELAY_URL")?.replace(/\/$/, ""),
     groupId: value("GROUP_RELAY_GROUP_ID"),
-    memberToken: value("GROUP_RELAY_MEMBER_TOKEN"),
+    email: value("GROUP_RELAY_EMAIL"),
+    provider: value("GROUP_RELAY_PROVIDER"),
     connectionName: name,
     cursor: null
   };
-  if (!config.baseUrl || !config.groupId || !config.memberToken) {
+  if (!config.baseUrl || !config.groupId || !(config.email || config.memberToken)) {
     throw new Error(`Codex MCP connection "${name}" is missing Group Relay settings.`);
   }
   return config;
@@ -177,7 +178,11 @@ async function reportPresence(config, status, { persist = true } = {}) {
 
 async function request(config, pathname, options = {}) {
   const headers = new Headers(options.headers);
-  if (config.memberToken) headers.set("Authorization", `Bearer ${config.memberToken}`);
+  // 身份是 email(+provider)。迁移前建的 session 配置里只有 memberToken,
+  // 这时退回旧头让服务端的宽限期认它,而不是直接失败。
+  if (config.email) headers.set("X-Relay-Email", config.email);
+  else if (config.memberToken) headers.set("Authorization", `Bearer ${config.memberToken}`);
+  if (config.provider) headers.set("X-Relay-Provider", config.provider);
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const retryable = !options.method
     || ["GET", "HEAD"].includes(options.method.toUpperCase())
@@ -215,13 +220,15 @@ async function join() {
   const background = flag("background");
   const provider = option("provider");
   const ownerName = option("owner");
+  // AI 用主人的 email 作为身份;服务端不再发成员 token。
+  const email = option("email") ?? process.env.GROUP_RELAY_EMAIL;
   const name = option("name", providerName(provider));
   const agentBin = option("agent-bin");
   const model = option("model");
   const workspace = option("workspace");
-  if (!inviteUrl || !provider || !ownerName || !["codex", "claude", "cursor"].includes(provider)) {
+  if (!inviteUrl || !provider || !ownerName || !email || !["codex", "claude", "cursor"].includes(provider)) {
     throw new Error(
-      "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>]"
+      "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> --email <owner-email> [--name <AI name>]"
     );
   }
   const url = new URL(inviteUrl);
@@ -269,7 +276,7 @@ async function join() {
       }, null, 2));
       return;
     } catch (error) {
-      if (error.message !== "invalid member token") throw error;
+      if (error.message !== "not a member of this group") throw error;
       previous = null;
     }
   }
@@ -278,14 +285,14 @@ async function join() {
     `/api/invites/${encodeURIComponent(match[1])}/join`,
     {
       method: "POST",
-      body: JSON.stringify({ name, type: "ai", provider, ownerName })
+      body: JSON.stringify({ email, name, type: "ai", provider })
     }
   );
   const config = {
     baseUrl,
     groupId: joinResponse.group.id,
     memberId: joinResponse.member.id,
-    memberToken: joinResponse.member.token,
+    email,
     memberName: name,
     provider,
     ownerName,
@@ -573,7 +580,7 @@ const commands = {
 
 if (!commands[command]) {
   console.error(`Usage:
-  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
+  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> --email <owner-email> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
   npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
   npm run relay -- background --session <session-id> [--disable]
   npm run relay -- status --session <session-id>

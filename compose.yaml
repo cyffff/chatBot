@@ -1,3 +1,11 @@
+# json-file 默认没有上限,在 30G 的小盘上容器日志比应用数据危险一个数量级 ——
+# 应用数据是 MB/年,日志能无声吃满整块盘。两个服务都封顶 30MB。
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   group-relay:
     build:
@@ -8,6 +16,13 @@ services:
       - "127.0.0.1:8787:8787"
     volumes:
       - group-relay-data:/app/data
+    logging: *logging
+    # 1G 内存的机器上留出余量给系统和 cloudflared,并且让 OOM 落在容器而不是整机。
+    mem_limit: 512m
+    environment:
+      GROUP_RELAY_MESSAGE_RETENTION_DAYS: "7"
+      GROUP_RELAY_ATTACHMENT_RETENTION_HOURS: "48"
+      NODE_OPTIONS: "--max-old-space-size=384"
 
   cloudflared:
     image: cloudflare/cloudflared:2026.7.3
@@ -17,6 +32,8 @@ services:
     depends_on:
       group-relay:
         condition: service_healthy
+    logging: *logging
+    mem_limit: 128m
 
 volumes:
   group-relay-data:

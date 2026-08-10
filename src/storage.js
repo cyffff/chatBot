@@ -3,12 +3,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
+import { migrateLegacyData } from "./migrate-legacy.js";
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
 const id = () => crypto.randomUUID();
 const secret = () => crypto.randomBytes(24).toString("base64url");
+const normalizeEmail = (email) => String(email ?? "").trim().toLocaleLowerCase("en-US");
+// 成员 id 由 email 推出来,所以服务端不需要保存任何 id → 身份的映射。
+const humanMemberId = (email) => `human:${normalizeEmail(email)}`;
+const aiMemberId = (email, provider) => `ai:${normalizeEmail(email)}:${provider}`;
+const exportFormat = "group-relay-account-sync";
 const dayOf = (iso = new Date().toISOString()) => iso.slice(0, 10);
 
 async function exists(file) {
@@ -38,14 +44,31 @@ function parseJsonl(text) {
     .map((line) => JSON.parse(line));
 }
 
+async function moveFile(source, target) {
+  try {
+    await fs.rename(source, target);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    await fs.copyFile(source, target);
+    await fs.unlink(source);
+  }
+}
+
+async function removeIfEmpty(dir) {
+  const remaining = await fs.readdir(dir).catch(() => ["keep"]);
+  if (!remaining.length) await fs.rm(dir, { recursive: true, force: true });
+}
+
 export class FileStore {
   constructor(root) {
     this.root = path.resolve(root);
     this.groupsDir = path.join(this.root, "groups");
-    this.invitesFile = path.join(this.root, "invites.json");
     this.accountsFile = path.join(this.root, "accounts.json");
+    this.uploadTempDir = path.join(this.root, "tmp", "uploads");
+    this.groupsById = new Map();
+    this.invitesByToken = new Map();
+    this.presenceByMember = new Map();
     this.writeQueues = new Map();
-    this.memberQueues = new Map();
     this.taskQueues = new Map();
     this.approvalQueues = new Map();
     this.accountQueue = Promise.resolve();
@@ -53,8 +76,20 @@ export class FileStore {
 
   async init() {
     await fs.mkdir(this.groupsDir, { recursive: true });
-    if (!(await exists(this.invitesFile))) await writeJsonAtomic(this.invitesFile, {});
+    await fs.mkdir(this.uploadTempDir, { recursive: true });
     if (!(await exists(this.accountsFile))) await writeJsonAtomic(this.accountsFile, {});
+    // 旧格式(members.json / invites.json / 带 token 的账号)会在这里一次性转成
+    // 按 email 归档的新格式,幂等,靠 marker 文件保证只跑一次。
+    this.migration = await migrateLegacyData(this.root);
+    this.legacyTokens = await readJson(path.join(this.root, "legacy-tokens.json")).catch(() => ({}));
+    this.indexGroups(await this.accounts());
+  }
+
+  /// 迁移后的一次性宽限:旧客户端手里只有 token,拿它换回自己的 email,存下来之后
+  /// 就再也不用了。删掉 data/legacy-tokens.json 即结束宽限期。
+  emailForLegacyToken(token) {
+    if (!token) return null;
+    return this.legacyTokens?.[token] ?? null;
   }
 
   groupDir(groupId) {
@@ -62,58 +97,12 @@ export class FileStore {
     return path.join(this.groupsDir, groupId);
   }
 
-  async createGroup({ name, ownerName }) {
-    const groupId = id();
-    const inviteToken = secret();
-    const owner = {
-      id: id(),
-      name: ownerName,
-      type: "human",
-      provider: null,
-      token: secret(),
-      joinedAt: new Date().toISOString()
-    };
-    const group = {
-      id: groupId,
-      name,
-      createdAt: new Date().toISOString(),
-      inviteToken,
-      ownerMemberId: owner.id
-    };
-    const dir = this.groupDir(groupId);
-    await fs.mkdir(path.join(dir, "messages"), { recursive: true });
-    await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
-    await writeJsonAtomic(path.join(dir, "group.json"), group);
-    await writeJsonAtomic(path.join(dir, "members.json"), [owner]);
-    await writeJsonAtomic(path.join(dir, "tasks.json"), []);
-    await writeJsonAtomic(path.join(dir, "approvals.json"), []);
-    const invites = await readJson(this.invitesFile);
-    invites[inviteToken] = groupId;
-    await writeJsonAtomic(this.invitesFile, invites);
-    return { group, owner };
-  }
-
-  async groupFromInvite(inviteToken) {
-    const invites = await readJson(this.invitesFile);
-    const groupId = invites[inviteToken];
-    if (!groupId) return null;
-    return this.getGroup(groupId);
-  }
-
-  async getGroup(groupId) {
-    const dir = this.groupDir(groupId);
-    if (!(await exists(path.join(dir, "group.json")))) return null;
-    return readJson(path.join(dir, "group.json"));
-  }
-
-  async listMembers(groupId) {
-    return readJson(path.join(this.groupDir(groupId), "members.json"));
-  }
-
-  async authenticate(groupId, token) {
-    if (!token) return null;
-    return (await this.listMembers(groupId)).find((member) => member.token === token) ?? null;
-  }
+  // ── 账号即身份 ───────────────────────────────────────────────────────────────
+  // 远端只存 email、这个 email 创建的群组、以及它加入的群组 id。群成员名册不再是
+  // 每群一份的 members.json,而是从所有账号里推导出来的;邀请 token → groupId 同理。
+  // 成员 id 由 email 决定,所以不需要任何映射表:human:<email> / ai:<email>:<provider>。
+  //
+  // 没有鉴权:知道 email 和群 id 就能读写。这是明确的产品决定,不是遗漏。
 
   async accounts() {
     return readJson(this.accountsFile);
@@ -124,42 +113,62 @@ export class FileStore {
       const accounts = await this.accounts();
       const result = await update(accounts);
       await writeJsonAtomic(this.accountsFile, accounts);
+      this.indexGroups(accounts);
       return result;
     });
     this.accountQueue = next.catch(() => {});
     return next;
   }
 
-  async createAccount(email) {
-    const normalizedEmail = email.trim().toLocaleLowerCase("en-US");
+  /// 群组和邀请 token 都散在各账号的 createdGroups 里,每次请求全表扫会很蠢,
+  /// 所以写完就重建两张内存索引;accounts.json 仍是唯一真源。
+  indexGroups(accounts) {
+    this.groupsById = new Map();
+    this.invitesByToken = new Map();
+    for (const account of Object.values(accounts)) {
+      for (const group of account.createdGroups ?? []) {
+        this.groupsById.set(group.id, { ...group, ownerEmail: account.email });
+        this.invitesByToken.set(group.inviteToken, group.id);
+      }
+    }
+  }
+
+  emailOf(value) {
+    return normalizeEmail(value);
+  }
+
+  async ensureAccount(email, displayName) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return null;
     return this.updateAccounts((accounts) => {
-      if (Object.values(accounts).some((account) => account.normalizedEmail === normalizedEmail)) {
-        return null;
+      const existing = accounts[normalized];
+      if (existing) {
+        if (displayName) existing.displayName = displayName;
+        return existing;
       }
       const account = {
-        id: id(),
-        email: normalizedEmail,
-        normalizedEmail,
-        displayName: normalizedEmail.split("@")[0],
+        email: normalized,
+        displayName: displayName || normalized.split("@")[0],
         avatarDataUrl: null,
-        token: secret(),
         createdAt: new Date().toISOString(),
-        memberships: []
+        createdGroups: [],
+        joinedGroups: [],
+        ais: []
       };
-      accounts[account.id] = account;
+      accounts[normalized] = account;
       return account;
     });
   }
 
-  async authenticateAccount(token) {
-    if (!token) return null;
-    return Object.values(await this.accounts())
-      .find((account) => account.token === token) ?? null;
+  async accountByEmail(email) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return null;
+    return (await this.accounts())[normalized] ?? null;
   }
 
-  async updateAccountProfile(accountId, profile) {
+  async updateAccountProfile(email, profile) {
     return this.updateAccounts((accounts) => {
-      const account = accounts[accountId];
+      const account = accounts[normalizeEmail(email)];
       if (!account) return null;
       account.displayName = profile.displayName;
       account.avatarDataUrl = profile.avatarDataUrl;
@@ -168,59 +177,27 @@ export class FileStore {
     });
   }
 
-  async renameAccountMemberships(account, displayName) {
-    const updated = [];
-    for (const membership of account.memberships ?? []) {
-      const members = await this.updateMembers(membership.groupId, (items) => {
-        const changed = [];
-        const human = items.find((member) => member.id === membership.memberId && member.type === "human");
-        if (human && human.name !== displayName) {
-          human.name = displayName;
-          changed.push(human);
-        }
-        for (const member of items) {
-          if (member.type === "ai" && member.desktopOwnerAccountId === account.id && member.ownerName !== displayName) {
-            member.ownerName = displayName;
-            changed.push(member);
-          }
-        }
-        return changed;
-      }).catch(() => []);
-      updated.push(...members.map((member) => ({ groupId: membership.groupId, member })));
-    }
-    return updated;
+  /// 改昵称会影响这个 email 在所有群里的显示名和它名下 AI 的 ownerName —— 名册是
+  /// 推导出来的,所以改一处就够,不需要遍历每个群去改副本。
+  async renameAccount(email, displayName) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      if (!found) return null;
+      found.displayName = displayName;
+      return found;
+    });
+    if (!account) return [];
+    return this.groupIdsFor(account).map((groupId) => ({ groupId, account }));
   }
 
-  async linkAccountMemberships(accountId, memberships) {
-    return this.updateAccounts((accounts) => {
-      const account = accounts[accountId];
-      if (!account) return null;
-      for (const membership of memberships) {
-        const existing = account.memberships.find((item) => item.groupId === membership.groupId);
-        if (existing) {
-          existing.memberId = membership.memberId;
-          existing.memberToken = membership.memberToken;
-          existing.linkedAt = new Date().toISOString();
-        } else {
-          account.memberships.push({
-            ...membership,
-            linkedAt: new Date().toISOString()
-          });
-        }
-      }
-      return account;
-    });
+  groupIdsFor(account) {
+    return [
+      ...(account.createdGroups ?? []).map((group) => group.id),
+      ...(account.joinedGroups ?? [])
+    ];
   }
 
-  async unlinkAccountMembership(accountId, groupId) {
-    return this.updateAccounts((accounts) => {
-      const account = accounts[accountId];
-      if (!account) return false;
-      const before = account.memberships.length;
-      account.memberships = account.memberships.filter((membership) => membership.groupId !== groupId);
-      return account.memberships.length !== before;
-    });
-  }
+  // ── 任务与审批(存 id 引用,不存正文)─────────────────────────────────────────
 
   async listTasks(groupId) {
     const file = path.join(this.groupDir(groupId), "tasks.json");
@@ -272,11 +249,9 @@ export class FileStore {
         groupId,
         ownerMemberId,
         sourceMessageId: sourceMessage.id,
-        source: {
-          text: sourceMessage.text,
-          sender: sourceMessage.sender,
-          attachments: sourceMessage.attachments ?? []
-        },
+        // 只留 id 引用。原来这里内嵌了 text/sender/attachments 整份原文,那是消息内容存在
+        // 服务端,而且会比保留期活得更久。要正文的地方按 id 从缓冲区(或客户端本地库)取。
+        sender: { id: sourceMessage.sender.id, name: sourceMessage.sender.name },
         aiMember: {
           id: aiMember.id,
           name: aiMember.name,
@@ -324,7 +299,8 @@ export class FileStore {
             groupId,
             sourceMessageId: message.id,
             responseMessageId: null,
-            title: jira.title,
+            // 只留 id 引用:标题和进展原来是消息正文的副本。看板文案由客户端按 id 从本机
+            // 记录里取,取不到就退回 Jira key。
             jira: { key: jira.key, url: jira.url },
             assignee: {
               id: assignee.id,
@@ -337,8 +313,6 @@ export class FileStore {
               name: message.sender.name
             },
             status: "assigned",
-            progress: null,
-            report: null,
             createdAt: message.createdAt,
             updatedAt: message.createdAt,
             startedAt: null,
@@ -366,17 +340,10 @@ export class FileStore {
         if (message.status === "processing") {
           task.status = "in_progress";
           task.startedAt ??= now;
-          task.progress = message.text || task.progress;
-        } else if (message.status === "failed") {
-          task.status = "failed";
-          task.startedAt ??= now;
-          task.completedAt = now;
-          task.report = message.text || task.report;
         } else {
-          task.status = "completed";
+          task.status = message.status === "failed" ? "failed" : "completed";
           task.startedAt ??= now;
           task.completedAt = now;
-          task.report = message.text || task.report;
         }
         changed.push(task);
       }
@@ -384,126 +351,340 @@ export class FileStore {
     });
   }
 
-  async updateMembers(groupId, update) {
-    const previous = this.memberQueues.get(groupId) ?? Promise.resolve();
-    const next = previous.then(async () => {
-      const members = await this.listMembers(groupId);
-      const result = await update(members);
-      await writeJsonAtomic(path.join(this.groupDir(groupId), "members.json"), members);
-      return result;
-    });
-    this.memberQueues.set(groupId, next.catch(() => {}));
-    return next;
-  }
+  // ── 跨服务器同步 ────────────────────────────────────────────────────────────
+  // 换服务器时要带走的「我的数据」= 账号本身 + 它建的群 + 加入的群 id + 名下的 AI。
+  // 聊天记录不在里面:那份长期副本一直在客户端本地库里,跟着客户端走。
 
-  async setTrustedExecution(groupId, aiMemberId, ownerMemberId, enabled) {
-    return this.updateMembers(groupId, (members) => {
-      const member = members.find((candidate) => candidate.id === aiMemberId);
-      if (!member || member.type !== "ai") return null;
-      member.trustedOwnerMemberId = enabled ? ownerMemberId : null;
-      return member;
-    });
-  }
-
-  async addDesktopAI(
-    groupId,
-    { name, provider, ownerName, ownerMemberId, ownerAccountId, trustedOwnerMemberId = null }
-  ) {
-    return this.updateMembers(groupId, (members) => {
-      const existing = members.find((member) => (
-        member.type === "ai"
-        && member.provider === provider
-        && member.desktopOwnerAccountId === ownerAccountId
-      ));
-      if (existing) return { member: existing, created: false };
-      const member = {
-        id: id(),
-        name,
-        type: "ai",
-        provider,
-        ownerName,
-        desktopOwnerAccountId: ownerAccountId,
-        desktopOwnerMemberId: ownerMemberId,
-        trustedOwnerMemberId,
-        activeMessageIds: [],
-        presence: {
-          status: "online",
-          lastSeenAt: new Date().toISOString()
-        },
-        token: secret(),
-        joinedAt: new Date().toISOString()
-      };
-      members.push(member);
-      return { member, created: true };
-    });
-  }
-
-  async removeMember(groupId, memberId) {
-    return this.updateMembers(groupId, (members) => {
-      const index = members.findIndex((member) => member.id === memberId);
-      if (index < 0) return false;
-      members.splice(index, 1);
-      return true;
-    });
-  }
-
-  async updatePresence(groupId, memberId, status) {
-    return this.updateMembers(groupId, (members) => {
-      const member = members.find((candidate) => candidate.id === memberId);
-      if (!member || member.type !== "ai") return null;
-      member.presence = {
-        status: status === "online" && member.activeMessageIds?.length ? "busy" : status,
-        lastSeenAt: new Date().toISOString()
-      };
-      return member.presence;
-    });
-  }
-
-  async setMessageActivity(groupId, memberId, messageId, processing) {
-    return this.updateMembers(groupId, (members) => {
-      const member = members.find((candidate) => candidate.id === memberId);
-      if (!member || member.type !== "ai") return null;
-      const active = new Set(member.activeMessageIds ?? []);
-      if (processing) active.add(messageId);
-      else active.delete(messageId);
-      member.activeMessageIds = [...active];
-      member.presence = {
-        status: member.activeMessageIds.length ? "busy" : "online",
-        lastSeenAt: new Date().toISOString()
-      };
-      return member.presence;
-    });
-  }
-
-  async joinGroup(inviteToken, { name, type, provider, ownerName }) {
-    const group = await this.groupFromInvite(inviteToken);
-    if (!group) return null;
-    const member = {
-      id: id(),
-      name,
-      type,
-      provider: type === "ai" ? provider : null,
-      ownerName: type === "ai" ? ownerName : null,
-      presence: type === "ai" ? {
-        status: "online",
-        lastSeenAt: new Date().toISOString()
-      } : null,
-      token: secret(),
-      joinedAt: new Date().toISOString()
+  async exportAccount(email) {
+    const account = await this.accountByEmail(email);
+    if (!account) return null;
+    return {
+      format: exportFormat,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      account: {
+        email: account.email,
+        displayName: account.displayName,
+        avatarDataUrl: account.avatarDataUrl ?? null,
+        createdAt: account.createdAt
+      },
+      createdGroups: account.createdGroups ?? [],
+      joinedGroups: account.joinedGroups ?? [],
+      ais: account.ais ?? []
     };
-    await this.updateMembers(group.id, (members) => members.push(member));
-    return { group, member };
+  }
+
+  /// 幂等合并。群必须保留原来的 id 和邀请 token —— 客户端本地记录、桌面 worker 配置和
+  /// 已经发出去的邀请链接全都按 id 认群,重新生成等于把这些全断掉。
+  async importAccount(payload) {
+    if (payload?.format !== exportFormat) throw new Error("not a Group Relay account export");
+    const email = normalizeEmail(payload.account?.email);
+    if (!email) throw new Error("export is missing an email");
+    const result = await this.updateAccounts((accounts) => {
+      const account = accounts[email] ?? {
+        email,
+        displayName: payload.account.displayName || email.split("@")[0],
+        avatarDataUrl: payload.account.avatarDataUrl ?? null,
+        createdAt: payload.account.createdAt ?? new Date().toISOString(),
+        createdGroups: [],
+        joinedGroups: [],
+        ais: []
+      };
+      accounts[email] = account;
+      account.displayName = payload.account.displayName || account.displayName;
+      account.avatarDataUrl = payload.account.avatarDataUrl ?? account.avatarDataUrl;
+      const counts = { groups: 0, joined: 0, ais: 0 };
+      for (const group of payload.createdGroups ?? []) {
+        if (!group?.id || !group?.inviteToken) continue;
+        const existing = account.createdGroups.find((candidate) => candidate.id === group.id);
+        if (existing) {
+          existing.name = group.name ?? existing.name;
+          existing.inviteToken = group.inviteToken;
+          continue;
+        }
+        account.createdGroups.push({
+          id: group.id,
+          name: group.name ?? "",
+          createdAt: group.createdAt ?? new Date().toISOString(),
+          inviteToken: group.inviteToken
+        });
+        counts.groups += 1;
+      }
+      for (const groupId of payload.joinedGroups ?? []) {
+        const known = account.createdGroups.some((group) => group.id === groupId)
+          || account.joinedGroups.includes(groupId);
+        if (known) continue;
+        account.joinedGroups.push(groupId);
+        counts.joined += 1;
+      }
+      for (const ai of payload.ais ?? []) {
+        if (!ai?.groupId || !ai?.provider) continue;
+        const existing = account.ais
+          .find((candidate) => candidate.groupId === ai.groupId && candidate.provider === ai.provider);
+        if (existing) {
+          existing.name = ai.name ?? existing.name;
+          existing.trusted = Boolean(ai.trusted);
+          continue;
+        }
+        account.ais.push({
+          groupId: ai.groupId,
+          provider: ai.provider,
+          name: ai.name ?? ai.provider,
+          trusted: Boolean(ai.trusted),
+          joinedAt: ai.joinedAt ?? new Date().toISOString()
+        });
+        counts.ais += 1;
+      }
+      return counts;
+    });
+    // 群的目录结构要先建出来,否则第一条消息落不下去。
+    for (const group of payload.createdGroups ?? []) {
+      if (!group?.id || !/^[0-9a-f-]{36}$/i.test(group.id)) continue;
+      const dir = this.groupDir(group.id);
+      await fs.mkdir(path.join(dir, "messages"), { recursive: true });
+      await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
+      if (!(await exists(path.join(dir, "tasks.json")))) {
+        await writeJsonAtomic(path.join(dir, "tasks.json"), []);
+      }
+      if (!(await exists(path.join(dir, "approvals.json")))) {
+        await writeJsonAtomic(path.join(dir, "approvals.json"), []);
+      }
+    }
+    return { email, ...result };
+  }
+
+  // ── 群组 ────────────────────────────────────────────────────────────────────
+
+  async createGroup({ name, email, displayName }) {
+    const account = await this.ensureAccount(email, displayName);
+    if (!account) throw new Error("email is required to create a group");
+    const groupId = id();
+    const group = {
+      id: groupId,
+      name,
+      createdAt: new Date().toISOString(),
+      inviteToken: secret()
+    };
+    const dir = this.groupDir(groupId);
+    await fs.mkdir(path.join(dir, "messages"), { recursive: true });
+    await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
+    await writeJsonAtomic(path.join(dir, "tasks.json"), []);
+    await writeJsonAtomic(path.join(dir, "approvals.json"), []);
+    await this.updateAccounts((accounts) => {
+      accounts[account.email].createdGroups.push(group);
+    });
+    return { group: this.groupWithOwner(groupId), owner: await this.memberFor(groupId, account.email) };
+  }
+
+  groupWithOwner(groupId) {
+    const indexed = this.groupsById.get(groupId);
+    if (!indexed) return null;
+    const { ownerEmail, ...group } = indexed;
+    // ownerMemberId 是从建群人的 email 推出来的,调用方不用知道 email 也能比对成员。
+    return { ...group, ownerMemberId: humanMemberId(ownerEmail) };
+  }
+
+  async getGroup(groupId) {
+    if (!/^[0-9a-f-]{36}$/i.test(groupId)) throw new Error("invalid group id");
+    return this.groupWithOwner(groupId);
+  }
+
+  async groupFromInvite(inviteToken) {
+    const groupId = this.invitesByToken.get(inviteToken);
+    return groupId ? this.getGroup(groupId) : null;
   }
 
   async rotateInvite(groupId) {
-    const group = await this.getGroup(groupId);
-    const invites = await readJson(this.invitesFile);
-    delete invites[group.inviteToken];
-    group.inviteToken = secret();
-    invites[group.inviteToken] = groupId;
-    await writeJsonAtomic(path.join(this.groupDir(groupId), "group.json"), group);
-    await writeJsonAtomic(this.invitesFile, invites);
-    return group.inviteToken;
+    const indexed = this.groupsById.get(groupId);
+    if (!indexed) return null;
+    const inviteToken = secret();
+    await this.updateAccounts((accounts) => {
+      const group = accounts[indexed.ownerEmail]?.createdGroups
+        ?.find((candidate) => candidate.id === groupId);
+      if (group) group.inviteToken = inviteToken;
+    });
+    return inviteToken;
+  }
+
+  async joinGroup(inviteToken, { email, displayName }) {
+    const group = await this.groupFromInvite(inviteToken);
+    if (!group) return null;
+    const account = await this.ensureAccount(email, displayName);
+    if (!account) return null;
+    await this.updateAccounts((accounts) => {
+      const found = accounts[account.email];
+      const alreadyIn = found.createdGroups.some((candidate) => candidate.id === group.id)
+        || found.joinedGroups.includes(group.id);
+      if (!alreadyIn) found.joinedGroups.push(group.id);
+    });
+    return { group, member: await this.memberFor(group.id, account.email) };
+  }
+
+  /// 会话迁移用:把一批群 id 挂到这个 email 下。没有 token 可搬,搬的就是这层关系。
+  async linkGroups(email, groupIds) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[normalizeEmail(email)];
+      if (!account) return null;
+      for (const groupId of groupIds) {
+        const alreadyIn = account.createdGroups.some((group) => group.id === groupId)
+          || account.joinedGroups.includes(groupId);
+        if (!alreadyIn) account.joinedGroups.push(groupId);
+      }
+      return account;
+    });
+  }
+
+  async leaveGroup(groupId, email) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[normalizeEmail(email)];
+      if (!account) return false;
+      const before = account.joinedGroups.length + account.ais.length;
+      account.joinedGroups = account.joinedGroups.filter((candidate) => candidate !== groupId);
+      account.ais = account.ais.filter((ai) => ai.groupId !== groupId);
+      return account.joinedGroups.length + account.ais.length !== before;
+    });
+  }
+
+  // ── 成员(从账号推导,不落盘)──────────────────────────────────────────────────
+
+  /// presence 和 activeMessageIds 只活在内存里:心跳 45 秒一次、超时 90 秒,本来就是
+  /// 易失状态。放进 accounts.json 的话每次心跳都要整文件重写,9 个 worker 会把这台
+  /// 1G 的机器写穿。服务重启后 worker 会在一轮心跳内自己报回来。
+  livePresence(memberId) {
+    let live = this.presenceByMember.get(memberId);
+    if (!live) {
+      live = { status: "online", lastSeenAt: new Date().toISOString(), activeMessageIds: [] };
+      this.presenceByMember.set(memberId, live);
+    }
+    return live;
+  }
+
+  humanMember(account, groupId) {
+    return {
+      id: humanMemberId(account.email),
+      name: account.displayName,
+      type: "human",
+      provider: null,
+      email: account.email,
+      groupId,
+      joinedAt: account.createdAt
+    };
+  }
+
+  aiMember(account, registration) {
+    const memberId = aiMemberId(account.email, registration.provider);
+    const live = this.livePresence(memberId);
+    return {
+      id: memberId,
+      name: registration.name,
+      type: "ai",
+      provider: registration.provider,
+      ownerName: account.displayName,
+      email: account.email,
+      groupId: registration.groupId,
+      // 名下的人类成员就是它的主人;免审批开关记在注册项上。
+      desktopOwnerAccountId: account.email,
+      desktopOwnerMemberId: humanMemberId(account.email),
+      trustedOwnerMemberId: registration.trusted ? humanMemberId(account.email) : null,
+      activeMessageIds: live.activeMessageIds,
+      presence: { status: live.status, lastSeenAt: live.lastSeenAt },
+      joinedAt: registration.joinedAt
+    };
+  }
+
+  async listMembers(groupId) {
+    const accounts = await this.accounts();
+    const members = [];
+    for (const account of Object.values(accounts)) {
+      if (this.groupIdsFor(account).includes(groupId)) {
+        members.push(this.humanMember(account, groupId));
+      }
+      for (const registration of account.ais ?? []) {
+        if (registration.groupId === groupId) members.push(this.aiMember(account, registration));
+      }
+    }
+    return members;
+  }
+
+  /// 身份解析入口:email(+provider)决定是谁。provider 缺省即真人成员。
+  async memberFor(groupId, email, provider = null) {
+    const account = await this.accountByEmail(email);
+    if (!account) return null;
+    if (provider) {
+      const registration = (account.ais ?? [])
+        .find((ai) => ai.groupId === groupId && ai.provider === provider);
+      return registration ? this.aiMember(account, registration) : null;
+    }
+    if (!this.groupIdsFor(account).includes(groupId)) return null;
+    return this.humanMember(account, groupId);
+  }
+
+  async memberById(groupId, memberId) {
+    return (await this.listMembers(groupId)).find((member) => member.id === memberId) ?? null;
+  }
+
+  async addDesktopAI(groupId, { name, provider, email, trusted = false }) {
+    const account = await this.accountByEmail(email);
+    if (!account) return null;
+    const existing = (account.ais ?? [])
+      .find((ai) => ai.groupId === groupId && ai.provider === provider);
+    if (existing) return { member: this.aiMember(account, existing), created: false };
+    const registration = {
+      groupId,
+      provider,
+      name,
+      trusted,
+      joinedAt: new Date().toISOString()
+    };
+    await this.updateAccounts((accounts) => {
+      accounts[account.email].ais.push(registration);
+    });
+    return { member: this.aiMember(await this.accountByEmail(email), registration), created: true };
+  }
+
+  async removeDesktopAI(groupId, email, provider) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[normalizeEmail(email)];
+      if (!account) return false;
+      const before = account.ais.length;
+      account.ais = account.ais
+        .filter((ai) => !(ai.groupId === groupId && ai.provider === provider));
+      return account.ais.length !== before;
+    });
+  }
+
+  async setTrustedExecution(groupId, email, provider, enabled) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      const registration = found?.ais
+        ?.find((ai) => ai.groupId === groupId && ai.provider === provider);
+      if (!registration) return null;
+      registration.trusted = enabled;
+      return found;
+    });
+    return account ? this.memberFor(groupId, email, provider) : null;
+  }
+
+  async updatePresence(groupId, memberId, status) {
+    const member = await this.memberById(groupId, memberId);
+    if (!member || member.type !== "ai") return null;
+    const live = this.livePresence(memberId);
+    live.status = status === "online" && live.activeMessageIds.length ? "busy" : status;
+    live.lastSeenAt = new Date().toISOString();
+    return { status: live.status, lastSeenAt: live.lastSeenAt };
+  }
+
+  async setMessageActivity(groupId, memberId, messageId, processing) {
+    const member = await this.memberById(groupId, memberId);
+    if (!member || member.type !== "ai") return null;
+    const live = this.livePresence(memberId);
+    const active = new Set(live.activeMessageIds);
+    if (processing) active.add(messageId);
+    else active.delete(messageId);
+    live.activeMessageIds = [...active];
+    live.status = live.activeMessageIds.length ? "busy" : "online";
+    live.lastSeenAt = new Date().toISOString();
+    return { status: live.status, lastSeenAt: live.lastSeenAt };
   }
 
   async saveAttachments(groupId, files) {
@@ -515,7 +696,10 @@ export class FileStore {
         const attachmentId = id();
         const safeName = path.basename(file.originalname).replace(/[^\p{L}\p{N}._ -]/gu, "_");
         const diskName = `${attachmentId}-${safeName}`;
-        await fs.writeFile(path.join(dir, diskName), file.buffer);
+        const target = path.join(dir, diskName);
+        // 上传现在落盘再搬,不经过内存。file.buffer 分支留着给直接注入内存文件的调用方。
+        if (file.path) await moveFile(file.path, target);
+        else await fs.writeFile(target, file.buffer);
         return {
           id: attachmentId,
           name: safeName,
@@ -618,19 +802,32 @@ export class FileStore {
       .map((name) => path.join(dir, name));
   }
 
+  async readMessageFile(file) {
+    const raw = await fs.readFile(file);
+    const content = file.endsWith(".gz") ? (await gunzip(raw)).toString("utf8") : raw.toString("utf8");
+    return parseJsonl(content);
+  }
+
   async readMessages(groupId, { after, limit = 100 } = {}) {
+    const capped = Math.min(Math.max(Number(limit) || 100, 1), 500);
+    const files = await this.messageFiles(groupId);
     const messages = [];
-    for (const file of await this.messageFiles(groupId)) {
-      const raw = await fs.readFile(file);
-      const content = file.endsWith(".gz") ? (await gunzip(raw)).toString("utf8") : raw.toString("utf8");
-      messages.push(...parseJsonl(content));
+    // 从最新的一天往回读,凑够 limit 或撞到游标就停。读全量再切尾的老做法挂在长轮询上,
+    // 每个 worker 每 25 秒就把该群保留期内的每个 .gz 解压一遍。
+    for (let index = files.length - 1; index >= 0; index -= 1) {
+      const day = await this.readMessageFile(files[index]);
+      messages.unshift(...day);
+      // 游标落在更早的文件里(或已被清理)时可以停:那它比读到的都旧,结果就是"最新 limit 条",
+      // 和读全量再切尾的答案一致。
+      if (after && day.some((message) => message.id === after)) break;
+      if (messages.length >= capped) break;
     }
     let start = 0;
     if (after) {
       const index = messages.findIndex((message) => message.id === after);
       if (index >= 0) start = index + 1;
     }
-    return messages.slice(start).slice(-Math.min(Math.max(Number(limit) || 100, 1), 500));
+    return messages.slice(start).slice(-capped);
   }
 
   async history(groupId) {
@@ -670,5 +867,93 @@ export class FileStore {
       }
     }
     return archived;
+  }
+
+  /// 服务端只是中转缓冲区,消息的长期副本在各人自己的客户端里。这里按保留期回收:
+  /// 消息 7 天、附件 48 小时(按文件 mtime,所以是真的 48 小时而非按天取整)、
+  /// 已完结的审批和任务跟着消息一起走 —— 它们内嵌了消息原文,不能比消息活得更久。
+  async purgeExpired({
+    messageDays = 7,
+    attachmentHours = 48,
+    uploadTempHours = 1,
+    now = new Date()
+  } = {}) {
+    const purged = { messageFiles: 0, attachments: 0, approvals: 0, tasks: 0, uploadTemp: 0 };
+    const oldestDay = dayOf(new Date(now.getTime() - messageDays * 86_400_000).toISOString());
+    const attachmentCutoff = now.getTime() - attachmentHours * 3_600_000;
+    const contentCutoff = now.getTime() - messageDays * 86_400_000;
+    const groupIds = await fs.readdir(this.groupsDir);
+    for (const groupId of groupIds) {
+      if (!/^[0-9a-f-]{36}$/i.test(groupId)) continue;
+      for (const file of await this.messageFiles(groupId)) {
+        if (path.basename(file).slice(0, 10) >= oldestDay) continue;
+        await fs.unlink(file);
+        purged.messageFiles += 1;
+      }
+      purged.attachments += await this.purgeAttachments(groupId, attachmentCutoff);
+      purged.approvals += await this.purgeResolved(
+        groupId,
+        (update) => this.updateApprovals(groupId, update),
+        () => this.listApprovals(groupId),
+        (approval) => approval.status !== "pending" && this.olderThan(approval, contentCutoff)
+      );
+      purged.tasks += await this.purgeResolved(
+        groupId,
+        (update) => this.updateTasks(groupId, update),
+        () => this.listTasks(groupId),
+        (task) => (task.status === "completed" || task.status === "failed")
+          && this.olderThan(task, contentCutoff)
+      );
+    }
+    purged.uploadTemp = await this.purgeUploadTemp(now.getTime() - uploadTempHours * 3_600_000);
+    return purged;
+  }
+
+  olderThan(record, cutoff) {
+    return Date.parse(record.updatedAt ?? record.createdAt) <= cutoff;
+  }
+
+  /// 先读一遍确认真有过期项再走写队列,否则每小时都会给每个群重写一次(甚至凭空建出)
+  /// approvals.json 和 tasks.json。
+  async purgeResolved(groupId, runUpdate, list, isExpired) {
+    const current = await list().catch(() => []);
+    if (!current.some(isExpired)) return 0;
+    return runUpdate((records) => {
+      const kept = records.filter((record) => !isExpired(record));
+      const removed = records.length - kept.length;
+      records.splice(0, records.length, ...kept);
+      return removed;
+    }).catch(() => 0);
+  }
+
+  async purgeAttachments(groupId, cutoff) {
+    const root = path.join(this.groupDir(groupId), "attachments");
+    let removed = 0;
+    for (const day of await fs.readdir(root).catch(() => [])) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      const dir = path.join(root, day);
+      for (const name of await fs.readdir(dir).catch(() => [])) {
+        const file = path.join(dir, name);
+        const stats = await fs.stat(file).catch(() => null);
+        if (!stats?.isFile() || stats.mtimeMs > cutoff) continue;
+        await fs.unlink(file);
+        removed += 1;
+      }
+      await removeIfEmpty(dir);
+    }
+    return removed;
+  }
+
+  /// multer 落盘后如果请求中途失败,临时文件不会自己消失。
+  async purgeUploadTemp(cutoff) {
+    let removed = 0;
+    for (const name of await fs.readdir(this.uploadTempDir).catch(() => [])) {
+      const file = path.join(this.uploadTempDir, name);
+      const stats = await fs.stat(file).catch(() => null);
+      if (!stats?.isFile() || stats.mtimeMs > cutoff) continue;
+      await fs.unlink(file);
+      removed += 1;
+    }
+    return removed;
   }
 }

@@ -189,6 +189,12 @@
                     <button id="export-account" class="secondary" type="button">下载账户备份</button>
                     <label class="file-button">导入账户备份<input id="import-account-file" type="file" accept="application/json,.json" /></label>
                   </div>
+                  <p id="history-stats" class="muted compact"></p>
+                  <div>
+                    <button id="export-history" class="secondary" type="button">导出聊天记录</button>
+                    <label class="file-button">导入聊天记录<input id="import-history-file" type="file" accept="application/json,.json" /></label>
+                  </div>
+                  <p class="muted compact">聊天记录只存在本机。服务端仅保留 7 天中转缓冲，换机器请先导出再导入。</p>
                 </details>
               </div>
             </div>
@@ -201,6 +207,19 @@
                   <p class="muted compact">管理个人资料和本机 AI 接入。</p>
                 </div>
               </div>
+              <form id="server-settings-form" class="profile-settings-card">
+                <div class="profile-settings-heading">
+                  <div><strong>服务器地址</strong><small>换服务器前先把账号和群组同步过去，聊天记录一直在本机</small></div>
+                </div>
+                <label>服务器链接<input id="server-url" name="serverUrl" type="url" placeholder="https://chat.example.com" /></label>
+                <p id="server-current" class="muted compact"></p>
+                <div>
+                  <button id="sync-server" class="secondary" type="button">同步数据到这台服务器</button>
+                  <button id="switch-server" type="submit">同步并切换过去</button>
+                </div>
+                <p id="server-sync-result" class="muted compact"></p>
+              </form>
+
               <form id="profile-settings-form" class="profile-settings-card">
                 <div class="profile-settings-heading">
                   <div><strong>个人资料</strong><small>默认昵称取注册邮箱 @ 前面的内容</small></div>

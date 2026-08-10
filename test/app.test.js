@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -12,6 +13,11 @@ import { createApp } from "../src/app.js";
 import { markdownTableDefinition, splitMarkdownTableRow } from "../public/markdown.js";
 
 const execFileAsync = promisify(execFile);
+
+// 身份就是 email;带 provider 表示以该 email 名下的那个 AI 身份行动。没有 token。
+const asMember = (email, provider = null) => (provider
+  ? { "X-Relay-Email": email, "X-Relay-Provider": provider }
+  : { "X-Relay-Email": email });
 const relayClient = path.resolve("bin/relay-client.js");
 const codexWorker = path.resolve("bin/codex-worker.js");
 const codexHook = path.resolve("bin/codex-hook.js");
@@ -52,7 +58,7 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
-  const { app, store } = await createApp({
+  const { app, store, sweepExpiredTokens } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
     ...options
@@ -62,7 +68,7 @@ async function fixture(t, options = {}) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, store, dataDir };
+  return { base, store, dataDir, sweepExpiredTokens };
 }
 
 async function json(base, url, options = {}) {
@@ -77,7 +83,7 @@ test("creates a group, joins via invitation and exchanges messages", async (t) =
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Architecture", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Architecture", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   assert.equal(created.response.status, 201);
   assert.match(created.body.inviteUrl, /\/join\//);
@@ -91,7 +97,7 @@ test("creates a group, joins via invitation and exchanges messages", async (t) =
 
   const joined = await json(base, `/api/invites/${inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex", ownerName: "Yunfei" })
+    body: JSON.stringify({ email: "yunfei@example.com", name: "Codex", type: "ai", provider: "codex" })
   });
   assert.equal(joined.response.status, 201);
   assert.equal(joined.body.member.provider, "codex");
@@ -102,13 +108,13 @@ test("creates a group, joins via invitation and exchanges messages", async (t) =
   form.set("files", new Blob(["notes"], { type: "text/plain" }), "notes.txt");
   const sentResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
     body: form
   });
   assert.equal(sentResponse.status, 201);
 
   const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(history.body.messages.length, 1);
   assert.equal(history.body.messages[0].text, "Hello from Codex");
@@ -116,21 +122,26 @@ test("creates a group, joins via invitation and exchanges messages", async (t) =
   assert.equal(history.body.messages[0].attachments[0].name, "notes.txt");
 });
 
-test("rejects unauthenticated history access", async (t) => {
+test("rejects history access from identities that are not in the group", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Private", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Private", email: "owner@example.com", displayName: "Owner" })
   });
-  const response = await fetch(`${base}/api/groups/${created.body.group.id}/messages`);
-  assert.equal(response.status, 401);
+  // 没有鉴权,但也不是随便谁都算成员:不带身份或带一个陌生 email 都是 404。
+  const anonymous = await fetch(`${base}/api/groups/${created.body.group.id}/messages`);
+  assert.equal(anonymous.status, 404);
+  const stranger = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    headers: { "X-Relay-Email": "stranger@example.com" }
+  });
+  assert.equal(stranger.status, 404);
 });
 
 test("email accounts import validated browser sessions and list joined groups", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "iOS group", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "iOS group", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
@@ -139,26 +150,25 @@ test("email accounts import validated browser sessions and list joined groups", 
   assert.equal(account.response.status, 201);
   assert.equal(account.body.account.email, "yunfei.cao@example.com");
   assert.equal(account.body.account.displayName, "yunfei.cao");
-  assert.ok(account.body.accountToken);
+  assert.ok(account.body.account.email);
 
   const duplicate = await json(base, "/api/accounts", {
     method: "POST",
     body: JSON.stringify({ email: "yunfei.cao@example.com" })
   });
-  assert.equal(duplicate.response.status, 409);
+  assert.equal(duplicate.response.status, 201);
+  assert.equal(duplicate.body.account.email, account.body.account.email);
 
   const imported = await json(base, "/api/account/sessions/import", {
     method: "POST",
-    headers: { "X-Account-Token": account.body.accountToken },
+    headers: { "X-Relay-Email": account.body.account.email },
     body: JSON.stringify({
       sessions: [
         {
-          groupId: created.body.group.id,
-          memberToken: created.body.member.token
+          groupId: created.body.group.id
         },
         {
-          groupId: crypto.randomUUID(),
-          memberToken: "wrong-token"
+          groupId: "00000000-0000-4000-8000-000000000000"
         }
       ]
     })
@@ -167,13 +177,13 @@ test("email accounts import validated browser sessions and list joined groups", 
   assert.equal(imported.body.imported, 1);
   assert.equal(imported.body.rejected.length, 1);
   assert.equal(imported.body.sessions[0].group.name, "iOS group");
-  assert.equal(imported.body.sessions[0].member.name, "Yunfei");
-  assert.equal(imported.body.sessions[0].memberToken, created.body.member.token);
+  assert.equal(imported.body.sessions[0].member.name, "yunfei.cao");
+  assert.equal(imported.body.sessions[0].email, account.body.account.email);
 
   const avatarDataUrl = "data:image/png;base64,iVBORw0KGgo=";
   const profile = await json(base, "/api/account", {
     method: "PATCH",
-    headers: { "X-Account-Token": account.body.accountToken },
+    headers: { "X-Relay-Email": account.body.account.email },
     body: JSON.stringify({ displayName: "Zoe", avatarDataUrl })
   });
   assert.equal(profile.response.status, 200);
@@ -181,34 +191,34 @@ test("email accounts import validated browser sessions and list joined groups", 
   assert.equal(profile.body.account.avatarDataUrl, avatarDataUrl);
 
   const listed = await json(base, "/api/account/sessions", {
-    headers: { "X-Account-Token": account.body.accountToken }
+    headers: { "X-Relay-Email": account.body.account.email }
   });
   assert.equal(listed.response.status, 200);
   assert.equal(listed.body.sessions.length, 1);
   assert.equal(listed.body.sessions[0].member.name, "Zoe");
 
   const unauthorized = await json(base, "/api/account/sessions", {
-    headers: { "X-Account-Token": "wrong" }
+    headers: { "X-Relay-Email": "nobody@example.com" }
   });
-  assert.equal(unauthorized.response.status, 401);
+  assert.equal(unauthorized.response.status, 404);
 });
 
 test("desktop account AI can join a linked group, answer every member and leave", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Desktop AI Group", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Desktop AI Group", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
-    body: JSON.stringify({ email: "yunfei@example.test" })
+    body: JSON.stringify({ email: "yunfei@example.com" })
   });
-  const accountHeaders = { "X-Account-Token": account.body.accountToken };
+  const accountHeaders = { "X-Relay-Email": account.body.account.email };
   await json(base, "/api/account/sessions/import", {
     method: "POST",
     headers: accountHeaders,
     body: JSON.stringify({
-      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+      sessions: [{ groupId: created.body.group.id }]
     })
   });
 
@@ -222,18 +232,18 @@ test("desktop account AI can join a linked group, answer every member and leave"
   assert.equal(attached.body.member.trustedExecutionEnabled, true);
   assert.equal(attached.body.worker.provider, "codex");
   assert.equal(attached.body.worker.groupId, created.body.group.id);
-  assert.ok(attached.body.worker.memberToken);
+  assert.ok(attached.body.worker.email);
 
   const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Guest", type: "human" })
+    body: JSON.stringify({ email: "guest@example.com", name: "Guest", type: "human" })
   });
   const guestMessage = new FormData();
   guestMessage.set("text", "@Yunfei’s Codex 帮我解释一下");
   guestMessage.set("mentions", JSON.stringify([attached.body.member.id]));
   await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${guest.body.member.token}` },
+    headers: { ...asMember(guest.body.member.email, guest.body.member.provider) },
     body: guestMessage
   });
   const ownerMessage = new FormData();
@@ -241,11 +251,11 @@ test("desktop account AI can join a linked group, answer every member and leave"
   ownerMessage.set("mentions", JSON.stringify([attached.body.member.id]));
   await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: ownerMessage
   });
   const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
-    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+    headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) }
   });
   assert.deepEqual(routed.body.messages.map((message) => message.executionScope), ["restricted", "trusted"]);
 
@@ -260,7 +270,7 @@ test("desktop account AI can join a linked group, answer every member and leave"
   );
   assert.equal(removed.body.disconnected, true);
   const group = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(group.body.members.some((member) => member.type === "ai"), false);
 });
@@ -269,21 +279,21 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Somebody else's group", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Somebody else's group", email: "owner@example.com", displayName: "Owner" })
   });
   const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Yunfei", type: "human" })
+    body: JSON.stringify({ email: "yunfei-guest@example.test", name: "Yunfei", type: "human" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
     body: JSON.stringify({ email: "yunfei-guest@example.test" })
   });
-  const headers = { "X-Account-Token": account.body.accountToken };
+  const headers = { "X-Relay-Email": account.body.account.email };
   await json(base, "/api/account/sessions/import", {
     method: "POST",
     headers,
-    body: JSON.stringify({ sessions: [{ groupId: created.body.group.id, memberToken: guest.body.member.token }] })
+    body: JSON.stringify({ sessions: [{ groupId: created.body.group.id }] })
   });
 
   const attached = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
@@ -300,17 +310,17 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   assert.equal(desired.body.workers.length, 1);
   assert.equal(desired.body.workers[0].groupId, created.body.group.id);
   assert.equal(desired.body.workers[0].provider, "codex");
-  assert.ok(desired.body.workers[0].memberToken);
+  assert.ok(desired.body.workers[0].email);
 
   const guestView = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${guest.body.member.token}` }
+    headers: { ...asMember(guest.body.member.email, guest.body.member.provider) }
   });
   assert.equal(
     guestView.body.members.find((member) => member.id === attached.body.member.id).canManageTrustedExecution,
     true
   );
   const ownerView = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(
     ownerView.body.members.find((member) => member.id === attached.body.member.id).canManageTrustedExecution,
@@ -321,7 +331,7 @@ test("a guest account can attach its desktop AI to somebody else's group", async
     `/api/groups/${created.body.group.id}/members/${attached.body.member.id}/trusted-execution`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${created.body.member.token}` },
+      headers: { ...asMember(created.body.member.email, created.body.member.provider) },
       body: JSON.stringify({ enabled: true })
     }
   );
@@ -331,7 +341,7 @@ test("a guest account can attach its desktop AI to somebody else's group", async
     `/api/groups/${created.body.group.id}/members/${attached.body.member.id}/trusted-execution`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${guest.body.member.token}` },
+      headers: { ...asMember(guest.body.member.email, guest.body.member.provider) },
       body: JSON.stringify({ enabled: true })
     }
   );
@@ -342,11 +352,11 @@ test("a guest account can attach its desktop AI to somebody else's group", async
   guestMessage.set("mentions", JSON.stringify([attached.body.member.id]));
   await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${guest.body.member.token}` },
+    headers: { ...asMember(guest.body.member.email, guest.body.member.provider) },
     body: guestMessage
   });
   const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
-    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+    headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) }
   });
   assert.equal(routed.body.messages.at(-1).executionScope, "trusted");
 });
@@ -355,18 +365,20 @@ test("trusted desktop AIs from the same owner can delegate work to each other", 
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "AI delegation", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "AI delegation", email: "yunfei@example.com", displayName: "Yunfei" })
   });
+  // 两个 AI 要挂在同一个主人名下、且那位就是群主,免审批才成立 ——
+  // 原来这个用例是靠导入群主的 member token 达成的,现在直接用同一个 email。
   const account = await json(base, "/api/accounts", {
     method: "POST",
-    body: JSON.stringify({ email: "yunfei-delegation@example.test" })
+    body: JSON.stringify({ email: "yunfei@example.com" })
   });
-  const accountHeaders = { "X-Account-Token": account.body.accountToken };
+  const accountHeaders = { "X-Relay-Email": account.body.account.email };
   await json(base, "/api/account/sessions/import", {
     method: "POST",
     headers: accountHeaders,
     body: JSON.stringify({
-      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+      sessions: [{ groupId: created.body.group.id }]
     })
   });
   const cursor = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
@@ -385,37 +397,37 @@ test("trusted desktop AIs from the same owner can delegate work to each other", 
   delegated.set("mentions", JSON.stringify([claude.body.member.id]));
   await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${cursor.body.worker.memberToken}` },
+    headers: { ...asMember(cursor.body.worker.email, cursor.body.worker.provider) },
     body: delegated
   });
 
   const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
-    headers: { Authorization: `Bearer ${claude.body.worker.memberToken}` }
+    headers: { ...asMember(claude.body.worker.email, claude.body.worker.provider) }
   });
   assert.equal(routed.body.messages.length, 1);
   assert.equal(routed.body.messages[0].executionScope, "trusted");
 });
 
 test("desktop AI approval requests appear in the owner queue and batch approval redelivers once as trusted", async (t) => {
-  const { base } = await fixture(t);
+  const { base, store } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Approval queue", ownerName: "Other owner" })
+    body: JSON.stringify({ name: "Approval queue", email: "other.owner@example.com", displayName: "Other owner" })
   });
   const yunfei = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Yunfei", type: "human" })
+    body: JSON.stringify({ email: "yunfei@example.com", name: "Yunfei", type: "human" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
     body: JSON.stringify({ email: "yunfei-approvals@example.test" })
   });
-  const accountHeaders = { "X-Account-Token": account.body.accountToken };
+  const accountHeaders = { "X-Relay-Email": account.body.account.email };
   await json(base, "/api/account/sessions/import", {
     method: "POST",
     headers: accountHeaders,
     body: JSON.stringify({
-      sessions: [{ groupId: created.body.group.id, memberToken: yunfei.body.member.token }]
+      sessions: [{ groupId: created.body.group.id }]
     })
   });
   const attached = await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
@@ -428,13 +440,13 @@ test("desktop AI approval requests appear in the owner queue and batch approval 
   command.set("mentions", JSON.stringify([attached.body.member.id]));
   const commandResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: command
   });
   const commandBody = await commandResponse.json();
   const requested = await json(base, `/api/groups/${created.body.group.id}/approvals`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` },
+    headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) },
     body: JSON.stringify({
       sourceMessageId: commandBody.message.id,
       summary: "读取项目并运行测试"
@@ -457,19 +469,43 @@ test("desktop AI approval requests appear in the owner queue and batch approval 
   assert.equal(resolved.body.approvals[0].status, "approved");
 
   const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
-    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+    headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) }
   });
   const redelivery = routed.body.messages.find((message) => message.approval?.id === requested.body.approval.id);
   assert.ok(redelivery);
   assert.equal(redelivery.executionScope, "trusted");
   assert.equal(redelivery.mentions[0].id, attached.body.member.id);
+  // 原文是按 sourceMessageId 从缓冲区取的,审批单里不再存正文副本。
+  assert.equal(redelivery.text, "【已批准执行】请读取本机项目并运行测试");
+  assert.equal(requested.body.approval.source, undefined);
+
+  // 待审批的审批单活得比保留期长时,原文已经被清掉:退回 AI 自己写的 summary,不能直接失败。
+  const laterApproval = await json(base, `/api/groups/${created.body.group.id}/approvals`, {
+    method: "POST",
+    headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) },
+    body: JSON.stringify({ sourceMessageId: commandBody.message.id, summary: "缓冲区已经没有原文了" })
+  });
+  assert.equal(laterApproval.response.status, 201);
+  const messagesDir = path.join(store.groupDir(created.body.group.id), "messages");
+  for (const name of await fs.readdir(messagesDir)) await fs.rm(path.join(messagesDir, name));
+  await json(base, "/api/account/approvals/resolve", {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ approvalIds: [laterApproval.body.approval.id], action: "approve" })
+  });
+  const afterPurge = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
+    headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) }
+  });
+  const fallback = afterPurge.body.messages
+    .find((message) => message.approval?.id === laterApproval.body.approval.id);
+  assert.equal(fallback.text, "【已批准执行】缓冲区已经没有原文了");
 });
 
 test("one-click browser transfer imports sessions into the current account", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Chrome session", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Chrome session", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
@@ -477,7 +513,7 @@ test("one-click browser transfer imports sessions into the current account", asy
   });
   const transfer = await json(base, "/api/account/browser-transfers", {
     method: "POST",
-    headers: { "X-Account-Token": account.body.accountToken },
+    headers: { "X-Relay-Email": account.body.account.email },
     body: "{}"
   });
   assert.equal(transfer.response.status, 201);
@@ -487,8 +523,7 @@ test("one-click browser transfer imports sessions into the current account", asy
     method: "POST",
     body: JSON.stringify({
       sessions: [{
-        groupId: created.body.group.id,
-        memberToken: created.body.member.token
+        groupId: created.body.group.id
       }]
     })
   });
@@ -497,7 +532,7 @@ test("one-click browser transfer imports sessions into the current account", asy
   assert.equal(imported.body.imported, 1);
 
   const status = await json(base, `/api/account/browser-transfers/${transfer.body.transferToken}`, {
-    headers: { "X-Account-Token": account.body.accountToken }
+    headers: { "X-Relay-Email": account.body.account.email }
   });
   assert.equal(status.body.status, "completed");
 
@@ -508,7 +543,7 @@ test("one-click browser transfer imports sessions into the current account", asy
   assert.equal(reused.response.status, 409);
 
   const sessions = await json(base, "/api/account/sessions", {
-    headers: { "X-Account-Token": account.body.accountToken }
+    headers: { "X-Relay-Email": account.body.account.email }
   });
   assert.equal(sessions.body.sessions.length, 1);
   assert.equal(sessions.body.sessions[0].group.name, "Chrome session");
@@ -518,18 +553,18 @@ test("desktop client creates a one-time web login for the same account", async (
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Desktop synced group", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Desktop synced group", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
     body: JSON.stringify({ email: "desktop-web@example.com" })
   });
-  const headers = { "X-Account-Token": account.body.accountToken };
+  const headers = { "X-Relay-Email": account.body.account.email };
   await json(base, "/api/account/sessions/import", {
     method: "POST",
     headers,
     body: JSON.stringify({
-      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+      sessions: [{ groupId: created.body.group.id }]
     })
   });
 
@@ -547,10 +582,10 @@ test("desktop client creates a one-time web login for the same account", async (
   });
   assert.equal(claimed.response.status, 200);
   assert.equal(claimed.body.account.email, "desktop-web@example.com");
-  assert.equal(claimed.body.accountToken, account.body.accountToken);
+  assert.equal(claimed.body.email, account.body.account.email);
 
   const sessions = await json(base, "/api/account/sessions", {
-    headers: { "X-Account-Token": claimed.body.accountToken }
+    headers: { "X-Relay-Email": claimed.body.account.email }
   });
   assert.equal(sessions.body.sessions.length, 1);
   assert.equal(sessions.body.sessions[0].group.name, "Desktop synced group");
@@ -566,11 +601,11 @@ test("account AI board tracks Jira assignments through AI completion", async (t)
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Yunfei Tasks", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Yunfei Tasks", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex", ownerName: "Yunfei" })
+    body: JSON.stringify({ email: "yunfei@example.com", name: "Codex", type: "ai", provider: "codex" })
   });
   const account = await json(base, "/api/accounts", {
     method: "POST",
@@ -578,9 +613,9 @@ test("account AI board tracks Jira assignments through AI completion", async (t)
   });
   await json(base, "/api/account/sessions/import", {
     method: "POST",
-    headers: { "X-Account-Token": account.body.accountToken },
+    headers: { "X-Relay-Email": account.body.account.email },
     body: JSON.stringify({
-      sessions: [{ groupId: created.body.group.id, memberToken: created.body.member.token }]
+      sessions: [{ groupId: created.body.group.id }]
     })
   });
 
@@ -589,14 +624,14 @@ test("account AI board tracks Jira assignments through AI completion", async (t)
   assignment.set("mentions", JSON.stringify([joined.body.member.id]));
   const assignmentResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: assignment
   });
   const assignmentBody = await assignmentResponse.json();
   assert.equal(assignmentResponse.status, 201);
 
   let board = await json(base, "/api/account/tasks", {
-    headers: { "X-Account-Token": account.body.accountToken }
+    headers: { "X-Relay-Email": account.body.account.email }
   });
   assert.equal(board.body.tasks.length, 1);
   assert.equal(board.body.tasks[0].jira.key, "APP-123");
@@ -609,25 +644,28 @@ test("account AI board tracks Jira assignments through AI completion", async (t)
   placeholder.set("replyTo", assignmentBody.message.id);
   const placeholderResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
     body: placeholder
   });
   const placeholderBody = await placeholderResponse.json();
   board = await json(base, "/api/account/tasks", {
-    headers: { "X-Account-Token": account.body.accountToken }
+    headers: { "X-Relay-Email": account.body.account.email }
   });
   assert.equal(board.body.tasks[0].status, "in_progress");
 
   await json(base, `/api/groups/${created.body.group.id}/messages/${placeholderBody.message.id}`, {
     method: "PATCH",
-    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
     body: JSON.stringify({ text: "APP-123 已完成并通过测试。", status: "complete" })
   });
   board = await json(base, "/api/account/tasks", {
-    headers: { "X-Account-Token": account.body.accountToken }
+    headers: { "X-Relay-Email": account.body.account.email }
   });
   assert.equal(board.body.tasks[0].status, "completed");
-  assert.equal(board.body.tasks[0].report, "APP-123 已完成并通过测试。");
+  // 看板只存 id 引用,正文不落服务端 —— 客户端按这个 id 回本机记录里取。
+  assert.equal(board.body.tasks[0].responseMessageId, placeholderBody.message.id);
+  assert.equal(board.body.tasks[0].report, undefined);
+  assert.equal(board.body.tasks[0].title, undefined);
   assert.equal(board.body.summary.completed, 1);
 });
 
@@ -635,12 +673,12 @@ test("long polling delivers a new message without refreshing", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Realtime", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Realtime", email: "owner@example.com", displayName: "Owner" })
   });
   const groupId = created.body.group.id;
-  const token = created.body.member.token;
+  const memberEmail = created.body.member.email;
   const waitRequest = fetch(`${base}/api/groups/${groupId}/messages/wait?timeoutMs=2000`, {
-    headers: { Authorization: `Bearer ${token}` }
+    headers: { ...asMember(memberEmail) }
   }).then(async (response) => ({ response, body: await response.json() }));
 
   await new Promise((resolve) => setTimeout(resolve, 50));
@@ -648,7 +686,7 @@ test("long polling delivers a new message without refreshing", async (t) => {
   form.set("text", "live message");
   const sent = await fetch(`${base}/api/groups/${groupId}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { ...asMember(memberEmail) },
     body: form
   });
   assert.equal(sent.status, 201);
@@ -663,27 +701,27 @@ test("long polling delivers AI presence events without treating them as messages
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Presence Events", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Presence Events", email: "owner@example.com", displayName: "Owner" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
   const waitRequest = json(
     base,
     `/api/groups/${created.body.group.id}/messages/wait?timeoutMs=2000`,
-    { headers: { Authorization: `Bearer ${created.body.member.token}` } }
+    { headers: { ...asMember(created.body.member.email, created.body.member.provider) } }
   );
 
   await new Promise((resolve) => setTimeout(resolve, 50));
   await json(base, `/api/groups/${created.body.group.id}/members/me/presence`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
     body: JSON.stringify({ status: "busy" })
   });
 
@@ -698,25 +736,25 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Mentions", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Mentions", email: "owner@example.com", displayName: "Owner" })
   });
   const inviteToken = created.body.group.inviteToken;
   const codex = await json(base, `/api/invites/${inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
   const claude = await json(base, `/api/invites/${inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "zoe@example.com",
       name: "Claude",
       type: "ai",
       provider: "claude",
-      ownerName: "Zoe"
     })
   });
 
@@ -725,7 +763,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   form.set("mentions", JSON.stringify([codex.body.member.id]));
   const sentResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: form
   });
   assert.equal(sentResponse.status, 201);
@@ -735,7 +773,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   const forCodex = await json(
     base,
     `/api/groups/${created.body.group.id}/messages?routed=1`,
-    { headers: { Authorization: `Bearer ${codex.body.member.token}` } }
+    { headers: { ...asMember(codex.body.member.email, codex.body.member.provider) } }
   );
   assert.equal(forCodex.body.messages.length, 1);
   assert.equal(forCodex.body.messages[0].text, "@Yunfei’s Codex 请回答这个问题");
@@ -743,7 +781,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   const forClaude = await json(
     base,
     `/api/groups/${created.body.group.id}/messages?routed=1`,
-    { headers: { Authorization: `Bearer ${claude.body.member.token}` } }
+    { headers: { ...asMember(claude.body.member.email, claude.body.member.provider) } }
   );
   assert.equal(forClaude.body.messages.length, 0);
   assert.equal(forClaude.body.cursor, sent.message.id);
@@ -753,7 +791,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   placeholder.set("status", "processing");
   const placeholderResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${codex.body.member.token}` },
+    headers: { ...asMember(codex.body.member.email, codex.body.member.provider) },
     body: placeholder
   });
   assert.equal(placeholderResponse.status, 201);
@@ -761,7 +799,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   const placeholderForClaude = await json(
     base,
     `/api/groups/${created.body.group.id}/messages?routed=1`,
-    { headers: { Authorization: `Bearer ${claude.body.member.token}` } }
+    { headers: { ...asMember(claude.body.member.email, claude.body.member.provider) } }
   );
   assert.equal(placeholderForClaude.body.messages.length, 0);
 
@@ -770,7 +808,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   aiMention.set("mentions", JSON.stringify([claude.body.member.id]));
   const aiMentionResponse = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${codex.body.member.token}` },
+    headers: { ...asMember(codex.body.member.email, codex.body.member.provider) },
     body: aiMention
   });
   assert.equal(aiMentionResponse.status, 201);
@@ -778,7 +816,7 @@ test("routes @AI messages only to the mentioned AI", async (t) => {
   const explicitForClaude = await json(
     base,
     `/api/groups/${created.body.group.id}/messages?routed=1`,
-    { headers: { Authorization: `Bearer ${claude.body.member.token}` } }
+    { headers: { ...asMember(claude.body.member.email, claude.body.member.provider) } }
   );
   assert.equal(explicitForClaude.body.messages.length, 1);
   assert.equal(explicitForClaude.body.messages[0].text, "@Zoe’s Claude 请协助核对");
@@ -788,18 +826,18 @@ test("allows mentioning a human group member", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Human mentions", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Human mentions", email: "owner@example.com", displayName: "Owner" })
   });
   const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Guest", type: "human" })
+    body: JSON.stringify({ email: "guest@example.com", name: "Guest", type: "human" })
   });
   const form = new FormData();
   form.set("text", "@Guest 请看一下");
   form.set("mentions", JSON.stringify([guest.body.member.id]));
   const response = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: form
   });
   assert.equal(response.status, 201);
@@ -812,16 +850,16 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Trusted workspace", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Trusted workspace", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const inviteToken = created.body.group.inviteToken;
   const ai = await json(base, `/api/invites/${inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Cursor", type: "ai", provider: "cursor", ownerName: "Yunfei" })
+    body: JSON.stringify({ email: "yunfei@example.com", name: "Cursor", type: "ai", provider: "cursor" })
   });
   const guest = await json(base, `/api/invites/${inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Guest", type: "human" })
+    body: JSON.stringify({ email: "guest@example.com", name: "Guest", type: "human" })
   });
 
   const denied = await json(
@@ -829,7 +867,7 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
     `/api/groups/${created.body.group.id}/members/${ai.body.member.id}/trusted-execution`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${guest.body.member.token}` },
+      headers: { ...asMember(guest.body.member.email, guest.body.member.provider) },
       body: JSON.stringify({ enabled: true })
     }
   );
@@ -840,7 +878,7 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
     `/api/groups/${created.body.group.id}/members/${ai.body.member.id}/trusted-execution`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${created.body.member.token}` },
+      headers: { ...asMember(created.body.member.email, created.body.member.provider) },
       body: JSON.stringify({ enabled: true })
     }
   );
@@ -857,7 +895,7 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
     form.set("mentions", JSON.stringify([ai.body.member.id]));
     await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${member.token}` },
+      headers: { ...asMember(member.email, member.provider) },
       body: form
     });
   }
@@ -865,7 +903,7 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
   const routed = await json(
     base,
     `/api/groups/${created.body.group.id}/messages?routed=1`,
-    { headers: { Authorization: `Bearer ${ai.body.member.token}` } }
+    { headers: { ...asMember(ai.body.member.email, ai.body.member.provider) } }
   );
   assert.deepEqual(
     routed.body.messages.map((message) => [message.text, message.executionScope]),
@@ -877,15 +915,15 @@ test("AI presence changes from busy to offline when heartbeats expire", async (t
   const { base } = await fixture(t, { presenceTimeoutMs: 30 });
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Presence", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Presence", email: "owner@example.com", displayName: "Owner" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
   const busy = await json(
@@ -893,20 +931,20 @@ test("AI presence changes from busy to offline when heartbeats expire", async (t
     `/api/groups/${created.body.group.id}/members/me/presence`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${joined.body.member.token}` },
+      headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
       body: JSON.stringify({ status: "busy" })
     }
   );
   assert.equal(busy.body.presence.status, "busy");
 
   const active = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(active.body.members.find((member) => member.type === "ai").presence.status, "busy");
 
   await new Promise((resolve) => setTimeout(resolve, 40));
   const expired = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(expired.body.members.find((member) => member.type === "ai").presence.status, "offline");
 });
@@ -915,13 +953,13 @@ test("AI reconnect marks interrupted processing placeholders as failed", async (
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Interrupted work", ownerName: "Yunfei" })
+    body: JSON.stringify({ name: "Interrupted work", email: "yunfei@example.com", displayName: "Yunfei" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
-    body: JSON.stringify({ name: "Codex", type: "ai", provider: "codex", ownerName: "Yunfei" })
+    body: JSON.stringify({ email: "yunfei@example.com", name: "Codex", type: "ai", provider: "codex" })
   });
-  const headers = { Authorization: `Bearer ${joined.body.member.token}` };
+  const headers = { ...asMember(joined.body.member.email, joined.body.member.provider) };
   const placeholder = new FormData();
   placeholder.set("text", "正在处理…");
   placeholder.set("status", "processing");
@@ -941,7 +979,7 @@ test("AI reconnect marks interrupted processing placeholders as failed", async (
   assert.equal(online.body.presence.status, "online");
 
   const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(history.body.messages.length, 1);
   assert.equal(history.body.messages[0].status, "failed");
@@ -952,15 +990,15 @@ test("AI polling renews presence and routed work marks it busy", async (t) => {
   const { base } = await fixture(t, { presenceTimeoutMs: 1500 });
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Polling Presence", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Polling Presence", email: "owner@example.com", displayName: "Owner" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
 
@@ -968,10 +1006,10 @@ test("AI polling renews presence and routed work marks it busy", async (t) => {
   await json(
     base,
     `/api/groups/${created.body.group.id}/messages/wait?timeoutMs=1000&routed=1`,
-    { headers: { Authorization: `Bearer ${joined.body.member.token}` } }
+    { headers: { ...asMember(joined.body.member.email, joined.body.member.provider) } }
   );
   const online = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(online.body.members.find((member) => member.type === "ai").presence.status, "online");
 
@@ -980,16 +1018,16 @@ test("AI polling renews presence and routed work marks it busy", async (t) => {
   form.set("mentions", JSON.stringify([joined.body.member.id]));
   await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: form
   });
   await json(
     base,
     `/api/groups/${created.body.group.id}/messages?routed=1`,
-    { headers: { Authorization: `Bearer ${joined.body.member.token}` } }
+    { headers: { ...asMember(joined.body.member.email, joined.body.member.provider) } }
   );
   const busy = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(busy.body.members.find((member) => member.type === "ai").presence.status, "busy");
 });
@@ -998,15 +1036,15 @@ test("AI processing placeholders stay busy and are updated in place", async (t) 
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Processing", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Processing", email: "owner@example.com", displayName: "Owner" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
   const placeholderForm = new FormData();
@@ -1016,7 +1054,7 @@ test("AI processing placeholders stay busy and are updated in place", async (t) 
     `${base}/api/groups/${created.body.group.id}/messages`,
     {
       method: "POST",
-      headers: { Authorization: `Bearer ${joined.body.member.token}` },
+      headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
       body: placeholderForm
     }
   );
@@ -1025,19 +1063,19 @@ test("AI processing placeholders stay busy and are updated in place", async (t) 
 
   const attemptedOnline = await json(base, `/api/groups/${created.body.group.id}/members/me/presence`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${joined.body.member.token}` },
+    headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
     body: JSON.stringify({ status: "online" })
   });
   assert.equal(attemptedOnline.body.presence.status, "busy");
   const stillBusy = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(stillBusy.body.members.find((member) => member.type === "ai").presence.status, "busy");
 
   const waitForUpdate = json(
     base,
     `/api/groups/${created.body.group.id}/messages/wait?after=${placeholder.message.id}&timeoutMs=2000`,
-    { headers: { Authorization: `Bearer ${created.body.member.token}` } }
+    { headers: { ...asMember(created.body.member.email, created.body.member.provider) } }
   );
   await new Promise((resolve) => setTimeout(resolve, 50));
   const completed = await json(
@@ -1045,7 +1083,7 @@ test("AI processing placeholders stay busy and are updated in place", async (t) 
     `/api/groups/${created.body.group.id}/messages/${placeholder.message.id}`,
     {
       method: "PATCH",
-      headers: { Authorization: `Bearer ${joined.body.member.token}` },
+      headers: { ...asMember(joined.body.member.email, joined.body.member.provider) },
       body: JSON.stringify({
         text: "这是完整答案",
         status: "complete",
@@ -1060,13 +1098,13 @@ test("AI processing placeholders stay busy and are updated in place", async (t) 
   assert.equal(updateEvent.body.eventPayload.text, "这是完整答案");
 
   const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(history.body.messages.length, 1);
   assert.equal(history.body.messages[0].text, "这是完整答案");
   assert.equal(history.body.messages[0].status, "complete");
   const online = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(online.body.members.find((member) => member.type === "ai").presence.status, "online");
 });
@@ -1075,7 +1113,7 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Agent Group", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Agent Group", email: "owner@example.com", displayName: "Owner" })
   });
   const inviteUrl = created.body.inviteUrl.replace("http://relay.test", base);
   const configFile = path.join(dataDir, "agent-config.json");
@@ -1088,6 +1126,8 @@ test("AI relay client joins, persists identity, receives and sends messages", as
     "codex",
     "--owner",
     "Yunfei",
+    "--email",
+    "yunfei@example.com",
     "--name",
     "Codex"
   ], { env: clientEnv });
@@ -1100,7 +1140,7 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   ownerMessage.set("text", "Please review the latest change");
   const ownerSent = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: ownerMessage
   });
   assert.equal(ownerSent.status, 201);
@@ -1115,7 +1155,7 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   assert.equal(waitedBody.messages.length, 1);
   assert.equal(waitedBody.messages[0].text, "Please review the latest change");
   const busyState = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(busyState.body.members.find((member) => member.type === "ai").presence.status, "busy");
 
@@ -1126,7 +1166,7 @@ test("AI relay client joins, persists identity, receives and sends messages", as
   ], { env: clientEnv });
   assert.equal(JSON.parse(reply.stdout).message.text, "Review complete");
   const onlineState = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(onlineState.body.members.find((member) => member.type === "ai").presence.status, "online");
 
@@ -1134,22 +1174,22 @@ test("AI relay client joins, persists identity, receives and sends messages", as
     relayClient,
     "status"
   ], { env: clientEnv });
-  assert.doesNotMatch(clientStatus.stdout, /memberToken|inviteToken/);
+  assert.doesNotMatch(clientStatus.stdout, /inviteToken/);
 });
 
 test("relay named connections read the correct group and reject cross-group sends", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Named Connection", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Named Connection", email: "owner@example.com", displayName: "Owner" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
   const codexHome = path.join(dataDir, "codex-home");
@@ -1161,7 +1201,7 @@ command = "node"
 [mcp_servers.group-relay-named.env]
 GROUP_RELAY_URL = "${base}"
 GROUP_RELAY_GROUP_ID = "${created.body.group.id}"
-GROUP_RELAY_MEMBER_TOKEN = "${joined.body.member.token}"
+GROUP_RELAY_EMAIL = "${joined.body.member.email}"
 `);
   const clientEnv = { ...process.env, CODEX_HOME: codexHome };
   const history = await execFileAsync(process.execPath, [
@@ -1190,7 +1230,7 @@ test("Codex worker consumes a routed message and posts the generated reply", asy
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Worker Group", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Worker Group", email: "owner@example.com", displayName: "Owner" })
   });
   const configFile = path.join(dataDir, "worker-config.json");
   const fakeCodex = path.join(dataDir, "fake-codex");
@@ -1215,6 +1255,8 @@ exit 1
     "codex",
     "--owner",
     "Yunfei",
+    "--email",
+    "yunfei@example.com",
     "--name",
     "Codex"
   ], { env: workerEnv });
@@ -1225,7 +1267,7 @@ exit 1
   question.set("mentions", JSON.stringify([aiMemberId]));
   await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${created.body.member.token}` },
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
     body: question
   });
 
@@ -1237,7 +1279,7 @@ exit 1
   ], { env: workerEnv, timeout: 10_000 });
 
   const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(history.body.messages.at(-1).text, "常驻 Worker 已自动回复");
   assert.equal(history.body.messages.at(-1).sender.id, aiMemberId);
@@ -1248,7 +1290,7 @@ test("Codex Mac hooks mark busy, create a placeholder and fill the final reply",
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Hook Group", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Hook Group", email: "owner@example.com", displayName: "Owner" })
   });
   const configFile = path.join(dataDir, "hook-session.json");
   const bindingsFile = path.join(dataDir, "codex-bindings.json");
@@ -1269,6 +1311,8 @@ test("Codex Mac hooks mark busy, create a placeholder and fill the final reply",
     "codex",
     "--owner",
     "Yunfei",
+    "--email",
+    "yunfei@example.com",
     "--name",
     "Codex",
     "--hook-placeholder"
@@ -1288,13 +1332,13 @@ test("Codex Mac hooks mark busy, create a placeholder and fill the final reply",
     }), { env: hookEnv });
 
   let groupState = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   const ai = groupState.body.members.find((member) => member.type === "ai");
   assert.equal(ai.presence.status, "busy");
 
   let history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   const placeholder = history.body.messages.at(-1);
   assert.equal(placeholder.status, "processing");
@@ -1306,13 +1350,13 @@ test("Codex Mac hooks mark busy, create a placeholder and fill the final reply",
       last_assistant_message: "Hook 已回填最终答案"
     }), { env: hookEnv });
   history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(history.body.messages.at(-1).id, placeholder.id);
   assert.equal(history.body.messages.at(-1).text, "Hook 已回填最终答案");
   assert.equal(history.body.messages.at(-1).status, "complete");
   groupState = await json(base, `/api/groups/${created.body.group.id}`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(groupState.body.members.find((member) => member.id === ai.id).presence.status, "online");
 });
@@ -1344,7 +1388,7 @@ test("AI sessions can register and disable the Mac background bridge", async (t)
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Background Group", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Background Group", email: "owner@example.com", displayName: "Owner" })
   });
   const configFile = path.join(dataDir, "background-session.json");
   const workersFile = path.join(dataDir, "local-workers.json");
@@ -1363,6 +1407,8 @@ test("AI sessions can register and disable the Mac background bridge", async (t)
     "codex",
     "--owner",
     "Yunfei",
+    "--email",
+    "yunfei@example.com",
     "--name",
     "Codex",
     "--background"
@@ -1386,15 +1432,15 @@ test("MCP send rejects a mismatched expected group ID", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Guarded Group", ownerName: "Owner" })
+    body: JSON.stringify({ name: "Guarded Group", email: "owner@example.com", displayName: "Owner" })
   });
   const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
     method: "POST",
     body: JSON.stringify({
+      email: "yunfei@example.com",
       name: "Codex",
       type: "ai",
       provider: "codex",
-      ownerName: "Yunfei"
     })
   });
   const transport = new StdioClientTransport({
@@ -1404,7 +1450,8 @@ test("MCP send rejects a mismatched expected group ID", async (t) => {
       ...process.env,
       GROUP_RELAY_URL: base,
       GROUP_RELAY_GROUP_ID: created.body.group.id,
-      GROUP_RELAY_MEMBER_TOKEN: joined.body.member.token
+      GROUP_RELAY_EMAIL: joined.body.member.email,
+      GROUP_RELAY_PROVIDER: joined.body.member.provider
     }
   });
   const client = new Client({ name: "group-relay-test", version: "1.0.0" });
@@ -1421,7 +1468,7 @@ test("MCP send rejects a mismatched expected group ID", async (t) => {
   assert.equal(refused.isError, true);
 
   const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
-    headers: { Authorization: `Bearer ${created.body.member.token}` }
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
   });
   assert.equal(history.body.messages.length, 0);
 });
@@ -1430,11 +1477,11 @@ test("one AI session switches groups and disconnects its previous membership", a
   const { base, dataDir } = await fixture(t);
   const first = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "First Group", ownerName: "First Owner" })
+    body: JSON.stringify({ name: "First Group", email: "first.owner@example.com", displayName: "First Owner" })
   });
   const second = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "Second Group", ownerName: "Second Owner" })
+    body: JSON.stringify({ name: "Second Group", email: "second.owner@example.com", displayName: "Second Owner" })
   });
   const configFile = path.join(dataDir, "session-config.json");
   const clientEnv = { ...process.env, GROUP_RELAY_AGENT_CONFIG: configFile };
@@ -1445,6 +1492,8 @@ test("one AI session switches groups and disconnects its previous membership", a
     "codex",
     "--owner",
     "Yunfei",
+    "--email",
+    "yunfei@example.com",
     "--name",
     "Codex"
   ];
@@ -1467,12 +1516,12 @@ test("one AI session switches groups and disconnects its previous membership", a
   assert.equal(switchedBody.group.id, second.body.group.id);
 
   const firstState = await json(base, `/api/groups/${first.body.group.id}`, {
-    headers: { Authorization: `Bearer ${first.body.member.token}` }
+    headers: { ...asMember(first.body.member.email, first.body.member.provider) }
   });
   assert.equal(firstState.body.members.some((member) => member.type === "ai"), false);
 
   const secondState = await json(base, `/api/groups/${second.body.group.id}`, {
-    headers: { Authorization: `Bearer ${second.body.member.token}` }
+    headers: { ...asMember(second.body.member.email, second.body.member.provider) }
   });
   assert.equal(secondState.body.members.filter((member) => member.type === "ai").length, 1);
 
@@ -1490,23 +1539,25 @@ test("one AI session switches groups and disconnects its previous membership", a
     "codex",
     "--owner",
     "Zoe",
+    "--email",
+    "zoe@example.com",
     "--name",
     "Codex"
   ], { env: otherSessionEnv });
 
   const firstWithOtherSession = await json(base, `/api/groups/${first.body.group.id}`, {
-    headers: { Authorization: `Bearer ${first.body.member.token}` }
+    headers: { ...asMember(first.body.member.email, first.body.member.provider) }
   });
   assert.equal(firstWithOtherSession.body.members.filter((member) => member.type === "ai").length, 1);
   const secondStillConnected = await json(base, `/api/groups/${second.body.group.id}`, {
-    headers: { Authorization: `Bearer ${second.body.member.token}` }
+    headers: { ...asMember(second.body.member.email, second.body.member.provider) }
   });
   assert.equal(secondStillConnected.body.members.filter((member) => member.type === "ai").length, 1);
 });
 
 test("compresses message logs from previous days and can still read them", async (t) => {
   const { store } = await fixture(t);
-  const { group, owner } = await store.createGroup({ name: "Archive", ownerName: "Owner" });
+  const { group, owner } = await store.createGroup({ name: "Archive", email: "owner@example.com", displayName: "Owner" });
   const oldMessage = {
     id: "old-message",
     groupId: group.id,
@@ -1524,4 +1575,294 @@ test("compresses message logs from previous days and can still read them", async
   await fs.access(`${oldFile}.gz`);
   const messages = await store.readMessages(group.id);
   assert.equal(messages[0].text, "from yesterday");
+});
+
+test("reads recent messages without decompressing the whole history", async (t) => {
+  const { store } = await fixture(t);
+  const { group, owner } = await store.createGroup({ name: "Tail", email: "owner@example.com", displayName: "Owner" });
+  const dir = path.join(store.groupDir(group.id), "messages");
+  const days = ["2026-08-01", "2026-08-02", "2026-08-03"];
+  for (const day of days) {
+    const lines = [0, 1, 2].map((index) => JSON.stringify({
+      id: `${day}-${index}`,
+      groupId: group.id,
+      sender: { id: owner.id, name: owner.name, type: "human", provider: null },
+      text: `${day} #${index}`,
+      attachments: [],
+      replyTo: null,
+      createdAt: `${day}T10:00:0${index}.000Z`
+    }));
+    await fs.writeFile(path.join(dir, `${day}.jsonl`), `${lines.join("\n")}\n`);
+  }
+  const reads = [];
+  const readFile = store.readMessageFile.bind(store);
+  store.readMessageFile = async (file) => {
+    reads.push(path.basename(file));
+    return readFile(file);
+  };
+
+  const latest = await store.readMessages(group.id, { limit: 2 });
+  assert.deepEqual(latest.map((message) => message.id), ["2026-08-03-1", "2026-08-03-2"]);
+  assert.deepEqual(reads, ["2026-08-03.jsonl"]);
+
+  reads.length = 0;
+  const afterOlderCursor = await store.readMessages(group.id, { after: "2026-08-02-1", limit: 100 });
+  assert.deepEqual(
+    afterOlderCursor.map((message) => message.id),
+    ["2026-08-02-2", "2026-08-03-0", "2026-08-03-1", "2026-08-03-2"]
+  );
+  assert.deepEqual(reads, ["2026-08-03.jsonl", "2026-08-02.jsonl"]);
+
+  reads.length = 0;
+  const purgedCursor = await store.readMessages(group.id, { after: "purged-away", limit: 2 });
+  assert.deepEqual(purgedCursor.map((message) => message.id), ["2026-08-03-1", "2026-08-03-2"]);
+  assert.deepEqual(reads, ["2026-08-03.jsonl"]);
+});
+
+test("purges expired messages, attachments and finished records", async (t) => {
+  const { store } = await fixture(t);
+  const { group, owner } = await store.createGroup({ name: "Purge", email: "owner@example.com", displayName: "Owner" });
+  const now = new Date("2026-08-10T12:00:00.000Z");
+  const groupDir = store.groupDir(group.id);
+  const messageLine = (day) => `${JSON.stringify({
+    id: day,
+    groupId: group.id,
+    sender: { id: owner.id, name: owner.name, type: "human", provider: null },
+    text: day,
+    attachments: [],
+    replyTo: null,
+    createdAt: `${day}T10:00:00.000Z`
+  })}\n`;
+  const expiredMessages = path.join(groupDir, "messages", "2026-08-01.jsonl.gz");
+  const keptMessages = path.join(groupDir, "messages", "2026-08-08.jsonl.gz");
+  await fs.writeFile(expiredMessages, zlib.gzipSync(Buffer.from(messageLine("2026-08-01"))));
+  await fs.writeFile(keptMessages, zlib.gzipSync(Buffer.from(messageLine("2026-08-08"))));
+
+  const expiredAttachmentDir = path.join(groupDir, "attachments", "2026-08-07");
+  const keptAttachmentDir = path.join(groupDir, "attachments", "2026-08-10");
+  await fs.mkdir(expiredAttachmentDir, { recursive: true });
+  await fs.mkdir(keptAttachmentDir, { recursive: true });
+  const expiredAttachment = path.join(expiredAttachmentDir, "old.png");
+  const keptAttachment = path.join(keptAttachmentDir, "fresh.png");
+  await fs.writeFile(expiredAttachment, "old");
+  await fs.writeFile(keptAttachment, "fresh");
+  // 附件按文件 mtime 判定,所以这里是真的「超过 48 小时」而不是按天取整。
+  const threeDaysAgo = new Date(now.getTime() - 3 * 86_400_000);
+  await fs.utimes(expiredAttachment, threeDaysAgo, threeDaysAgo);
+  await fs.utimes(keptAttachment, now, now);
+
+  await fs.writeFile(path.join(groupDir, "approvals.json"), JSON.stringify([
+    { id: "resolved-old", status: "approved", updatedAt: "2026-08-01T10:00:00.000Z", summary: "旧审批" },
+    { id: "pending-old", status: "pending", updatedAt: "2026-08-01T10:00:00.000Z", summary: "还没批" }
+  ]));
+  await fs.writeFile(path.join(groupDir, "tasks.json"), JSON.stringify([
+    { id: "done-old", status: "completed", updatedAt: "2026-08-01T10:00:00.000Z" },
+    { id: "open-old", status: "assigned", updatedAt: "2026-08-01T10:00:00.000Z" }
+  ]));
+
+  const staleUpload = path.join(store.uploadTempDir, "abandoned");
+  const freshUpload = path.join(store.uploadTempDir, "in-flight");
+  await fs.writeFile(staleUpload, "abandoned");
+  await fs.writeFile(freshUpload, "in-flight");
+  await fs.utimes(staleUpload, threeDaysAgo, threeDaysAgo);
+  await fs.utimes(freshUpload, now, now);
+
+  const purged = await store.purgeExpired({ messageDays: 7, attachmentHours: 48, now });
+
+  assert.deepEqual(purged, {
+    messageFiles: 1,
+    attachments: 1,
+    approvals: 1,
+    tasks: 1,
+    uploadTemp: 1
+  });
+  await assert.rejects(fs.access(expiredMessages));
+  await fs.access(keptMessages);
+  await assert.rejects(fs.access(expiredAttachmentDir));
+  await fs.access(keptAttachment);
+  await assert.rejects(fs.access(staleUpload));
+  await fs.access(freshUpload);
+  assert.deepEqual((await store.listApprovals(group.id)).map((item) => item.id), ["pending-old"]);
+  assert.deepEqual((await store.listTasks(group.id)).map((item) => item.id), ["open-old"]);
+  assert.deepEqual((await store.readMessages(group.id)).map((item) => item.id), ["2026-08-08"]);
+
+  const again = await store.purgeExpired({ messageDays: 7, attachmentHours: 48, now });
+  assert.deepEqual(again, { messageFiles: 0, attachments: 0, approvals: 0, tasks: 0, uploadTemp: 0 });
+});
+
+test("expired one-time tokens are dropped instead of living in memory forever", async (t) => {
+  const { base, sweepExpiredTokens } = await fixture(t);
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "sweep@example.com" })
+  });
+  const accountEmail = account.body.account.email;
+  const transfer = await json(base, "/api/account/browser-transfers", {
+    method: "POST",
+    headers: { "X-Relay-Email": accountEmail },
+    body: "{}"
+  });
+  const url = `/api/account/browser-transfers/${transfer.body.transferToken}`;
+  assert.equal((await json(base, url, { headers: { "X-Relay-Email": accountEmail } })).response.status, 200);
+
+  sweepExpiredTokens(Date.parse(transfer.body.expiresAt) + 60 * 60_000);
+
+  const afterSweep = await json(base, url, { headers: { "X-Relay-Email": accountEmail } });
+  assert.equal(afterSweep.response.status, 404);
+});
+
+test("migrates legacy token-based data to email-keyed accounts", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-legacy-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const groupId = "11111111-1111-4111-8111-111111111111";
+  const ownerMemberId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+  const guestMemberId = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+  const aiMemberId = "cccccccc-3333-4333-8333-cccccccccccc";
+  await fs.mkdir(path.join(dataDir, "groups", groupId, "messages"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "accounts.json"), JSON.stringify({
+    "account-1": {
+      id: "account-1",
+      email: "Owner@Example.com",
+      normalizedEmail: "owner@example.com",
+      displayName: "Owner",
+      avatarDataUrl: null,
+      token: "account-token-1",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      memberships: [{ groupId, memberId: ownerMemberId, memberToken: "owner-member-token" }]
+    }
+  }));
+  await fs.writeFile(path.join(dataDir, "invites.json"), JSON.stringify({ "invite-1": groupId }));
+  await fs.writeFile(path.join(dataDir, "groups", groupId, "group.json"), JSON.stringify({
+    id: groupId, name: "Legacy group", createdAt: "2026-08-01T00:00:00.000Z",
+    inviteToken: "invite-1", ownerMemberId
+  }));
+  await fs.writeFile(path.join(dataDir, "groups", groupId, "members.json"), JSON.stringify([
+    { id: ownerMemberId, name: "Owner", type: "human", provider: null, token: "owner-member-token" },
+    { id: guestMemberId, name: "Browser Guest", type: "human", provider: null, token: "guest-member-token" },
+    {
+      id: aiMemberId, name: "Codex", type: "ai", provider: "codex", ownerName: "Owner",
+      token: "ai-member-token", desktopOwnerAccountId: "account-1", joinedAt: "2026-08-02T00:00:00.000Z",
+      desktopOwnerMemberId: ownerMemberId, trustedOwnerMemberId: ownerMemberId
+    }
+  ]));
+  await fs.writeFile(path.join(dataDir, "groups", groupId, "messages", "2026-08-01.jsonl"),
+    `${JSON.stringify({
+      id: "message-1", groupId,
+      sender: { id: ownerMemberId, name: "Owner", type: "human", provider: null },
+      text: "@Codex 看一下", attachments: [], mentions: [{ id: aiMemberId, name: "Codex" }],
+      replyTo: null, createdAt: "2026-08-01T10:00:00.000Z"
+    })}\n`);
+
+  const { store, base } = await fixture(t, { dataDir });
+  assert.deepEqual(
+    { accounts: store.migration.accounts, groups: store.migration.groups },
+    // owner + 那个只在浏览器里存过 token 的真人;AI 挂在 owner 名下,不算独立账号
+    { accounts: 2, groups: 1 }
+  );
+
+  // 群挂在建群人的 email 下,其他真人只留 groupId,AI 变成注册项。
+  const accounts = await store.accounts();
+  assert.deepEqual(accounts["owner@example.com"].createdGroups.map((group) => group.name), ["Legacy group"]);
+  assert.deepEqual(accounts["owner@example.com"].ais, [{
+    groupId, provider: "codex", name: "Codex", trusted: true, joinedAt: "2026-08-02T00:00:00.000Z"
+  }]);
+  const guestEmail = Object.keys(accounts).find((email) => email.startsWith("browser.guest."));
+  assert.deepEqual(accounts[guestEmail].joinedGroups, [groupId]);
+
+  // 名册和邀请链接都还在
+  assert.equal((await store.groupFromInvite("invite-1")).id, groupId);
+  assert.deepEqual(
+    (await store.listMembers(groupId)).map((member) => member.id).sort(),
+    ["ai:owner@example.com:codex", `human:${guestEmail}`, "human:owner@example.com"].sort()
+  );
+
+  // 缓冲区里的旧 uuid 被换成新 id,否则 @mention 全部失配
+  const [message] = await store.readMessages(groupId);
+  assert.equal(message.sender.id, "human:owner@example.com");
+  assert.deepEqual(message.mentions, [{ id: "ai:owner@example.com:codex", name: "Codex" }]);
+
+  // 旧客户端手里只有 token:一次性换回 email
+  const legacy = await json(base, `/api/groups/${groupId}`, {
+    headers: { Authorization: "Bearer owner-member-token" }
+  });
+  assert.equal(legacy.response.status, 200);
+  assert.equal(legacy.body.group.name, "Legacy group");
+  const legacyAccount = await json(base, "/api/account", {
+    headers: { "X-Account-Token": "account-token-1" }
+  });
+  assert.equal(legacyAccount.body.account.email, "owner@example.com");
+
+  // 幂等:再跑一次不做任何事
+  const { migrateLegacyData } = await import("../src/migrate-legacy.js");
+  assert.equal(await migrateLegacyData(dataDir), null);
+});
+
+test("account data syncs to another server, keeping group ids and invite links", async (t) => {
+  const source = await fixture(t);
+  const target = await fixture(t);
+
+  const created = await json(source.base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Moving day", email: "mover@example.com", displayName: "Mover" })
+  });
+  const groupId = created.body.group.id;
+  const inviteToken = created.body.group.inviteToken;
+  await json(source.base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ provider: "codex" })
+  });
+
+  const synced = await json(source.base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ targetBaseUrl: target.base })
+  });
+  assert.equal(synced.response.status, 200);
+  assert.deepEqual(synced.body.synced, {
+    email: "mover@example.com", createdGroups: 1, joinedGroups: 0, ais: 1
+  });
+  assert.equal(synced.body.applied.groups, 1);
+
+  // 群 id 和邀请 token 必须原样落在新服务器上:客户端本地记录和已发出的邀请链接都按它们认群。
+  const onTarget = await json(target.base, `/api/groups/${groupId}`, {
+    headers: { "X-Relay-Email": "mover@example.com" }
+  });
+  assert.equal(onTarget.response.status, 200);
+  assert.equal(onTarget.body.group.name, "Moving day");
+  assert.equal(onTarget.body.group.inviteToken, inviteToken);
+  assert.deepEqual(
+    onTarget.body.members.map((member) => member.id).sort(),
+    ["ai:mover@example.com:codex", "human:mover@example.com"]
+  );
+  const invite = await json(target.base, `/api/invites/${inviteToken}`);
+  assert.equal(invite.body.group.id, groupId);
+
+  // 新服务器上立刻能发消息(群目录已经建好),而聊天记录不在同步内容里
+  const message = new FormData();
+  message.set("text", "在新服务器上发的第一条");
+  const sent = await fetch(`${target.base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: message
+  });
+  assert.equal(sent.status, 201);
+  assert.equal((await target.store.readMessages(groupId)).length, 1);
+  assert.equal((await source.store.readMessages(groupId)).length, 0);
+
+  // 幂等:再同步一次不重复建群
+  const again = await json(source.base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ targetBaseUrl: target.base })
+  });
+  assert.equal(again.body.applied.groups, 0);
+  assert.equal((await target.store.accounts())["mover@example.com"].createdGroups.length, 1);
+
+  const refused = await json(source.base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ targetBaseUrl: "ftp://example.com" })
+  });
+  assert.equal(refused.response.status, 400);
 });

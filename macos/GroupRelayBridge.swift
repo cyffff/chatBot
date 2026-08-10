@@ -56,7 +56,9 @@ private struct AgentConfig: Codable {
     var baseUrl: String
     var groupId: String
     var memberId: String?
-    var memberToken: String
+    var email: String?
+    // 迁移前建的 session 配置里只有这个;留着是为了让旧配置能自己走完宽限期。
+    var memberToken: String?
     var memberName: String?
     var provider: String
     var ownerName: String?
@@ -65,6 +67,11 @@ private struct AgentConfig: Codable {
     var model: String?
     var agentBin: String?
     var workspacePath: String?
+}
+
+extension AgentConfig {
+    /// 拿哪个凭据都算身份,用来判断配置是不是换了人。
+    var identity: String { email ?? memberToken ?? "" }
 }
 
 private struct WorkerEntry: Codable {
@@ -151,7 +158,7 @@ private final class RelayWorker {
 
     private func reloadConfig() throws -> Bool {
         let updated = try JSONDecoder().decode(AgentConfig.self, from: Data(contentsOf: configURL))
-        guard updated.groupId == config.groupId, updated.memberToken == config.memberToken else {
+        guard updated.groupId == config.groupId, updated.identity == config.identity else {
             log("Session configuration changed; stopping old worker")
             return false
         }
@@ -172,7 +179,14 @@ private final class RelayWorker {
         }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = method
-        request.setValue("Bearer \(config.memberToken)", forHTTPHeaderField: "Authorization")
+        // 身份是 email + provider。迁移前建的配置里只有 memberToken,这时退回旧头,
+        // 服务端的宽限期会认它 —— 否则这个 worker 会静默地起不来。
+        if let email = config.email {
+            request.setValue(email, forHTTPHeaderField: "X-Relay-Email")
+        } else if let legacy = config.memberToken {
+            request.setValue("Bearer \(legacy)", forHTTPHeaderField: "Authorization")
+        }
+        request.setValue(config.provider, forHTTPHeaderField: "X-Relay-Provider")
         if let json {
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -199,11 +213,18 @@ private final class RelayWorker {
     }
 
     private func presence(_ status: String, recoverInterrupted: Bool = false) throws {
-        _ = try request(
+        let result = try request(
             "/api/groups/\(config.groupId)/members/me/presence",
             method: "POST",
             json: ["status": status, "recoverInterrupted": recoverInterrupted]
         )
+        // 迁移前建的配置只有 memberToken。第一次心跳就把服务端解析出的 email 写回去,
+        // 之后这个 worker 走的就是新身份,宽限期可以关掉。
+        guard config.email == nil, let resolved = result["email"] as? String, !resolved.isEmpty else { return }
+        config.email = resolved
+        config.memberToken = nil
+        try? saveConfig()
+        log("Upgraded session identity to \(resolved)")
     }
 
     private func waitForMessages() throws -> [[String: Any]] {
