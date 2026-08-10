@@ -141,10 +141,22 @@ export async function createApp(options = {}) {
 
   // 身份就是 email:没有 token,也没有鉴权。带 provider 表示以该 email 名下的那个 AI
   // 身份行动,不带就是真人本人。SSE 和附件链接没法带自定义头,所以也接受 query。
-  const identityFrom = (req) => ({
-    email: req.get("x-relay-email") || req.query.email || null,
-    provider: req.get("x-relay-provider") || req.query.provider || null
-  });
+  const identityFrom = (req) => {
+    const email = req.get("x-relay-email") || req.query.email;
+    if (email) {
+      return { email, provider: req.get("x-relay-provider") || req.query.provider || null };
+    }
+    // 迁移宽限期:旧客户端还在发 token,用它换回 email,响应里带着 email 让它存下来。
+    const authorization = req.get("authorization");
+    const legacyToken = (authorization?.startsWith("Bearer ") ? authorization.slice(7) : null)
+      || req.get("x-member-token")
+      || req.get("x-account-token")
+      || req.query.token;
+    return {
+      email: store.emailForLegacyToken(legacyToken),
+      provider: req.get("x-relay-provider") || req.query.provider || null
+    };
+  };
 
   async function requireMember(req, res, next) {
     try {

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
+import { migrateLegacyData } from "./migrate-legacy.js";
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -76,7 +77,18 @@ export class FileStore {
     await fs.mkdir(this.groupsDir, { recursive: true });
     await fs.mkdir(this.uploadTempDir, { recursive: true });
     if (!(await exists(this.accountsFile))) await writeJsonAtomic(this.accountsFile, {});
+    // 旧格式(members.json / invites.json / 带 token 的账号)会在这里一次性转成
+    // 按 email 归档的新格式,幂等,靠 marker 文件保证只跑一次。
+    this.migration = await migrateLegacyData(this.root);
+    this.legacyTokens = await readJson(path.join(this.root, "legacy-tokens.json")).catch(() => ({}));
     this.indexGroups(await this.accounts());
+  }
+
+  /// 迁移后的一次性宽限:旧客户端手里只有 token,拿它换回自己的 email,存下来之后
+  /// 就再也不用了。删掉 data/legacy-tokens.json 即结束宽限期。
+  emailForLegacyToken(token) {
+    if (!token) return null;
+    return this.legacyTokens?.[token] ?? null;
   }
 
   groupDir(groupId) {

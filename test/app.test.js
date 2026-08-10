@@ -1710,3 +1710,89 @@ test("expired one-time tokens are dropped instead of living in memory forever", 
   const afterSweep = await json(base, url, { headers: { "X-Relay-Email": accountEmail } });
   assert.equal(afterSweep.response.status, 404);
 });
+
+test("migrates legacy token-based data to email-keyed accounts", async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-legacy-"));
+  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
+  const groupId = "11111111-1111-4111-8111-111111111111";
+  const ownerMemberId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+  const guestMemberId = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+  const aiMemberId = "cccccccc-3333-4333-8333-cccccccccccc";
+  await fs.mkdir(path.join(dataDir, "groups", groupId, "messages"), { recursive: true });
+  await fs.writeFile(path.join(dataDir, "accounts.json"), JSON.stringify({
+    "account-1": {
+      id: "account-1",
+      email: "Owner@Example.com",
+      normalizedEmail: "owner@example.com",
+      displayName: "Owner",
+      avatarDataUrl: null,
+      token: "account-token-1",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      memberships: [{ groupId, memberId: ownerMemberId, memberToken: "owner-member-token" }]
+    }
+  }));
+  await fs.writeFile(path.join(dataDir, "invites.json"), JSON.stringify({ "invite-1": groupId }));
+  await fs.writeFile(path.join(dataDir, "groups", groupId, "group.json"), JSON.stringify({
+    id: groupId, name: "Legacy group", createdAt: "2026-08-01T00:00:00.000Z",
+    inviteToken: "invite-1", ownerMemberId
+  }));
+  await fs.writeFile(path.join(dataDir, "groups", groupId, "members.json"), JSON.stringify([
+    { id: ownerMemberId, name: "Owner", type: "human", provider: null, token: "owner-member-token" },
+    { id: guestMemberId, name: "Browser Guest", type: "human", provider: null, token: "guest-member-token" },
+    {
+      id: aiMemberId, name: "Codex", type: "ai", provider: "codex", ownerName: "Owner",
+      token: "ai-member-token", desktopOwnerAccountId: "account-1", joinedAt: "2026-08-02T00:00:00.000Z",
+      desktopOwnerMemberId: ownerMemberId, trustedOwnerMemberId: ownerMemberId
+    }
+  ]));
+  await fs.writeFile(path.join(dataDir, "groups", groupId, "messages", "2026-08-01.jsonl"),
+    `${JSON.stringify({
+      id: "message-1", groupId,
+      sender: { id: ownerMemberId, name: "Owner", type: "human", provider: null },
+      text: "@Codex 看一下", attachments: [], mentions: [{ id: aiMemberId, name: "Codex" }],
+      replyTo: null, createdAt: "2026-08-01T10:00:00.000Z"
+    })}\n`);
+
+  const { store, base } = await fixture(t, { dataDir });
+  assert.deepEqual(
+    { accounts: store.migration.accounts, groups: store.migration.groups },
+    // owner + 那个只在浏览器里存过 token 的真人;AI 挂在 owner 名下,不算独立账号
+    { accounts: 2, groups: 1 }
+  );
+
+  // 群挂在建群人的 email 下,其他真人只留 groupId,AI 变成注册项。
+  const accounts = await store.accounts();
+  assert.deepEqual(accounts["owner@example.com"].createdGroups.map((group) => group.name), ["Legacy group"]);
+  assert.deepEqual(accounts["owner@example.com"].ais, [{
+    groupId, provider: "codex", name: "Codex", trusted: true, joinedAt: "2026-08-02T00:00:00.000Z"
+  }]);
+  const guestEmail = Object.keys(accounts).find((email) => email.startsWith("browser.guest."));
+  assert.deepEqual(accounts[guestEmail].joinedGroups, [groupId]);
+
+  // 名册和邀请链接都还在
+  assert.equal((await store.groupFromInvite("invite-1")).id, groupId);
+  assert.deepEqual(
+    (await store.listMembers(groupId)).map((member) => member.id).sort(),
+    ["ai:owner@example.com:codex", `human:${guestEmail}`, "human:owner@example.com"].sort()
+  );
+
+  // 缓冲区里的旧 uuid 被换成新 id,否则 @mention 全部失配
+  const [message] = await store.readMessages(groupId);
+  assert.equal(message.sender.id, "human:owner@example.com");
+  assert.deepEqual(message.mentions, [{ id: "ai:owner@example.com:codex", name: "Codex" }]);
+
+  // 旧客户端手里只有 token:一次性换回 email
+  const legacy = await json(base, `/api/groups/${groupId}`, {
+    headers: { Authorization: "Bearer owner-member-token" }
+  });
+  assert.equal(legacy.response.status, 200);
+  assert.equal(legacy.body.group.name, "Legacy group");
+  const legacyAccount = await json(base, "/api/account", {
+    headers: { "X-Account-Token": "account-token-1" }
+  });
+  assert.equal(legacyAccount.body.account.email, "owner@example.com");
+
+  // 幂等:再跑一次不做任何事
+  const { migrateLegacyData } = await import("../src/migrate-legacy.js");
+  assert.equal(await migrateLegacyData(dataDir), null);
+});
