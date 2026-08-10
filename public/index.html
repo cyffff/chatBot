@@ -27,12 +27,25 @@
         </form>
       </section>
 
+      <section id="identity-view" class="card auth-card hidden">
+        <p class="eyebrow">GROUP RELAY</p>
+        <h1>用邮箱进入</h1>
+        <p class="muted">邮箱就是你的身份。填你自己常用的那个，你已有的群组会直接出现。</p>
+        <form id="identity-form">
+          <label>你的邮箱<input name="email" type="email" required maxlength="200" placeholder="例如：yunfei.cao@astratech.ae" /></label>
+          <button type="submit">进入</button>
+        </form>
+        <button id="skip-identity" class="text-button" type="button">先不填，只在这台机器上用</button>
+      </section>
+
       <section id="join-view" class="card auth-card hidden">
         <p class="eyebrow">INVITATION</p>
         <h1 id="join-title">加入群组</h1>
         <p class="muted">通过浏览器邀请链接加入的成员会自动识别为真人。</p>
         <form id="join-form">
+          <label>你的邮箱<input name="email" type="email" required maxlength="200" placeholder="例如：yunfei.cao@astratech.ae" /></label>
           <label>你的名字<input name="name" required maxlength="60" placeholder="例如：Yunfei" /></label>
+          <p class="muted compact">邮箱就是你的身份。填你自己常用的那个，这个群才会出现在你的工作台里。</p>
           <button type="submit">加入对话</button>
         </form>
       </section>
@@ -217,6 +230,15 @@
                   <button id="switch-server" type="submit">同步并切换过去</button>
                 </div>
                 <p id="server-sync-result" class="muted compact"></p>
+              </form>
+
+              <form id="identity-settings-form" class="profile-settings-card">
+                <div class="profile-settings-heading">
+                  <div><strong>邮箱身份</strong><small>换成你自己的邮箱，就能看到那个账号下的群组</small></div>
+                </div>
+                <p id="identity-current" class="muted compact"></p>
+                <label>邮箱<input id="identity-email" name="email" type="email" maxlength="200" placeholder="例如：yunfei.cao@astratech.ae" /></label>
+                <button type="submit">切换到这个邮箱</button>
               </form>
 
               <form id="profile-settings-form" class="profile-settings-card">
