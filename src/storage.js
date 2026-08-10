@@ -38,12 +38,28 @@ function parseJsonl(text) {
     .map((line) => JSON.parse(line));
 }
 
+async function moveFile(source, target) {
+  try {
+    await fs.rename(source, target);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    await fs.copyFile(source, target);
+    await fs.unlink(source);
+  }
+}
+
+async function removeIfEmpty(dir) {
+  const remaining = await fs.readdir(dir).catch(() => ["keep"]);
+  if (!remaining.length) await fs.rm(dir, { recursive: true, force: true });
+}
+
 export class FileStore {
   constructor(root) {
     this.root = path.resolve(root);
     this.groupsDir = path.join(this.root, "groups");
     this.invitesFile = path.join(this.root, "invites.json");
     this.accountsFile = path.join(this.root, "accounts.json");
+    this.uploadTempDir = path.join(this.root, "tmp", "uploads");
     this.writeQueues = new Map();
     this.memberQueues = new Map();
     this.taskQueues = new Map();
@@ -53,6 +69,7 @@ export class FileStore {
 
   async init() {
     await fs.mkdir(this.groupsDir, { recursive: true });
+    await fs.mkdir(this.uploadTempDir, { recursive: true });
     if (!(await exists(this.invitesFile))) await writeJsonAtomic(this.invitesFile, {});
     if (!(await exists(this.accountsFile))) await writeJsonAtomic(this.accountsFile, {});
   }
@@ -515,7 +532,10 @@ export class FileStore {
         const attachmentId = id();
         const safeName = path.basename(file.originalname).replace(/[^\p{L}\p{N}._ -]/gu, "_");
         const diskName = `${attachmentId}-${safeName}`;
-        await fs.writeFile(path.join(dir, diskName), file.buffer);
+        const target = path.join(dir, diskName);
+        // 上传现在落盘再搬,不经过内存。file.buffer 分支留着给直接注入内存文件的调用方。
+        if (file.path) await moveFile(file.path, target);
+        else await fs.writeFile(target, file.buffer);
         return {
           id: attachmentId,
           name: safeName,
@@ -618,19 +638,32 @@ export class FileStore {
       .map((name) => path.join(dir, name));
   }
 
+  async readMessageFile(file) {
+    const raw = await fs.readFile(file);
+    const content = file.endsWith(".gz") ? (await gunzip(raw)).toString("utf8") : raw.toString("utf8");
+    return parseJsonl(content);
+  }
+
   async readMessages(groupId, { after, limit = 100 } = {}) {
+    const capped = Math.min(Math.max(Number(limit) || 100, 1), 500);
+    const files = await this.messageFiles(groupId);
     const messages = [];
-    for (const file of await this.messageFiles(groupId)) {
-      const raw = await fs.readFile(file);
-      const content = file.endsWith(".gz") ? (await gunzip(raw)).toString("utf8") : raw.toString("utf8");
-      messages.push(...parseJsonl(content));
+    // 从最新的一天往回读,凑够 limit 或撞到游标就停。读全量再切尾的老做法挂在长轮询上,
+    // 每个 worker 每 25 秒就把该群保留期内的每个 .gz 解压一遍。
+    for (let index = files.length - 1; index >= 0; index -= 1) {
+      const day = await this.readMessageFile(files[index]);
+      messages.unshift(...day);
+      // 游标落在更早的文件里(或已被清理)时可以停:那它比读到的都旧,结果就是"最新 limit 条",
+      // 和读全量再切尾的答案一致。
+      if (after && day.some((message) => message.id === after)) break;
+      if (messages.length >= capped) break;
     }
     let start = 0;
     if (after) {
       const index = messages.findIndex((message) => message.id === after);
       if (index >= 0) start = index + 1;
     }
-    return messages.slice(start).slice(-Math.min(Math.max(Number(limit) || 100, 1), 500));
+    return messages.slice(start).slice(-capped);
   }
 
   async history(groupId) {
@@ -670,5 +703,93 @@ export class FileStore {
       }
     }
     return archived;
+  }
+
+  /// 服务端只是中转缓冲区,消息的长期副本在各人自己的客户端里。这里按保留期回收:
+  /// 消息 7 天、附件 48 小时(按文件 mtime,所以是真的 48 小时而非按天取整)、
+  /// 已完结的审批和任务跟着消息一起走 —— 它们内嵌了消息原文,不能比消息活得更久。
+  async purgeExpired({
+    messageDays = 7,
+    attachmentHours = 48,
+    uploadTempHours = 1,
+    now = new Date()
+  } = {}) {
+    const purged = { messageFiles: 0, attachments: 0, approvals: 0, tasks: 0, uploadTemp: 0 };
+    const oldestDay = dayOf(new Date(now.getTime() - messageDays * 86_400_000).toISOString());
+    const attachmentCutoff = now.getTime() - attachmentHours * 3_600_000;
+    const contentCutoff = now.getTime() - messageDays * 86_400_000;
+    const groupIds = await fs.readdir(this.groupsDir);
+    for (const groupId of groupIds) {
+      if (!/^[0-9a-f-]{36}$/i.test(groupId)) continue;
+      for (const file of await this.messageFiles(groupId)) {
+        if (path.basename(file).slice(0, 10) >= oldestDay) continue;
+        await fs.unlink(file);
+        purged.messageFiles += 1;
+      }
+      purged.attachments += await this.purgeAttachments(groupId, attachmentCutoff);
+      purged.approvals += await this.purgeResolved(
+        groupId,
+        (update) => this.updateApprovals(groupId, update),
+        () => this.listApprovals(groupId),
+        (approval) => approval.status !== "pending" && this.olderThan(approval, contentCutoff)
+      );
+      purged.tasks += await this.purgeResolved(
+        groupId,
+        (update) => this.updateTasks(groupId, update),
+        () => this.listTasks(groupId),
+        (task) => (task.status === "completed" || task.status === "failed")
+          && this.olderThan(task, contentCutoff)
+      );
+    }
+    purged.uploadTemp = await this.purgeUploadTemp(now.getTime() - uploadTempHours * 3_600_000);
+    return purged;
+  }
+
+  olderThan(record, cutoff) {
+    return Date.parse(record.updatedAt ?? record.createdAt) <= cutoff;
+  }
+
+  /// 先读一遍确认真有过期项再走写队列,否则每小时都会给每个群重写一次(甚至凭空建出)
+  /// approvals.json 和 tasks.json。
+  async purgeResolved(groupId, runUpdate, list, isExpired) {
+    const current = await list().catch(() => []);
+    if (!current.some(isExpired)) return 0;
+    return runUpdate((records) => {
+      const kept = records.filter((record) => !isExpired(record));
+      const removed = records.length - kept.length;
+      records.splice(0, records.length, ...kept);
+      return removed;
+    }).catch(() => 0);
+  }
+
+  async purgeAttachments(groupId, cutoff) {
+    const root = path.join(this.groupDir(groupId), "attachments");
+    let removed = 0;
+    for (const day of await fs.readdir(root).catch(() => [])) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      const dir = path.join(root, day);
+      for (const name of await fs.readdir(dir).catch(() => [])) {
+        const file = path.join(dir, name);
+        const stats = await fs.stat(file).catch(() => null);
+        if (!stats?.isFile() || stats.mtimeMs > cutoff) continue;
+        await fs.unlink(file);
+        removed += 1;
+      }
+      await removeIfEmpty(dir);
+    }
+    return removed;
+  }
+
+  /// multer 落盘后如果请求中途失败,临时文件不会自己消失。
+  async purgeUploadTemp(cutoff) {
+    let removed = 0;
+    for (const name of await fs.readdir(this.uploadTempDir).catch(() => [])) {
+      const file = path.join(this.uploadTempDir, name);
+      const stats = await fs.stat(file).catch(() => null);
+      if (!stats?.isFile() || stats.mtimeMs > cutoff) continue;
+      await fs.unlink(file);
+      removed += 1;
+    }
+    return removed;
   }
 }

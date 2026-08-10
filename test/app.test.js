@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -52,7 +53,7 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
-  const { app, store } = await createApp({
+  const { app, store, sweepExpiredTokens } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
     ...options
@@ -62,7 +63,7 @@ async function fixture(t, options = {}) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, store, dataDir };
+  return { base, store, dataDir, sweepExpiredTokens };
 }
 
 async function json(base, url, options = {}) {
@@ -1524,4 +1525,138 @@ test("compresses message logs from previous days and can still read them", async
   await fs.access(`${oldFile}.gz`);
   const messages = await store.readMessages(group.id);
   assert.equal(messages[0].text, "from yesterday");
+});
+
+test("reads recent messages without decompressing the whole history", async (t) => {
+  const { store } = await fixture(t);
+  const { group, owner } = await store.createGroup({ name: "Tail", ownerName: "Owner" });
+  const dir = path.join(store.groupDir(group.id), "messages");
+  const days = ["2026-08-01", "2026-08-02", "2026-08-03"];
+  for (const day of days) {
+    const lines = [0, 1, 2].map((index) => JSON.stringify({
+      id: `${day}-${index}`,
+      groupId: group.id,
+      sender: { id: owner.id, name: owner.name, type: "human", provider: null },
+      text: `${day} #${index}`,
+      attachments: [],
+      replyTo: null,
+      createdAt: `${day}T10:00:0${index}.000Z`
+    }));
+    await fs.writeFile(path.join(dir, `${day}.jsonl`), `${lines.join("\n")}\n`);
+  }
+  const reads = [];
+  const readFile = store.readMessageFile.bind(store);
+  store.readMessageFile = async (file) => {
+    reads.push(path.basename(file));
+    return readFile(file);
+  };
+
+  const latest = await store.readMessages(group.id, { limit: 2 });
+  assert.deepEqual(latest.map((message) => message.id), ["2026-08-03-1", "2026-08-03-2"]);
+  assert.deepEqual(reads, ["2026-08-03.jsonl"]);
+
+  reads.length = 0;
+  const afterOlderCursor = await store.readMessages(group.id, { after: "2026-08-02-1", limit: 100 });
+  assert.deepEqual(
+    afterOlderCursor.map((message) => message.id),
+    ["2026-08-02-2", "2026-08-03-0", "2026-08-03-1", "2026-08-03-2"]
+  );
+  assert.deepEqual(reads, ["2026-08-03.jsonl", "2026-08-02.jsonl"]);
+
+  reads.length = 0;
+  const purgedCursor = await store.readMessages(group.id, { after: "purged-away", limit: 2 });
+  assert.deepEqual(purgedCursor.map((message) => message.id), ["2026-08-03-1", "2026-08-03-2"]);
+  assert.deepEqual(reads, ["2026-08-03.jsonl"]);
+});
+
+test("purges expired messages, attachments and finished records", async (t) => {
+  const { store } = await fixture(t);
+  const { group, owner } = await store.createGroup({ name: "Purge", ownerName: "Owner" });
+  const now = new Date("2026-08-10T12:00:00.000Z");
+  const groupDir = store.groupDir(group.id);
+  const messageLine = (day) => `${JSON.stringify({
+    id: day,
+    groupId: group.id,
+    sender: { id: owner.id, name: owner.name, type: "human", provider: null },
+    text: day,
+    attachments: [],
+    replyTo: null,
+    createdAt: `${day}T10:00:00.000Z`
+  })}\n`;
+  const expiredMessages = path.join(groupDir, "messages", "2026-08-01.jsonl.gz");
+  const keptMessages = path.join(groupDir, "messages", "2026-08-08.jsonl.gz");
+  await fs.writeFile(expiredMessages, zlib.gzipSync(Buffer.from(messageLine("2026-08-01"))));
+  await fs.writeFile(keptMessages, zlib.gzipSync(Buffer.from(messageLine("2026-08-08"))));
+
+  const expiredAttachmentDir = path.join(groupDir, "attachments", "2026-08-07");
+  const keptAttachmentDir = path.join(groupDir, "attachments", "2026-08-10");
+  await fs.mkdir(expiredAttachmentDir, { recursive: true });
+  await fs.mkdir(keptAttachmentDir, { recursive: true });
+  const expiredAttachment = path.join(expiredAttachmentDir, "old.png");
+  const keptAttachment = path.join(keptAttachmentDir, "fresh.png");
+  await fs.writeFile(expiredAttachment, "old");
+  await fs.writeFile(keptAttachment, "fresh");
+  // 附件按文件 mtime 判定,所以这里是真的「超过 48 小时」而不是按天取整。
+  const threeDaysAgo = new Date(now.getTime() - 3 * 86_400_000);
+  await fs.utimes(expiredAttachment, threeDaysAgo, threeDaysAgo);
+  await fs.utimes(keptAttachment, now, now);
+
+  await fs.writeFile(path.join(groupDir, "approvals.json"), JSON.stringify([
+    { id: "resolved-old", status: "approved", updatedAt: "2026-08-01T10:00:00.000Z", source: { text: "旧原文" } },
+    { id: "pending-old", status: "pending", updatedAt: "2026-08-01T10:00:00.000Z", source: { text: "还没批" } }
+  ]));
+  await fs.writeFile(path.join(groupDir, "tasks.json"), JSON.stringify([
+    { id: "done-old", status: "completed", updatedAt: "2026-08-01T10:00:00.000Z", report: "旧报告" },
+    { id: "open-old", status: "assigned", updatedAt: "2026-08-01T10:00:00.000Z", report: null }
+  ]));
+
+  const staleUpload = path.join(store.uploadTempDir, "abandoned");
+  const freshUpload = path.join(store.uploadTempDir, "in-flight");
+  await fs.writeFile(staleUpload, "abandoned");
+  await fs.writeFile(freshUpload, "in-flight");
+  await fs.utimes(staleUpload, threeDaysAgo, threeDaysAgo);
+  await fs.utimes(freshUpload, now, now);
+
+  const purged = await store.purgeExpired({ messageDays: 7, attachmentHours: 48, now });
+
+  assert.deepEqual(purged, {
+    messageFiles: 1,
+    attachments: 1,
+    approvals: 1,
+    tasks: 1,
+    uploadTemp: 1
+  });
+  await assert.rejects(fs.access(expiredMessages));
+  await fs.access(keptMessages);
+  await assert.rejects(fs.access(expiredAttachmentDir));
+  await fs.access(keptAttachment);
+  await assert.rejects(fs.access(staleUpload));
+  await fs.access(freshUpload);
+  assert.deepEqual((await store.listApprovals(group.id)).map((item) => item.id), ["pending-old"]);
+  assert.deepEqual((await store.listTasks(group.id)).map((item) => item.id), ["open-old"]);
+  assert.deepEqual((await store.readMessages(group.id)).map((item) => item.id), ["2026-08-08"]);
+
+  const again = await store.purgeExpired({ messageDays: 7, attachmentHours: 48, now });
+  assert.deepEqual(again, { messageFiles: 0, attachments: 0, approvals: 0, tasks: 0, uploadTemp: 0 });
+});
+
+test("expired one-time tokens are dropped instead of living in memory forever", async (t) => {
+  const { base, sweepExpiredTokens } = await fixture(t);
+  const account = await json(base, "/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email: "sweep@example.com" })
+  });
+  const accountToken = account.body.accountToken;
+  const transfer = await json(base, "/api/account/browser-transfers", {
+    method: "POST",
+    headers: { "X-Account-Token": accountToken },
+    body: "{}"
+  });
+  const url = `/api/account/browser-transfers/${transfer.body.transferToken}`;
+  assert.equal((await json(base, url, { headers: { "X-Account-Token": accountToken } })).response.status, 200);
+
+  sweepExpiredTokens(Date.parse(transfer.body.expiresAt) + 60 * 60_000);
+
+  const afterSweep = await json(base, url, { headers: { "X-Account-Token": accountToken } });
+  assert.equal(afterSweep.response.status, 404);
 });

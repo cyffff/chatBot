@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import express from "express";
+import fs from "node:fs/promises";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -104,6 +105,7 @@ export async function createApp(options = {}) {
   const dataDir = options.dataDir ?? process.env.GROUP_RELAY_DATA_DIR ?? "./data";
   const configuredPublicBaseUrl = options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL;
   const presenceTimeoutMs = Number(options.presenceTimeoutMs ?? 90_000);
+  const expiredTokenGraceMs = Number(options.expiredTokenGraceMs ?? 10 * 60_000);
   const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
   const store = options.store ?? new FileStore(dataDir);
   await store.init();
@@ -114,10 +116,21 @@ export async function createApp(options = {}) {
   const waiters = new Map();
   const browserTransfers = new Map();
   const webLogins = new Map();
+  // 落盘而不是 memoryStorage:后者一个请求最多把 fileSize × files = 250MB 缓进 RAM,
+  // 1G 内存的机器一次上传就能被打死。临时文件和数据目录同盘,搬运走 rename。
   const upload = multer({
-    storage: multer.memoryStorage(),
+    storage: multer.diskStorage({
+      destination: (_req, _file, done) => done(null, store.uploadTempDir),
+      filename: (_req, _file, done) => done(null, crypto.randomUUID())
+    }),
     limits: { fileSize: maxFileSize, files: 10 }
   });
+
+  const discardUploads = async (req) => {
+    await Promise.all((req.files ?? [])
+      .filter((file) => file.path)
+      .map((file) => fs.rm(file.path, { force: true }).catch(() => {})));
+  };
 
   const publicBaseUrl = (req) => (
     configuredPublicBaseUrl?.replace(/\/$/, "") ?? `${req.protocol}://${req.get("host")}`
@@ -257,6 +270,18 @@ export async function createApp(options = {}) {
     if (Date.now() > login.expiresAt) login.status = "expired";
     return login;
   }
+
+  // 过期的一次性令牌原来只被标成 expired,条目永远留在 Map 里。保留一段宽限期让前端还能
+  // 读到"已过期"的状态,过了宽限期才真正丢掉。
+  const sweepExpiredTokens = (now = Date.now()) => {
+    for (const map of [browserTransfers, webLogins]) {
+      for (const [token, record] of map) {
+        if (now > record.expiresAt + expiredTokenGraceMs) map.delete(token);
+      }
+    }
+  };
+  const tokenSweepTimer = setInterval(() => sweepExpiredTokens(), expiredTokenGraceMs);
+  tokenSweepTimer.unref();
 
   function publish(groupId, event, payload) {
     for (const response of subscribers.get(groupId) ?? []) {
@@ -1096,6 +1121,12 @@ export async function createApp(options = {}) {
   app.get("/transfer/:transferToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
   app.get("/web-login/:loginToken", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
 
+  app.use(async (error, req, res, next) => {
+    // 请求失败时把已落盘的上传删掉,不然要等清理任务兜。
+    await discardUploads(req);
+    next(error);
+  });
+
   app.use((error, _req, res, _next) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: "invalid input", details: error.issues });
@@ -1108,5 +1139,5 @@ export async function createApp(options = {}) {
     res.status(500).json({ error: "internal server error" });
   });
 
-  return { app, store };
+  return { app, store, sweepExpiredTokens };
 }

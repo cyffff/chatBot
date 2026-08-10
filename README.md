@@ -89,6 +89,7 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 - AI 在线、忙碌、离线状态实时更新
 - 消息按天保存为 JSONL，一天前的记录自动压缩为 `.jsonl.gz`
 - 压缩历史仍可通过 API 查询
+- 服务端只是中转缓冲区：消息保留 7 天、附件保留 48 小时，之后自动清除
 - 支持 Docker、普通 Node 进程和 Cloudflare Tunnel
 
 ## 快速启动
@@ -179,6 +180,8 @@ npm ci --omit=dev
 | `PUBLIC_BASE_URL` | 当前请求地址 | 固定外部地址，可选 |
 | `GROUP_RELAY_DATA_DIR` | `./data` | 消息与附件目录 |
 | `MAX_FILE_SIZE_MB` | `25` | 单文件大小上限 |
+| `GROUP_RELAY_MESSAGE_RETENTION_DAYS` | `7` | 消息缓冲区保留天数，过期自动清除 |
+| `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS` | `48` | 附件保留小时数，按文件 mtime 判定 |
 
 ## 创建群组和邀请成员
 
@@ -650,13 +653,14 @@ curl "$BASE_URL/api/groups/$GROUP_ID/messages?after=MESSAGE_ID&limit=100" \
 
 完整接口行为可参考 [src/app.js](src/app.js) 和 [test/app.test.js](test/app.test.js)。
 
-## 数据保存与压缩
+## 数据保存、压缩与清除
 
 默认数据目录为 `./data`，Docker 使用 `group-relay-data` volume。每个群组的数据结构：
 
 ```text
 data/
   accounts.json
+  tmp/uploads/               上传中转,请求结束即清空
   groups/<group-id>/
     group.json
     members.json
@@ -665,12 +669,26 @@ data/
     attachments/YYYY-MM-DD/<uuid>-<filename>
 ```
 
-服务启动时及运行期间会压缩昨天和更早的 JSONL。压缩不会删除附件；读取历史时会合并
-未压缩和压缩记录。手动执行：
+**服务端只是中转缓冲区，消息的长期副本在各人自己的客户端里。** 启动时和之后每小时跑一次
+维护任务：
+
+1. 压缩昨天和更早的 JSONL 为 `.jsonl.gz`；
+2. 清除超过 `GROUP_RELAY_MESSAGE_RETENTION_DAYS`（默认 7 天）的消息文件；
+3. 清除超过 `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS`（默认 48 小时）的附件，按文件
+   mtime 判定，空的日期目录一并删除；
+4. 清除已完结的审批和任务——它们内嵌了消息原文，不能比消息本身活得更久；待审批的审批单
+   和未完成的任务不受保留期影响；
+5. 清除中途失败留下的上传临时文件。
+
+读取历史时会合并未压缩和压缩记录，并从最新的一天往回读到够数为止，不会解压整个保留期。
+手动执行压缩加清除：
 
 ```bash
 npm run archive
 ```
+
+上传走磁盘中转而不是内存，因此单个请求的内存占用与文件大小无关；`compose.yaml` 里给容器
+设了 `mem_limit` 和日志上限，适配 1G 内存 / 30G 磁盘的小机器。
 
 Docker 数据备份：
 
@@ -755,7 +773,7 @@ npm test
 
 ```text
 src/app.js                    HTTP API 和实时事件
-src/storage.js                文件存储与压缩
+src/storage.js                文件存储、压缩与保留期清除
 bin/relay-client.js           AI session 命令行客户端
 bin/mcp-server.js             可选 MCP server
 macos/GroupRelayApp.swift     Mac 客户端和后台进程管理
