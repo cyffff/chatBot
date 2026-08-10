@@ -191,10 +191,11 @@ export class FileStore {
   }
 
   groupIdsFor(account) {
-    return [
+    // 去重是不变式:建群和加入两边理论上不该有同一个 id,真出现了也不该把群列两遍。
+    return [...new Set([
       ...(account.createdGroups ?? []).map((group) => group.id),
       ...(account.joinedGroups ?? [])
-    ];
+    ])];
   }
 
   // ── 任务与审批(存 id 引用,不存正文)─────────────────────────────────────────
@@ -406,6 +407,9 @@ export class FileStore {
       const target = current[to];
       if (!source || !target) return null;
       for (const group of source.createdGroups) {
+        // 这个群可能已经在目标账号的「加入」里(claim 之前他是以成员身份在里面的)。
+        // 不摘掉的话建群和加入两处都有同一个 id,群列表会重复一条。
+        target.joinedGroups = target.joinedGroups.filter((id) => id !== group.id);
         if (target.createdGroups.some((candidate) => candidate.id === group.id)) continue;
         target.createdGroups.push(group);
         touchedGroups.add(group.id);

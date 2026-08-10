@@ -2011,6 +2011,12 @@ test("an old device identity binds an email and takes its groups with it", async
   assert.equal(buffered.sender.id, "human:yunfei.cao@astratech.ae");
   assert.deepEqual(buffered.mentions.map((m) => m.id), ["ai:yunfei.cao@astratech.ae:codex"]);
 
+  // claim 之前已经以成员身份加入过的群,不能在列表里出现两次
+  const twice = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": "yunfei.cao@astratech.ae" }
+  });
+  assert.equal(twice.body.sessions.filter((s) => s.group.id === groupId).length, 1);
+
   // 设备身份变成空壳,还拿着它的客户端不会 404
   const leftover = await json(base, "/api/account/sessions", {
     headers: { "X-Relay-Email": deviceEmail }
