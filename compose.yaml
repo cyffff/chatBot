@@ -23,6 +23,8 @@ services:
       GROUP_RELAY_MESSAGE_RETENTION_DAYS: "7"
       GROUP_RELAY_ATTACHMENT_RETENTION_HOURS: "48"
       NODE_OPTIONS: "--max-old-space-size=384"
+      # 整机搬迁地址,平时留空。填了之后这台启动时把所有账号推给新服务器并公告 movedTo。
+      GROUP_RELAY_MOVED_TO: "${GROUP_RELAY_MOVED_TO:-}"
 
   cloudflared:
     image: cloudflare/cloudflared:2026.7.3
