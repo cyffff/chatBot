@@ -4,6 +4,7 @@ import {
   historyAvailable,
   historyStats,
   importHistory,
+  messagesByIds,
   recentMessages,
   saveMessages
 } from "./history.js";
@@ -32,6 +33,7 @@ const state = {
   approvals: [],
   approvalPendingCount: 0,
   taskFilter: "all",
+  taskMessages: new Map(),
   taskRefreshTimer: null,
   profileAvatarDataUrl: null,
   overviewView: "overview"
@@ -1060,12 +1062,12 @@ function renderAITasks() {
     const body = document.createElement("div");
     const title = document.createElement("h3");
     title.className = "task-title";
-    title.textContent = task.title;
+    title.textContent = state.taskMessages.get(task.sourceMessageId)?.text || task.jira.key;
     const meta = document.createElement("p");
     meta.className = "task-meta";
     meta.textContent = `${taskStatusLabels[task.status] ?? task.status} · ${taskAssigneeName(task.assignee)} · ${task.group.name} · ${new Date(task.updatedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
     body.append(title, meta);
-    const reportText = task.report || (task.status === "in_progress" ? task.progress : null);
+    const reportText = state.taskMessages.get(task.responseMessageId)?.text ?? null;
     if (reportText) {
       const report = document.createElement("p");
       report.className = "task-report";
@@ -1172,10 +1174,17 @@ async function resolveApprovals(approvalIds, action) {
   }
 }
 
+// 看板文案不再由服务端下发,按任务引用的消息 id 回本机记录里取一批。
+async function resolveTaskMessages() {
+  const ids = state.tasks.flatMap((task) => [task.sourceMessageId, task.responseMessageId]);
+  state.taskMessages = await messagesByIds(ids).catch(() => new Map());
+}
+
 async function loadAccountTasks() {
   const result = await accountApi("/api/account/tasks");
   state.tasks = result.tasks;
   state.taskSummary = result.summary;
+  await resolveTaskMessages();
   renderAITasks();
 }
 
@@ -1388,6 +1397,7 @@ async function loadAccountDashboard() {
   state.accountSessions = sessions;
   state.tasks = taskData.tasks;
   state.taskSummary = taskData.summary;
+  await resolveTaskMessages();
   state.approvals = approvalData.approvals;
   $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
   renderOverviewHeader(account);

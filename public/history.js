@@ -78,6 +78,22 @@ export async function recentMessages(groupId, limit = 200) {
   return newestFirst.reverse();
 }
 
+/// 看板上的任务标题和进展原来是服务端存的正文副本,现在按 id 回到本机记录里取。
+export async function messagesByIds(ids) {
+  const wanted = [...new Set((ids ?? []).filter(Boolean))];
+  if (!wanted.length) return new Map();
+  const database = await openHistory();
+  const transaction = database.transaction(messageStore, "readonly");
+  const store = transaction.objectStore(messageStore);
+  const found = new Map();
+  // 所有 get 都在同一个事务里同步发出,不能改成串行 await,否则事务会先自动关闭。
+  await Promise.all(wanted.map(async (id) => {
+    const message = await request(store.get(id));
+    if (message) found.set(id, message);
+  }));
+  return found;
+}
+
 export async function latestMessageId(groupId) {
   const [latest] = await recentMessages(groupId, 1);
   return latest?.id ?? null;

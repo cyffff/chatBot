@@ -398,7 +398,7 @@ test("trusted desktop AIs from the same owner can delegate work to each other", 
 });
 
 test("desktop AI approval requests appear in the owner queue and batch approval redelivers once as trusted", async (t) => {
-  const { base } = await fixture(t);
+  const { base, store } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
     body: JSON.stringify({ name: "Approval queue", ownerName: "Other owner" })
@@ -464,6 +464,30 @@ test("desktop AI approval requests appear in the owner queue and batch approval 
   assert.ok(redelivery);
   assert.equal(redelivery.executionScope, "trusted");
   assert.equal(redelivery.mentions[0].id, attached.body.member.id);
+  // 原文是按 sourceMessageId 从缓冲区取的,审批单里不再存正文副本。
+  assert.equal(redelivery.text, "【已批准执行】请读取本机项目并运行测试");
+  assert.equal(requested.body.approval.source, undefined);
+
+  // 待审批的审批单活得比保留期长时,原文已经被清掉:退回 AI 自己写的 summary,不能直接失败。
+  const laterApproval = await json(base, `/api/groups/${created.body.group.id}/approvals`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` },
+    body: JSON.stringify({ sourceMessageId: commandBody.message.id, summary: "缓冲区已经没有原文了" })
+  });
+  assert.equal(laterApproval.response.status, 201);
+  const messagesDir = path.join(store.groupDir(created.body.group.id), "messages");
+  for (const name of await fs.readdir(messagesDir)) await fs.rm(path.join(messagesDir, name));
+  await json(base, "/api/account/approvals/resolve", {
+    method: "POST",
+    headers: accountHeaders,
+    body: JSON.stringify({ approvalIds: [laterApproval.body.approval.id], action: "approve" })
+  });
+  const afterPurge = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
+    headers: { Authorization: `Bearer ${attached.body.worker.memberToken}` }
+  });
+  const fallback = afterPurge.body.messages
+    .find((message) => message.approval?.id === laterApproval.body.approval.id);
+  assert.equal(fallback.text, "【已批准执行】缓冲区已经没有原文了");
 });
 
 test("one-click browser transfer imports sessions into the current account", async (t) => {
@@ -628,7 +652,10 @@ test("account AI board tracks Jira assignments through AI completion", async (t)
     headers: { "X-Account-Token": account.body.accountToken }
   });
   assert.equal(board.body.tasks[0].status, "completed");
-  assert.equal(board.body.tasks[0].report, "APP-123 已完成并通过测试。");
+  // 看板只存 id 引用,正文不落服务端 —— 客户端按这个 id 回本机记录里取。
+  assert.equal(board.body.tasks[0].responseMessageId, placeholderBody.message.id);
+  assert.equal(board.body.tasks[0].report, undefined);
+  assert.equal(board.body.tasks[0].title, undefined);
   assert.equal(board.body.summary.completed, 1);
 });
 
@@ -1602,12 +1629,12 @@ test("purges expired messages, attachments and finished records", async (t) => {
   await fs.utimes(keptAttachment, now, now);
 
   await fs.writeFile(path.join(groupDir, "approvals.json"), JSON.stringify([
-    { id: "resolved-old", status: "approved", updatedAt: "2026-08-01T10:00:00.000Z", source: { text: "旧原文" } },
-    { id: "pending-old", status: "pending", updatedAt: "2026-08-01T10:00:00.000Z", source: { text: "还没批" } }
+    { id: "resolved-old", status: "approved", updatedAt: "2026-08-01T10:00:00.000Z", summary: "旧审批" },
+    { id: "pending-old", status: "pending", updatedAt: "2026-08-01T10:00:00.000Z", summary: "还没批" }
   ]));
   await fs.writeFile(path.join(groupDir, "tasks.json"), JSON.stringify([
-    { id: "done-old", status: "completed", updatedAt: "2026-08-01T10:00:00.000Z", report: "旧报告" },
-    { id: "open-old", status: "assigned", updatedAt: "2026-08-01T10:00:00.000Z", report: null }
+    { id: "done-old", status: "completed", updatedAt: "2026-08-01T10:00:00.000Z" },
+    { id: "open-old", status: "assigned", updatedAt: "2026-08-01T10:00:00.000Z" }
   ]));
 
   const staleUpload = path.join(store.uploadTempDir, "abandoned");

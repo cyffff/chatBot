@@ -283,6 +283,12 @@ export async function createApp(options = {}) {
   const tokenSweepTimer = setInterval(() => sweepExpiredTokens(), expiredTokenGraceMs);
   tokenSweepTimer.unref();
 
+  async function sourceMessageFor(groupId, messageId) {
+    if (!messageId) return null;
+    const recent = await store.readMessages(groupId, { limit: 500 }).catch(() => []);
+    return recent.find((message) => message.id === messageId) ?? null;
+  }
+
   function publish(groupId, event, payload) {
     for (const response of subscribers.get(groupId) ?? []) {
       response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
@@ -491,9 +497,12 @@ export async function createApp(options = {}) {
           if (action === "approve") {
             const target = members.find((member) => member.id === approval.aiMember.id && member.type === "ai");
             if (target) {
+              // 原文按 id 从缓冲区取,不再从审批单里的副本读。过了保留期取不到就退回
+              // AI 自己写的 summary —— 派下去的活还能描述清楚,只是少了原始附件。
+              const source = await sourceMessageFor(group.id, approval.sourceMessageId);
               const redelivery = await store.appendMessage(group.id, owner, {
-                text: `【已批准执行】${approval.source.text || approval.summary}`,
-                attachments: approval.source.attachments ?? [],
+                text: `【已批准执行】${source?.text || approval.summary}`,
+                attachments: source?.attachments ?? [],
                 mentions: [{
                   id: target.id,
                   name: target.name,

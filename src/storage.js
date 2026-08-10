@@ -289,11 +289,9 @@ export class FileStore {
         groupId,
         ownerMemberId,
         sourceMessageId: sourceMessage.id,
-        source: {
-          text: sourceMessage.text,
-          sender: sourceMessage.sender,
-          attachments: sourceMessage.attachments ?? []
-        },
+        // 只留 id 引用。原来这里内嵌了 text/sender/attachments 整份原文,那是消息内容存在
+        // 服务端,而且会比保留期活得更久。要正文的地方按 id 从缓冲区(或客户端本地库)取。
+        sender: { id: sourceMessage.sender.id, name: sourceMessage.sender.name },
         aiMember: {
           id: aiMember.id,
           name: aiMember.name,
@@ -341,7 +339,8 @@ export class FileStore {
             groupId,
             sourceMessageId: message.id,
             responseMessageId: null,
-            title: jira.title,
+            // 只留 id 引用:标题和进展原来是消息正文的副本。看板文案由客户端按 id 从本机
+            // 记录里取,取不到就退回 Jira key。
             jira: { key: jira.key, url: jira.url },
             assignee: {
               id: assignee.id,
@@ -354,8 +353,6 @@ export class FileStore {
               name: message.sender.name
             },
             status: "assigned",
-            progress: null,
-            report: null,
             createdAt: message.createdAt,
             updatedAt: message.createdAt,
             startedAt: null,
@@ -383,17 +380,10 @@ export class FileStore {
         if (message.status === "processing") {
           task.status = "in_progress";
           task.startedAt ??= now;
-          task.progress = message.text || task.progress;
-        } else if (message.status === "failed") {
-          task.status = "failed";
-          task.startedAt ??= now;
-          task.completedAt = now;
-          task.report = message.text || task.report;
         } else {
-          task.status = "completed";
+          task.status = message.status === "failed" ? "failed" : "completed";
           task.startedAt ??= now;
           task.completedAt = now;
-          task.report = message.text || task.report;
         }
         changed.push(task);
       }
