@@ -177,7 +177,22 @@ async function ensureAccountCredential() {
 /// 网页版第一次打开时先问邮箱。默默注册一个 device-… 账号的话,这个人已有的群一个都
 /// 看不到 —— 工作台是空的,而且他没有任何入口说明自己是谁。桌面端有原生凭证可恢复,
 /// 走不到这里。
-function askForAccountEmail() {
+const isAutomaticEmail = (email) => Boolean(email?.endsWith("@device.group-relay.example.com"));
+
+/// 旧的本机账号带着群回来时,必须要求绑定邮箱 —— 否则这些群永远留在一个换台机器就没了的
+/// 设备身份下。绑定时把群一并带过去(/api/account/claim)。
+async function requireEmailForDeviceAccount() {
+  if (!isAutomaticEmail(state.email)) return false;
+  if (!state.accountSessions.length) return false;
+  $("#identity-title").textContent = "绑定你的邮箱";
+  $("#identity-hint").textContent = `这台机器上的临时身份下有 ${state.accountSessions.length} 个群组。`
+    + "绑定邮箱后它们会跟着邮箱走，换机器也不会丢。";
+  $("#skip-identity").textContent = "以后再说";
+  await askForAccountEmail({ claim: true });
+  return true;
+}
+
+function askForAccountEmail({ claim = false } = {}) {
   return new Promise((resolve) => {
     show("#identity-view");
     const form = $("#identity-form");
@@ -186,6 +201,13 @@ function askForAccountEmail() {
       const email = String(new FormData(form).get("email") ?? "").trim().toLowerCase();
       if (!email) return;
       try {
+        if (claim) {
+          const moved = await accountApi("/api/account/claim", {
+            method: "POST",
+            body: JSON.stringify({ email })
+          }).catch(() => null);
+          if (moved) toast(`已绑定 ${email}，带过去 ${moved.groups} 个自建群组、${moved.joined} 个加入的群组`);
+        }
         await useAccountEmail(email);
         cleanup();
         resolve();
@@ -1467,6 +1489,9 @@ async function loadAccountDashboard() {
   startTaskRefresh();
   void renderHistoryStats();
   renderServerSettings();
+  void requireEmailForDeviceAccount().then((asked) => {
+    if (asked) void loadAccountDashboard();
+  });
   void followServerMove();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);

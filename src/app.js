@@ -440,6 +440,25 @@ export async function createApp(options = {}) {
     }
   });
 
+  /// 旧的本机账号回来登录时用:绑定邮箱,并把这个设备身份名下的群一起带过去。
+  app.post("/api/account/claim", requireAccount, async (req, res, next) => {
+    try {
+      const { email } = accountSchema.parse(req.body);
+      const result = await store.claimDeviceAccount(req.account.email, email);
+      if (!result) return res.status(400).json({ error: "nothing to claim for this identity" });
+      // 群主换人了,在线的成员名册要跟着更新。
+      const groups = new Set((await store.accountByEmail(email))?.createdGroups.map((g) => g.id) ?? []);
+      for (const groupId of groups) {
+        for (const member of await store.listMembers(groupId).catch(() => [])) {
+          publish(groupId, "member_updated", publicMember(member));
+        }
+      }
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/account/export", requireAccount, async (req, res, next) => {
     try {
       res.json(await store.exportAccount(req.account.email));
