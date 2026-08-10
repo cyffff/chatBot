@@ -1,4 +1,12 @@
 import { markdownTableDefinition, splitMarkdownTableRow } from "./markdown.js";
+import {
+  exportHistory,
+  historyAvailable,
+  historyStats,
+  importHistory,
+  recentMessages,
+  saveMessages
+} from "./history.js";
 
 const $ = (selector) => document.querySelector(selector);
 const state = {
@@ -672,11 +680,21 @@ function renderMessage(message) {
   }
 }
 
+// 消息到达的三条路径(首屏、长轮询、SSE)都写一遍本地库;失败不能影响聊天本身。
+function recordMessages(messages) {
+  saveMessages(messages).catch(() => {});
+}
+
 async function loadChat() {
   const requestedGroupId = state.groupId;
+  // 先拿本地历史,再只向服务端要它之后的增量。服务端过了保留期已经没有这些消息了,
+  // 本地这一份才是长期副本。
+  const cached = await recentMessages(state.groupId).catch(() => []);
+  const incremental = new URLSearchParams({ limit: "200" });
+  if (cached.length) incremental.set("after", cached.at(-1).id);
   const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor }] = await Promise.all([
     api(`/api/groups/${state.groupId}`),
-    api(`/api/groups/${state.groupId}/messages?limit=200`)
+    api(`/api/groups/${state.groupId}/messages?${incremental}`)
   ]);
   if (state.groupId !== requestedGroupId) return false;
   state.inviteToken = group.inviteToken;
@@ -684,9 +702,17 @@ async function loadChat() {
   state.canManageTrustedExecution = canManageTrustedExecution === true;
   $("#group-name").textContent = group.name;
   $("#messages").innerHTML = "";
+  state.rendered.clear();
   renderMembers(members);
-  messages.forEach(renderMessage);
-  state.cursor = cursor;
+  // 游标被保留期清掉时服务端会退回「最新 200 条」,那批可能和本地重叠、也可能比本地
+  // 某些消息更旧,所以按 id 去重 + 按时间排序后再渲染,而不是直接接在后面。
+  const merged = new Map(cached.map((message) => [message.id, message]));
+  for (const message of messages) merged.set(message.id, message);
+  [...merged.values()]
+    .sort((left, right) => (left.createdAt < right.createdAt ? -1 : 1))
+    .forEach(renderMessage);
+  recordMessages(messages);
+  state.cursor = cursor ?? state.cursor;
   show("#chat-view");
   requestAnimationFrame(() => {
     scrollMessagesToBottom();
@@ -726,8 +752,16 @@ function connectEvents() {
   const events = new EventSource(`/api/groups/${state.groupId}/events?token=${encodeURIComponent(state.token)}`);
   state.eventSource = events;
   events.addEventListener("ready", markConnected);
-  events.addEventListener("message", (event) => renderMessage(JSON.parse(event.data)));
-  events.addEventListener("message_updated", (event) => updateRenderedMessage(JSON.parse(event.data)));
+  events.addEventListener("message", (event) => {
+    const message = JSON.parse(event.data);
+    renderMessage(message);
+    recordMessages([message]);
+  });
+  events.addEventListener("message_updated", (event) => {
+    const message = JSON.parse(event.data);
+    updateRenderedMessage(message);
+    recordMessages([message]);
+  });
   for (const eventName of ["member_joined", "member_left", "member_presence", "member_updated"]) {
     events.addEventListener(eventName, (event) => {
       applyMemberEvent(eventName, JSON.parse(event.data)).catch(() => {});
@@ -747,8 +781,10 @@ async function pollMessages() {
       const { messages, event, eventPayload } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
       if (state.groupId !== requestedGroupId) break;
       messages.forEach(renderMessage);
+      recordMessages(messages);
       if (event === "message_updated" && eventPayload) {
         updateRenderedMessage(eventPayload);
+        recordMessages([eventPayload]);
       } else if (event && event !== "message" && eventPayload) {
         await applyMemberEvent(event, eventPayload);
       }
@@ -1363,6 +1399,7 @@ async function loadAccountDashboard() {
   renderAITasks();
   renderApprovals();
   startTaskRefresh();
+  void renderHistoryStats();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
   $("#account-create-panel").classList.add("hidden");
@@ -1493,6 +1530,58 @@ $("#start-browser-transfer").addEventListener("click", async (event) => {
     toast(error.message);
   } finally {
     button.disabled = false;
+  }
+});
+
+function downloadJson(payload, filename) {
+  const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function renderHistoryStats() {
+  const target = $("#history-stats");
+  if (!target) return;
+  if (!historyAvailable()) {
+    target.textContent = "这个浏览器不支持本地聊天记录存储，关掉页面后记录会丢。";
+    return;
+  }
+  try {
+    const { messages, groups } = await historyStats();
+    target.textContent = `本机已存 ${messages} 条消息，覆盖 ${groups} 个群组。`;
+  } catch {
+    target.textContent = "";
+  }
+}
+
+$("#export-history").addEventListener("click", async () => {
+  try {
+    const payload = await exportHistory();
+    if (!payload.messages.length) throw new Error("本机还没有聊天记录可导出");
+    const stamp = payload.exportedAt.slice(0, 10);
+    downloadJson(payload, `group-relay-history-${stamp}.json`);
+    toast(`已导出 ${payload.messages.length} 条消息`);
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#import-history-file").addEventListener("change", async (event) => {
+  const [file] = event.target.files;
+  event.target.value = "";
+  if (!file) return;
+  try {
+    const { imported, skipped } = await importHistory(JSON.parse(await file.text()));
+    await renderHistoryStats();
+    // 当前就开着这个群时重新加载,让导入的记录立刻出现在上方。
+    if (state.groupId) await loadChat();
+    toast(`已导入 ${imported} 条消息${skipped ? `，${skipped} 条格式无效已跳过` : ""}`);
+  } catch (error) {
+    toast(error.message);
   }
 });
 

@@ -90,6 +90,8 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 - 消息按天保存为 JSONL，一天前的记录自动压缩为 `.jsonl.gz`
 - 压缩历史仍可通过 API 查询
 - 服务端只是中转缓冲区：消息保留 7 天、附件保留 48 小时，之后自动清除
+- 聊天记录的长期副本存在本机 IndexedDB，网页和两个桌面客户端共用同一份实现
+- 换机器时导出／导入聊天记录文件，服务端不做历史回溯
 - 支持 Docker、普通 Node 进程和 Cloudflare Tunnel
 
 ## 快速启动
@@ -690,6 +692,18 @@ npm run archive
 上传走磁盘中转而不是内存，因此单个请求的内存占用与文件大小无关；`compose.yaml` 里给容器
 设了 `mem_limit` 和日志上限，适配 1G 内存 / 30G 磁盘的小机器。
 
+### 聊天记录存在本机
+
+长期副本在客户端的 IndexedDB（`public/history.js`）里，不在服务端。Mac 客户端是
+WKWebView、Windows 是带持久 `userDataFolder` 的 WebView2，两端都用默认持久存储，所以网页
+和两个桌面客户端共用同一份实现。
+
+打开群聊时先渲染本地记录，再只向服务端请求本地游标之后的增量；游标已经被保留期清掉时服务端
+退回「最新 N 条」，客户端按 id 去重、按时间排序后合并，不会重复或乱序。
+
+**服务端不做历史回溯。** 换机器请在「账户与高级恢复」里导出聊天记录文件，在新机器上导入。
+附件是二进制，不进本地库，因此超过 48 小时的附件链接会失效——正文仍在。
+
 Docker 数据备份：
 
 ```bash
@@ -779,4 +793,5 @@ bin/mcp-server.js             可选 MCP server
 macos/GroupRelayApp.swift     Mac 客户端和后台进程管理
 macos/GroupRelayBridge.swift  本地三 Provider AI 桥接
 public/app.js                 浏览器客户端
+public/history.js             本机聊天记录(IndexedDB)与导出导入
 ```
