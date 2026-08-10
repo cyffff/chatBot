@@ -222,28 +222,23 @@
               </div>
               <form id="server-settings-form" class="profile-settings-card">
                 <div class="profile-settings-heading">
-                  <div><strong>服务器地址</strong><small>换服务器前先把账号和群组同步过去，聊天记录一直在本机</small></div>
+                  <div><strong>服务器</strong><small id="server-current"></small></div>
+                  <button id="edit-server" class="text-button" type="button">编辑</button>
                 </div>
-                <label>服务器链接<input id="server-url" name="serverUrl" type="url" placeholder="https://chat.example.com" /></label>
-                <p id="server-current" class="muted compact"></p>
-                <div>
-                  <button id="switch-server" type="submit">同步并切换过去</button>
+                <div id="server-editor" class="profile-editor hidden">
+                  <label>服务器链接<input id="server-url" name="serverUrl" type="url" placeholder="https://chat.example.com" /></label>
+                  <p class="muted compact">保存即把账号和群组同步过去再切换，聊天记录一直在本机。</p>
+                  <div class="profile-editor-actions">
+                    <button type="submit">保存并切换</button>
+                    <button id="cancel-server-edit" class="secondary" type="button">取消</button>
+                  </div>
+                  <p id="server-sync-result" class="muted compact"></p>
                 </div>
-                <p id="server-sync-result" class="muted compact"></p>
-              </form>
-
-              <form id="identity-settings-form" class="profile-settings-card">
-                <div class="profile-settings-heading">
-                  <div><strong>邮箱身份</strong><small>换成你自己的邮箱，就能看到那个账号下的群组</small></div>
-                </div>
-                <p id="identity-current" class="muted compact"></p>
-                <label>邮箱<input id="identity-email" name="email" type="email" maxlength="200" placeholder="例如：yunfei.cao@astratech.ae" /></label>
-                <button type="submit">切换到这个邮箱</button>
               </form>
 
               <form id="profile-settings-form" class="profile-settings-card">
                 <div class="profile-settings-heading">
-                  <div><strong>个人资料</strong><small>默认昵称取注册邮箱 @ 前面的内容</small></div>
+                  <div><strong>个人资料</strong><small>邮箱就是身份，改邮箱保存即切换账号</small></div>
                   <button id="edit-profile" class="text-button" type="button">编辑资料</button>
                 </div>
                 <div class="profile-summary">
@@ -258,7 +253,9 @@
                     <label class="profile-avatar-upload">上传头像<input id="profile-avatar-input" type="file" accept="image/png,image/jpeg,image/webp" /></label>
                     <button id="remove-profile-avatar" class="text-button" type="button">移除头像</button>
                   </div>
+                  <label>邮箱<input name="email" type="email" required maxlength="200" placeholder="例如：yunfei.cao@astratech.ae" /></label>
                   <label>昵称<input name="displayName" required maxlength="60" placeholder="输入你的昵称" /></label>
+                  <p class="muted compact">改邮箱并保存就会切换到那个账号，它自己的昵称和群组会一并载入。</p>
                   <div class="profile-editor-actions">
                     <button type="submit">保存修改</button>
                     <button id="cancel-profile-edit" class="secondary" type="button">取消</button>
