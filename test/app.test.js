@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createServer } from "node:http";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -1865,4 +1866,39 @@ test("account data syncs to another server, keeping group ids and invite links",
     body: JSON.stringify({ targetBaseUrl: "ftp://example.com" })
   });
   assert.equal(refused.response.status, 400);
+});
+
+test("refuses to sync to a server that is still on the old protocol", async (t) => {
+  const { base } = await fixture(t);
+  await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Old target", email: "owner@example.com", displayName: "Owner" })
+  });
+
+  // 旧版本的 /health 只回 {ok:true},没有 identity 字段。
+  const legacy = createServer((request, response) => {
+    if (request.url === "/health") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      return response.end(JSON.stringify({ ok: true }));
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve) => legacy.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => legacy.close(resolve)));
+
+  const refused = await json(base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "owner@example.com" },
+    body: JSON.stringify({ targetBaseUrl: `http://127.0.0.1:${legacy.address().port}` })
+  });
+  assert.equal(refused.response.status, 409);
+  assert.match(refused.body.error, /旧协议/);
+
+  const unreachable = await json(base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "owner@example.com" },
+    body: JSON.stringify({ targetBaseUrl: "http://127.0.0.1:1" })
+  });
+  assert.equal(unreachable.response.status, 409);
+  assert.match(unreachable.body.error, /无法访问/);
 });

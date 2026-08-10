@@ -291,6 +291,29 @@ export async function createApp(options = {}) {
   const tokenSweepTimer = setInterval(() => sweepExpiredTokens(), expiredTokenGraceMs);
   tokenSweepTimer.unref();
 
+  /// 对面必须是同一套身份模型。旧版本的 /health 只回 {ok:true},没有 identity 字段 ——
+  /// 那台上同步过去的数据会被它当成不认识的格式,而客户端切过去之后全部 401。
+  async function targetCompatibility(targetBaseUrl) {
+    const health = new URL("/health", targetBaseUrl);
+    const response = await fetch(health, { signal: AbortSignal.timeout(15_000) })
+      .catch((error) => ({ ok: false, failure: error.message }));
+    if (response.failure) {
+      return { ok: false, error: `目标服务器无法访问：${response.failure}` };
+    }
+    if (!response.ok) {
+      return { ok: false, error: `目标服务器 /health 返回 ${response.status}` };
+    }
+    const body = await response.json().catch(() => ({}));
+    if (body.identity !== "email") {
+      return {
+        ok: false,
+        error: "目标服务器还在旧协议（没有 email 身份），先把它更新到这个版本再同步；"
+          + "否则同步过去的数据它认不出来，客户端切过去会全部失效。"
+      };
+    }
+    return { ok: true };
+  }
+
   async function sourceMessageFor(groupId, messageId) {
     if (!messageId) return null;
     const recent = await store.readMessages(groupId, { limit: 500 }).catch(() => []);
@@ -373,7 +396,13 @@ export async function createApp(options = {}) {
     return presence;
   }
 
-  app.get("/health", (_req, res) => res.json({ ok: true }));
+  // identity 是给「换服务器」用的握手标记:旧版本没有这个字段,客户端据此拒绝同步,
+  // 而不是把请求打过去再拿一个看不懂的错误。
+  app.get("/health", (_req, res) => res.json({
+    ok: true,
+    identity: "email",
+    capabilities: ["account-sync", "client-history"]
+  }));
 
   app.post("/api/accounts", async (req, res, next) => {
     try {
@@ -431,6 +460,8 @@ export async function createApp(options = {}) {
   app.post("/api/account/sync", requireAccount, async (req, res, next) => {
     try {
       const { targetBaseUrl } = syncSchema.parse(req.body);
+      const compatibility = await targetCompatibility(targetBaseUrl);
+      if (!compatibility.ok) return res.status(409).json({ error: compatibility.error, targetBaseUrl });
       const target = new URL("/api/account/import", targetBaseUrl);
       const payload = await store.exportAccount(req.account.email);
       const response = await fetch(target, {
