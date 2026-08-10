@@ -207,31 +207,7 @@ function askForAccountEmail() {
   });
 }
 
-const isAutomaticEmail = (email) => Boolean(email?.endsWith("@device.group-relay.example.com"));
 
-function renderIdentitySettings() {
-  const current = $("#identity-current");
-  if (!current) return;
-  current.textContent = isAutomaticEmail(state.email)
-    ? `当前是本机自动账号（${state.email}），换成你自己的邮箱即可看到你的群组。`
-    : `当前身份：${state.email}`;
-}
-
-$("#identity-settings-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const email = String($("#identity-email").value ?? "").trim().toLowerCase();
-  if (!email) return toast("请填写邮箱");
-  if (email === state.email) return toast("已经是这个邮箱了");
-  try {
-    await useAccountEmail(email);
-    await loadAccountDashboard();
-    renderIdentitySettings();
-    $("#identity-email").value = "";
-    toast(`已切换到 ${email}`);
-  } catch (error) {
-    toast(error.message);
-  }
-});
 
 async function ensureAccountForCurrentSession() {
   await ensureAccountCredential();
@@ -1491,7 +1467,6 @@ async function loadAccountDashboard() {
   startTaskRefresh();
   void renderHistoryStats();
   renderServerSettings();
-  renderIdentitySettings();
   void followServerMove();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
@@ -1700,12 +1675,31 @@ async function followServerMove() {
   location.href = `${movedTo}/app`;
 }
 
+function setServerEditing(editing) {
+  $("#server-editor").classList.toggle("hidden", !editing);
+  $("#edit-server").classList.toggle("hidden", editing);
+  if (editing) $("#server-url").focus();
+}
+
 function renderServerSettings() {
   const field = $("#server-url");
   if (!field) return;
-  $("#server-current").textContent = `当前连接：${location.origin}`;
-  if (!field.value) field.value = localStorage.getItem(serverStorageKey) ?? "";
+  $("#server-current").textContent = location.origin;
+  field.value = location.origin;
+  $("#server-sync-result").textContent = "";
+  setServerEditing(false);
 }
+
+$("#edit-server").addEventListener("click", () => {
+  $("#server-url").value = location.origin;
+  setServerEditing(true);
+});
+
+$("#cancel-server-edit").addEventListener("click", () => {
+  $("#server-url").value = location.origin;
+  $("#server-sync-result").textContent = "";
+  setServerEditing(false);
+});
 
 $("#server-settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1828,6 +1822,7 @@ $("#open-profile-settings").addEventListener("click", () => setOverviewView("set
 $("#edit-profile").addEventListener("click", () => {
   const form = $("#profile-settings-form");
   form.elements.displayName.value = form.dataset.savedName || accountEmailNickname(state.account);
+  form.elements.email.value = state.email ?? "";
   state.profileAvatarDataUrl = state.account?.avatarDataUrl ?? null;
   renderAvatar(
     "#profile-avatar-image",
@@ -1842,6 +1837,7 @@ $("#cancel-profile-edit").addEventListener("click", () => {
   const form = $("#profile-settings-form");
   const owner = form.dataset.savedName || accountEmailNickname(state.account);
   form.elements.displayName.value = owner;
+  form.elements.email.value = state.email ?? "";
   state.profileAvatarDataUrl = state.account?.avatarDataUrl ?? null;
   renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", state.profileAvatarDataUrl, owner);
   setProfileEditing(false);
@@ -1900,9 +1896,18 @@ $("#profile-settings-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const displayName = form.elements.displayName.value.trim();
-  if (!displayName) return;
+  const email = String(form.elements.email.value ?? "").trim().toLowerCase();
+  if (!displayName || !email) return;
   form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; });
   try {
+    if (email !== state.email) {
+      // 换身份就是换人。这里不把当前表单里的昵称推给对方账号 —— 那会用「我」这种
+      // 本机默认昵称覆盖掉那个人自己的名字。切过去后载入它自己的资料,要改再改一次。
+      await useAccountEmail(email);
+      await loadAccountDashboard();
+      toast(`已切换到 ${email}`);
+      return;
+    }
     const { account } = await accountApi("/api/account", {
       method: "PATCH",
       body: JSON.stringify({ displayName, avatarDataUrl: state.profileAvatarDataUrl })
