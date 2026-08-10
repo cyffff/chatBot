@@ -1,4 +1,6 @@
-const cacheName = "group-relay-shell-v3";
+// UI 改了就要跟着升:activate 时会删掉所有旧名字的缓存,否则装过 PWA 的客户端
+// 可能继续吃着上一版的 shell,看到的还是旧界面。
+const cacheName = "group-relay-shell-v4";
 const shell = ["/app", "/style.css", "/app.js", "/markdown.js", "/history.js", "/manifest.json", "/icon-180.png", "/icon-512.png"];
 
 self.addEventListener("install", (event) => {
