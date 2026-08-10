@@ -51,7 +51,8 @@ const messageUpdateSchema = z.object({
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(80),
-  ownerName: z.string().trim().min(1).max(60)
+  email: z.string().trim().email().max(200),
+  displayName: z.string().trim().min(1).max(60)
 });
 
 const accountSchema = z.object({
@@ -73,31 +74,23 @@ const desktopAiSchema = z.object({
   provider: z.enum(["codex", "claude", "cursor"])
 });
 
+// 会话迁移只需要群 id:身份是 email,没有 token 可搬。
 const sessionImportSchema = z.object({
-  sessions: z.array(z.object({
-    groupId: z.string().uuid(),
-    memberToken: z.string().min(1).max(200)
-  })).min(1).max(200)
+  sessions: z.array(z.object({ groupId: z.string().uuid() })).min(1).max(200)
 });
 
 const browserTransferImportSchema = z.object({
-  sessions: z.array(z.object({
-    groupId: z.string().uuid(),
-    memberToken: z.string().min(1).max(200)
-  })).max(200)
+  sessions: z.array(z.object({ groupId: z.string().uuid() })).max(200)
 });
 
 const joinSchema = z.object({
+  email: z.string().trim().email().max(200),
   name: z.string().trim().min(1).max(60),
   type: z.enum(["human", "ai"]).default("human"),
-  provider: z.enum(["codex", "claude", "cursor"]).nullable().optional(),
-  ownerName: z.string().trim().max(60).nullable().optional()
+  provider: z.enum(["codex", "claude", "cursor"]).nullable().optional()
 }).superRefine((value, ctx) => {
   if (value.type === "ai" && !value.provider) {
     ctx.addIssue({ code: "custom", path: ["provider"], message: "AI member requires a provider" });
-  }
-  if (value.type === "ai" && !value.ownerName) {
-    ctx.addIssue({ code: "custom", path: ["ownerName"], message: "AI member requires an owner name" });
   }
 });
 
@@ -146,22 +139,18 @@ export async function createApp(options = {}) {
     }
   }));
 
-  const tokenFrom = (req) => {
-    const authorization = req.get("authorization");
-    if (authorization?.startsWith("Bearer ")) return authorization.slice(7);
-    return req.get("x-member-token") || req.query.token;
-  };
-
-  const accountTokenFrom = (req) => {
-    const authorization = req.get("authorization");
-    if (authorization?.startsWith("Bearer ")) return authorization.slice(7);
-    return req.get("x-account-token");
-  };
+  // 身份就是 email:没有 token,也没有鉴权。带 provider 表示以该 email 名下的那个 AI
+  // 身份行动,不带就是真人本人。SSE 和附件链接没法带自定义头,所以也接受 query。
+  const identityFrom = (req) => ({
+    email: req.get("x-relay-email") || req.query.email || null,
+    provider: req.get("x-relay-provider") || req.query.provider || null
+  });
 
   async function requireMember(req, res, next) {
     try {
-      const member = await store.authenticate(req.params.groupId, tokenFrom(req));
-      if (!member) return res.status(401).json({ error: "invalid member token" });
+      const { email, provider } = identityFrom(req);
+      const member = await store.memberFor(req.params.groupId, email, provider);
+      if (!member) return res.status(404).json({ error: "not a member of this group" });
       req.member = member;
       next();
     } catch (error) {
@@ -171,8 +160,8 @@ export async function createApp(options = {}) {
 
   async function requireAccount(req, res, next) {
     try {
-      const account = await store.authenticateAccount(accountTokenFrom(req));
-      if (!account) return res.status(401).json({ error: "invalid account token" });
+      const account = await store.accountByEmail(identityFrom(req).email);
+      if (!account) return res.status(404).json({ error: "unknown account" });
       req.account = account;
       next();
     } catch (error) {
@@ -180,9 +169,23 @@ export async function createApp(options = {}) {
     }
   }
 
+  /// 账号的群组关系 = 它建的群 + 它加入的群。原来是 memberships 数组带 token,现在推导。
+  async function accountMemberships(account) {
+    const memberships = [];
+    for (const groupId of store.groupIdsFor(account)) {
+      const [group, member] = await Promise.all([
+        store.getGroup(groupId).catch(() => null),
+        store.memberFor(groupId, account.email).catch(() => null)
+      ]);
+      if (group && member) memberships.push({ groupId, group, member });
+    }
+    return memberships;
+  }
+
   function publicAccount(account) {
     return {
-      id: account.id,
+      // email 就是账号 id,没有第二个标识符。
+      id: account.email,
       email: account.email,
       displayName: account.displayName ?? null,
       avatarDataUrl: account.avatarDataUrl ?? null,
@@ -192,13 +195,8 @@ export async function createApp(options = {}) {
 
   async function accountSessions(account) {
     const sessions = [];
-    for (const membership of account.memberships ?? []) {
-      const [group, member, members] = await Promise.all([
-        store.getGroup(membership.groupId),
-        store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
-        store.listMembers(membership.groupId).catch(() => [])
-      ]);
-      if (!group || !member || member.id !== membership.memberId) continue;
+    for (const { group, member } of await accountMemberships(account)) {
+      const members = await store.listMembers(group.id).catch(() => []);
       sessions.push({
         group: {
           id: group.id,
@@ -207,10 +205,10 @@ export async function createApp(options = {}) {
         },
         member: publicMember(member),
         desktopAis: members
-          .filter((candidate) => candidate.type === "ai" && candidate.desktopOwnerAccountId === account.id)
+          .filter((candidate) => candidate.type === "ai" && candidate.email === account.email)
           .map(publicMember),
-        memberToken: membership.memberToken,
-        linkedAt: membership.linkedAt
+        email: account.email,
+        linkedAt: member.joinedAt
       });
     }
     return sessions;
@@ -218,15 +216,10 @@ export async function createApp(options = {}) {
 
   async function accountTasks(account) {
     const tasks = [];
-    for (const membership of account.memberships ?? []) {
-      const [group, member, groupTasks] = await Promise.all([
-        store.getGroup(membership.groupId),
-        store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
-        store.listTasks(membership.groupId).catch(() => [])
-      ]);
-      if (!group || !member || member.id !== membership.memberId) continue;
+    for (const { group, member } of await accountMemberships(account)) {
+      const groupTasks = await store.listTasks(group.id).catch(() => []);
       for (const task of groupTasks) {
-        if (task.createdBy?.id !== membership.memberId) continue;
+        if (task.createdBy?.id !== member.id) continue;
         tasks.push({
           ...task,
           group: { id: group.id, name: group.name }
@@ -239,15 +232,10 @@ export async function createApp(options = {}) {
 
   async function accountApprovals(account) {
     const approvals = [];
-    for (const membership of account.memberships ?? []) {
-      const [group, member, groupApprovals] = await Promise.all([
-        store.getGroup(membership.groupId),
-        store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
-        store.listApprovals(membership.groupId).catch(() => [])
-      ]);
-      if (!group || !member || member.id !== membership.memberId) continue;
+    for (const { group, member } of await accountMemberships(account)) {
+      const groupApprovals = await store.listApprovals(group.id).catch(() => []);
       for (const approval of groupApprovals) {
-        if (approval.ownerMemberId !== membership.memberId) continue;
+        if (approval.ownerMemberId !== member.id) continue;
         approvals.push({ ...approval, group: { id: group.id, name: group.name } });
       }
     }
@@ -370,16 +358,10 @@ export async function createApp(options = {}) {
   app.post("/api/accounts", async (req, res, next) => {
     try {
       const { email } = accountSchema.parse(req.body);
-      const account = await store.createAccount(email);
-      if (!account) {
-        return res.status(409).json({
-          error: "email already registered; restore this account with its account backup"
-        });
-      }
-      res.status(201).json({
-        account: publicAccount(account),
-        accountToken: account.token
-      });
+      // 幂等:email 就是身份,重复提交同一个 email 返回同一个账号,没有「已被注册」这回事。
+      const account = await store.ensureAccount(email);
+      if (!account) return res.status(400).json({ error: "email is required" });
+      res.status(201).json({ account: publicAccount(account) });
     } catch (error) {
       next(error);
     }
@@ -392,10 +374,13 @@ export async function createApp(options = {}) {
   app.patch("/api/account", requireAccount, async (req, res, next) => {
     try {
       const profile = accountProfileSchema.parse(req.body);
-      const account = await store.updateAccountProfile(req.account.id, profile);
+      const account = await store.updateAccountProfile(req.account.email, profile);
       if (!account) return res.status(404).json({ error: "account not found" });
-      const updatedMembers = await store.renameAccountMemberships(account, profile.displayName);
-      for (const { groupId, member } of updatedMembers) publish(groupId, "member_updated", publicMember(member));
+      // 名册是推导出来的,改一处昵称即可;这里只负责把变化广播给在线的人。
+      for (const { groupId } of await store.renameAccount(account.email, profile.displayName)) {
+        const human = await store.memberFor(groupId, account.email);
+        if (human) publish(groupId, "member_updated", publicMember(human));
+      }
       res.json({ account: publicAccount(account) });
     } catch (error) {
       next(error);
@@ -413,22 +398,20 @@ export async function createApp(options = {}) {
   app.get("/api/account/desktop-workers", requireAccount, async (req, res, next) => {
     try {
       const workers = [];
-      for (const membership of req.account.memberships ?? []) {
-        const [group, owner, members, history] = await Promise.all([
-          store.getGroup(membership.groupId),
-          store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
-          store.listMembers(membership.groupId).catch(() => []),
-          store.readMessages(membership.groupId, { limit: 1 }).catch(() => [])
+      for (const { group, member: owner } of await accountMemberships(req.account)) {
+        const [members, history] = await Promise.all([
+          store.listMembers(group.id).catch(() => []),
+          store.readMessages(group.id, { limit: 1 }).catch(() => [])
         ]);
-        if (!group || !owner || owner.id !== membership.memberId || owner.type !== "human") continue;
+        if (owner.type !== "human") continue;
         for (const member of members) {
-          if (member.type !== "ai" || member.desktopOwnerAccountId !== req.account.id) continue;
+          if (member.type !== "ai" || member.email !== req.account.email) continue;
           workers.push({
             workerId: `desktop-${member.provider}-${group.id}`,
             baseUrl: publicBaseUrl(req),
             groupId: group.id,
             memberId: member.id,
-            memberToken: member.token,
+            email: member.email,
             memberName: member.name,
             provider: member.provider,
             ownerName: owner.name,
@@ -471,15 +454,12 @@ export async function createApp(options = {}) {
       const { approvalIds, action } = approvalBatchSchema.parse(req.body);
       const requested = new Set(approvalIds);
       const results = [];
-      for (const membership of req.account.memberships ?? []) {
+      for (const { group, member: owner } of await accountMemberships(req.account)) {
         if (!requested.size) break;
-        const [group, owner, approvals, members] = await Promise.all([
-          store.getGroup(membership.groupId),
-          store.authenticate(membership.groupId, membership.memberToken).catch(() => null),
-          store.listApprovals(membership.groupId).catch(() => []),
-          store.listMembers(membership.groupId).catch(() => [])
+        const [approvals, members] = await Promise.all([
+          store.listApprovals(group.id).catch(() => []),
+          store.listMembers(group.id).catch(() => [])
         ]);
-        if (!group || !owner || owner.id !== membership.memberId) continue;
         for (const approval of approvals) {
           if (!requested.has(approval.id) || approval.ownerMemberId !== owner.id) continue;
           requested.delete(approval.id);
@@ -534,19 +514,15 @@ export async function createApp(options = {}) {
       const accepted = [];
       const rejected = [];
       for (const session of sessions) {
-        const member = await store.authenticate(session.groupId, session.memberToken).catch(() => null);
-        if (!member) {
-          rejected.push({ groupId: session.groupId, reason: "invalid group or member token" });
+        const group = await store.getGroup(session.groupId).catch(() => null);
+        if (!group) {
+          rejected.push({ groupId: session.groupId, reason: "unknown group" });
           continue;
         }
-        accepted.push({
-          groupId: session.groupId,
-          memberId: member.id,
-          memberToken: session.memberToken
-        });
+        accepted.push({ groupId: session.groupId });
       }
       if (accepted.length) {
-        req.account = await store.linkAccountMemberships(req.account.id, accepted);
+        req.account = await store.linkGroups(req.account.email, accepted.map((item) => item.groupId));
       }
       res.json({
         imported: accepted.length,
@@ -561,7 +537,7 @@ export async function createApp(options = {}) {
   app.delete("/api/account/sessions/:groupId", requireAccount, async (req, res, next) => {
     try {
       const groupId = z.string().uuid().parse(req.params.groupId);
-      const removed = await store.unlinkAccountMembership(req.account.id, groupId);
+      const removed = await store.leaveGroup(groupId, req.account.email);
       res.json({ removed });
     } catch (error) {
       next(error);
@@ -572,23 +548,17 @@ export async function createApp(options = {}) {
     try {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const { provider } = desktopAiSchema.parse(req.body);
-      const membership = (req.account.memberships ?? []).find((item) => item.groupId === groupId);
-      if (!membership) return res.status(404).json({ error: "group is not linked to this account" });
-      const [group, owner] = await Promise.all([
-        store.getGroup(groupId),
-        store.authenticate(groupId, membership.memberToken).catch(() => null)
-      ]);
-      if (!group || !owner || owner.id !== membership.memberId || owner.type !== "human") {
+      const group = await store.getGroup(groupId).catch(() => null);
+      const owner = await store.memberFor(groupId, req.account.email);
+      if (!group || !owner || owner.type !== "human") {
         return res.status(403).json({ error: "a human membership is required to attach desktop AI" });
       }
       const names = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
       const result = await store.addDesktopAI(groupId, {
         name: names[provider],
         provider,
-        ownerName: owner.name,
-        ownerMemberId: owner.id,
-        ownerAccountId: req.account.id,
-        trustedOwnerMemberId: owner.id === group.ownerMemberId ? owner.id : null
+        email: req.account.email,
+        trusted: owner.id === group.ownerMemberId
       });
       const history = await store.readMessages(groupId, { limit: 1 });
       if (result.created) publish(groupId, "member_joined", publicMember(result.member));
@@ -599,7 +569,7 @@ export async function createApp(options = {}) {
           baseUrl: publicBaseUrl(req),
           groupId,
           memberId: result.member.id,
-          memberToken: result.member.token,
+          email: result.member.email,
           memberName: result.member.name,
           provider,
           ownerName: owner.name,
@@ -616,20 +586,13 @@ export async function createApp(options = {}) {
     try {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const { provider } = desktopAiSchema.parse({ provider: req.params.provider });
-      const membership = (req.account.memberships ?? []).find((item) => item.groupId === groupId);
-      if (!membership) return res.status(404).json({ error: "group is not linked to this account" });
-      const owner = await store.authenticate(groupId, membership.memberToken).catch(() => null);
-      if (!owner || owner.id !== membership.memberId || owner.type !== "human") {
+      const owner = await store.memberFor(groupId, req.account.email);
+      if (!owner || owner.type !== "human") {
         return res.status(403).json({ error: "a human membership is required to remove desktop AI" });
       }
-      const members = await store.listMembers(groupId);
-      const member = members.find((candidate) => (
-        candidate.type === "ai"
-        && candidate.provider === provider
-        && candidate.desktopOwnerAccountId === req.account.id
-      ));
+      const member = await store.memberFor(groupId, req.account.email, provider);
       if (!member) return res.status(404).json({ error: "desktop AI is not in this group" });
-      await store.removeMember(groupId, member.id);
+      await store.removeDesktopAI(groupId, req.account.email, provider);
       publish(groupId, "member_left", { id: member.id });
       res.json({
         disconnected: true,
@@ -645,7 +608,7 @@ export async function createApp(options = {}) {
     const transferToken = crypto.randomBytes(24).toString("base64url");
     const transfer = {
       token: transferToken,
-      accountId: req.account.id,
+      email: req.account.email,
       status: "pending",
       createdAt: new Date().toISOString(),
       expiresAt: Date.now() + 5 * 60_000,
@@ -664,7 +627,7 @@ export async function createApp(options = {}) {
     const loginToken = crypto.randomBytes(24).toString("base64url");
     const login = {
       token: loginToken,
-      accountId: req.account.id,
+      email: req.account.email,
       status: "pending",
       createdAt: new Date().toISOString(),
       expiresAt: Date.now() + 5 * 60_000
@@ -683,12 +646,12 @@ export async function createApp(options = {}) {
       if (!login) return res.status(404).json({ error: "web login not found" });
       if (login.status === "expired") return res.status(410).json({ error: "web login expired" });
       if (login.status !== "pending") return res.status(409).json({ error: "web login already used" });
-      const account = (await store.accounts())[login.accountId];
+      const account = await store.accountByEmail(login.email);
       if (!account) return res.status(404).json({ error: "account not found" });
       login.status = "claimed";
       res.json({
         account: publicAccount(account),
-        accountToken: account.token
+        email: account.email
       });
     } catch (error) {
       next(error);
@@ -697,7 +660,7 @@ export async function createApp(options = {}) {
 
   app.get("/api/account/browser-transfers/:transferToken", requireAccount, (req, res) => {
     const transfer = activeBrowserTransfer(req.params.transferToken);
-    if (!transfer || transfer.accountId !== req.account.id) {
+    if (!transfer || transfer.email !== req.account.email) {
       return res.status(404).json({ error: "browser transfer not found" });
     }
     res.json({
@@ -715,23 +678,21 @@ export async function createApp(options = {}) {
       if (transfer.status === "expired") return res.status(410).json({ error: "browser transfer expired" });
       if (transfer.status !== "pending") return res.status(409).json({ error: "browser transfer already used" });
       const { sessions } = browserTransferImportSchema.parse(req.body);
-      const account = (await store.accounts())[transfer.accountId];
+      const account = await store.accountByEmail(transfer.email);
       if (!account) return res.status(404).json({ error: "account not found" });
       const accepted = [];
       const rejected = [];
       for (const session of sessions) {
-        const member = await store.authenticate(session.groupId, session.memberToken).catch(() => null);
-        if (!member) {
-          rejected.push({ groupId: session.groupId, reason: "invalid group or member token" });
+        const group = await store.getGroup(session.groupId).catch(() => null);
+        if (!group) {
+          rejected.push({ groupId: session.groupId, reason: "unknown group" });
           continue;
         }
-        accepted.push({
-          groupId: session.groupId,
-          memberId: member.id,
-          memberToken: session.memberToken
-        });
+        accepted.push({ groupId: session.groupId });
       }
-      if (accepted.length) await store.linkAccountMemberships(account.id, accepted);
+      if (accepted.length) {
+        await store.linkGroups(account.email, accepted.map((item) => item.groupId));
+      }
       transfer.status = accepted.length ? "completed" : "failed";
       transfer.imported = accepted.length;
       transfer.rejected = rejected;
@@ -772,8 +733,23 @@ export async function createApp(options = {}) {
   app.post("/api/invites/:inviteToken/join", async (req, res, next) => {
     try {
       const input = joinSchema.parse(req.body);
-      const result = await store.joinGroup(req.params.inviteToken, input);
+      const result = await store.joinGroup(req.params.inviteToken, {
+        email: input.email,
+        // AI 用的是主人的 email,它自己的名字记在 AI 注册项上,不能覆盖主人的昵称。
+        displayName: input.type === "ai" ? null : input.name
+      });
       if (!result) return res.status(404).json({ error: "invite not found" });
+      // AI 通过邀请链接接入时,先把它挂到这个 email 名下,再作为该群的桌面 AI 注册。
+      if (input.type === "ai") {
+        const names = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+        const attached = await store.addDesktopAI(result.group.id, {
+          name: input.name || names[input.provider],
+          provider: input.provider,
+          email: input.email,
+          trusted: result.member.id === result.group.ownerMemberId
+        });
+        if (attached?.member) result.member = attached.member;
+      }
       publish(result.group.id, "member_joined", {
         id: result.member.id,
         name: result.member.name,
@@ -834,8 +810,8 @@ export async function createApp(options = {}) {
         }
         const member = await store.setTrustedExecution(
           req.params.groupId,
-          req.params.memberId,
-          req.member.id,
+          target.email,
+          target.provider,
           input.enabled
         );
         if (!member) return res.status(404).json({ error: "AI member not found" });
@@ -852,7 +828,7 @@ export async function createApp(options = {}) {
       if (req.member.type !== "ai") {
         return res.status(403).json({ error: "only AI members can disconnect themselves" });
       }
-      await store.removeMember(req.params.groupId, req.member.id);
+      await store.removeDesktopAI(req.params.groupId, req.member.email, req.member.provider);
       publish(req.params.groupId, "member_left", { id: req.member.id });
       res.json({ disconnected: true, memberId: req.member.id });
     } catch (error) {

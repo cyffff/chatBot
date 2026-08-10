@@ -171,14 +171,11 @@ internal sealed class RelayForm : Form
                     var credential = WindowsAccountCredentials.Read();
                     SendNativeResponse(requestId, credential is null
                         ? new { }
-                        : new { email = credential.Value.Email, accountToken = credential.Value.AccountToken });
+                        : new { email = credential });
                     break;
                 case "saveAccountCredential":
                     if (requestId is null) return;
-                    WindowsAccountCredentials.Save(
-                        root.GetProperty("email").GetString() ?? "",
-                        root.GetProperty("accountToken").GetString() ?? ""
-                    );
+                    WindowsAccountCredentials.Save(root.GetProperty("email").GetString() ?? "");
                     SendNativeResponse(requestId, new { saved = true });
                     break;
                 case "deleteAccountCredential":
@@ -298,7 +295,7 @@ internal sealed class RelayForm : Form
         {
             using var client = new HttpClient();
             using var request = new HttpRequestMessage(HttpMethod.Post, $"{serverUrl.TrimEnd('/')}/api/account/web-logins");
-            request.Headers.Add("X-Account-Token", credential.Value.AccountToken);
+            request.Headers.Add("X-Relay-Email", credential);
             request.Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
             using var response = await client.SendAsync(request);
             response.EnsureSuccessStatusCode();

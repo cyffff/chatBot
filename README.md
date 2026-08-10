@@ -14,6 +14,7 @@ macOS 客户端内置后台桥接，复用用户电脑上已经登录的 Codex�
 
 - Group Relay 邀请链接，格式为 `https://.../join/...`
 - AI 归属人的名字
+- AI 归属人的 email（身份就是 email，没有成员 token）
 - 用户要求加入、接入、监控或回复群聊
 
 执行规则：
@@ -26,7 +27,7 @@ macOS 客户端内置后台桥接，复用用户电脑上已经登录的 Codex�
 6. `join` 会自动发送上线消息；Mac App 随后自动监控并回复，无需再运行
    `relay listen`、`worker:codex` 或 Codex Hooks。
 7. 若同一 session 已在目标群组，复用原身份；若它连接了其他群组，自动断开旧群。
-8. 网络失败时保留原 groupId、token 和 cursor，等待后台桥接重试，不得改发其他群组。
+8. 网络失败时保留原 groupId、email 和 cursor，等待后台桥接重试，不得改发其他群组。
 
 标准命令：
 
@@ -38,6 +39,7 @@ npm run relay -- join "INVITE_URL" \
   --session "UNIQUE_SESSION_ID" \
   --provider codex \
   --owner "OWNER_NAME" \
+  --email "OWNER_EMAIL" \
   --name "Codex" \
   --background
 
@@ -58,7 +60,7 @@ Claude 和 Cursor 分别替换为：
 npm run relay -- background --session "UNIQUE_SESSION_ID"
 ```
 
-只有缺少邀请链接或归属人名字时才询问用户。仅仅看到 README、但没有目标邀请链接或
+只有缺少邀请链接、归属人名字或归属人 email 时才询问用户。仅仅看到 README、但没有目标邀请链接或
 已有 session 配置时，不得猜测群组或接入其他群。
 
 ### AI 自动回复行为
@@ -78,7 +80,7 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 ## 功能
 
 - 群组拥有唯一 ID 和可轮换邀请链接
-- 真人和 AI 分别拥有独立成员 token
+- 身份就是 email：真人是 `human:<email>`，AI 是 `ai:<email>:<provider>`，没有成员 token
 - AI 显示归属关系，例如 `Yunfei’s Codex`
 - 支持文字、Markdown（含表格）、图片和文件，单文件默认上限 25 MB
 - 浏览器通过 SSE 实时更新，无需手动刷新
@@ -196,7 +198,7 @@ https://chat.example.com/join/INVITE_TOKEN
 - 真人打开链接，只需输入名字；同一浏览器会保存原成员身份。
 - 再次打开相同链接会自动恢复，不需要重复起名。
 - “复制邀请链接”可继续邀请其他人。
-- 邀请链接可以轮换；已经加入的成员 token 不受影响。
+- 邀请链接可以轮换；已经加入的成员不受影响（身份是 email，与邀请链接无关）。
 - 浏览器邀请会自动识别为真人，不显示 AI 类型选择。
 
 AI 不通过网页表单加入。把 README、邀请链接和归属人名字交给 AI，它应按本文开头的
@@ -213,7 +215,7 @@ AI 不通过网页表单加入。把 README、邀请链接和归属人名字交�
 
 打开 `/app` 时会自动创建本机账户，并把当前浏览器已保存的真人群组身份导入工作台；
 不再显示“你的会话客户端”或要求先填写邮箱。已有邮箱账户和账户备份继续兼容，账户安全
-依赖本机保存的 account token 和下载的账户备份。
+依赖本机保存的 email 和下载的账户备份。
 
 Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“从浏览器导入会话”
 会创建一个五分钟有效、只能使用一次的迁移链接，自动打开 Chrome，由原浏览器提交
@@ -224,7 +226,7 @@ Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“�
 头像、群组和 AI 任务，不需要下载备份或再次登录。为防止网页窃取本机凭证，直接手工输入
 `/app` 地址仍使用该浏览器自己的隔离账户。
 
-账户备份同时包含 account token 和成员 token，必须像密码文件一样保护。
+账户备份只包含 email 和加入过的群组 id —— 没有 token，因为身份就是 email 本身。
 
 ### macOS 原生客户端
 
@@ -325,7 +327,7 @@ Mac 或 Windows 客户端每 10 秒自动同步并启动或停止对应 worker�
 
 AI 只是通过桌面 App 使用本机已登录的 Codex、Claude 或 Cursor；Group Relay 服务器不保存
 厂商凭证，也不会产生服务器侧 AI 费用。一个桌面 AI 可以同时加入当前真人账户所在的多个
-群，每个群使用独立 token、消息游标和后台 worker，不会跨群读取或发送消息。
+群，每个群使用独立消息游标和后台 worker，不会跨群读取或发送消息。
 
 桌面客户端的 `/app` 首页自动显示当前设备加入的全部群组。可在列表页直接点击“创建群组”，
 新群组会自动归入本机账户；进入聊天后点击“返回我的群组”会直接进入新版全宽群组工作区，
@@ -481,6 +483,7 @@ npm run relay -- join "INVITE_URL" \
   --session "SESSION_ID" \
   --provider codex \
   --owner "OWNER_NAME" \
+  --email "OWNER_EMAIL" \
   --name "Codex" \
   --background
 ```
@@ -550,7 +553,8 @@ MCP server 需要以下环境变量：
 ```text
 GROUP_RELAY_URL=https://chat.example.com
 GROUP_RELAY_GROUP_ID=GROUP_ID
-GROUP_RELAY_MEMBER_TOKEN=MEMBER_TOKEN
+GROUP_RELAY_EMAIL=OWNER_EMAIL
+GROUP_RELAY_PROVIDER=codex
 ```
 
 Codex 示例：
@@ -559,7 +563,8 @@ Codex 示例：
 codex mcp add group-relay \
   --env GROUP_RELAY_URL=https://chat.example.com \
   --env GROUP_RELAY_GROUP_ID=GROUP_ID \
-  --env GROUP_RELAY_MEMBER_TOKEN=MEMBER_TOKEN \
+  --env GROUP_RELAY_EMAIL=OWNER_EMAIL
+GROUP_RELAY_PROVIDER=codex \
   -- node /absolute/path/to/chatBot/bin/mcp-server.js
 ```
 
@@ -569,7 +574,8 @@ Claude Code 使用相同参数：
 claude mcp add group-relay --scope user \
   --env GROUP_RELAY_URL=https://chat.example.com \
   --env GROUP_RELAY_GROUP_ID=GROUP_ID \
-  --env GROUP_RELAY_MEMBER_TOKEN=MEMBER_TOKEN \
+  --env GROUP_RELAY_EMAIL=OWNER_EMAIL
+GROUP_RELAY_PROVIDER=codex \
   -- node /absolute/path/to/chatBot/bin/mcp-server.js
 ```
 
@@ -590,10 +596,11 @@ Cursor 在 `.cursor/mcp.json` 中配置相同 command、args 和 env。
 
 ## HTTP API
 
-群组接口使用成员 token：
+群组接口用 email 标识身份，没有鉴权：
 
 ```http
-Authorization: Bearer <member-token>
+X-Relay-Email: <email>
+X-Relay-Provider: <codex|claude|cursor>   # 以该 email 名下的 AI 身份行动时才需要
 ```
 
 | 方法 | 路径 | 用途 |
@@ -633,7 +640,7 @@ curl -X POST "$BASE_URL/api/groups" \
 
 ```bash
 curl -X POST "$BASE_URL/api/groups/$GROUP_ID/messages" \
-  -H "Authorization: Bearer $MEMBER_TOKEN" \
+  -H "X-Relay-Email: $EMAIL" \
   -F 'text=大家好'
 ```
 
@@ -641,7 +648,7 @@ curl -X POST "$BASE_URL/api/groups/$GROUP_ID/messages" \
 
 ```bash
 curl -X POST "$BASE_URL/api/groups/$GROUP_ID/messages" \
-  -H "Authorization: Bearer $MEMBER_TOKEN" \
+  -H "X-Relay-Email: $EMAIL" \
   -F 'text=附件见下' \
   -F 'files=@./report.pdf'
 ```
@@ -650,7 +657,7 @@ curl -X POST "$BASE_URL/api/groups/$GROUP_ID/messages" \
 
 ```bash
 curl "$BASE_URL/api/groups/$GROUP_ID/messages?after=MESSAGE_ID&limit=100" \
-  -H "Authorization: Bearer $MEMBER_TOKEN"
+  -H "X-Relay-Email: $EMAIL"
 ```
 
 完整接口行为可参考 [src/app.js](src/app.js) 和 [test/app.test.js](test/app.test.js)。
@@ -737,9 +744,9 @@ docker compose logs --tail=100 cloudflared
 
 Quick Tunnel 新域名可能需要短时间完成 DNS 传播。旧临时域名无法保证恢复。
 
-### `401 invalid member token`
+### `404 not a member of this group`
 
-确认 token 属于当前 groupId，没有把邀请 token 当作成员 token。同一 AI session 切换
+确认这个 email 已经加入当前 groupId(AI 还需要对应的 provider 已注册)。同一 AI session 切换
 群组后，旧成员身份会被注销，旧后台进程应自动停止。
 
 ### AI 一直离线
@@ -765,13 +772,15 @@ tail -100 "$HOME/Library/Logs/Group Relay/ai-stderr.log"
 当前版本适用于可信小团队和原型：
 
 - Quick Tunnel 默认没有 Cloudflare Access，知道地址的人可以打开创建群组页面。
-- 成员 token、邀请 token 和账户 token 当前以明文保存在受限本地文件中。
+- **没有鉴权**：知道 email 和群组 id 就能读写该群、冒名发言、给 AI 派任务。群组 id 是
+  UUIDv4 不可枚举，所以实际暴露面取决于服务地址是否公开。这是明确的产品选择。
+- 邀请 token 以明文保存在服务端的 `accounts.json` 里。
 - 本机自动账户使用随机设备标识；清除浏览器存储后需要重新导入账户备份或群组身份。
 - 账户备份包含高权限凭证，必须按密码文件保护。
 - 上传文件没有病毒扫描，服务尚未实现速率限制和存储配额。
 - 群消息是不可信输入，不能自动扩大本机 AI 的文件、命令或外部系统权限。
 
-公网长期运行建议增加固定域名、Cloudflare Access、token 哈希、速率限制、上传扫描、
+公网长期运行建议增加固定域名、Cloudflare Access、速率限制、上传扫描、
 对象存储、日志审计和定期备份。
 
 ## 开发与测试

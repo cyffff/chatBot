@@ -56,7 +56,7 @@ private struct AgentConfig: Codable {
     var baseUrl: String
     var groupId: String
     var memberId: String?
-    var memberToken: String
+    var email: String
     var memberName: String?
     var provider: String
     var ownerName: String?
@@ -151,7 +151,7 @@ private final class RelayWorker {
 
     private func reloadConfig() throws -> Bool {
         let updated = try JSONDecoder().decode(AgentConfig.self, from: Data(contentsOf: configURL))
-        guard updated.groupId == config.groupId, updated.memberToken == config.memberToken else {
+        guard updated.groupId == config.groupId, updated.email == config.email else {
             log("Session configuration changed; stopping old worker")
             return false
         }
@@ -172,7 +172,9 @@ private final class RelayWorker {
         }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = method
-        request.setValue("Bearer \(config.memberToken)", forHTTPHeaderField: "Authorization")
+        // 身份是 email + provider,服务端不再发成员 token。
+        request.setValue(config.email, forHTTPHeaderField: "X-Relay-Email")
+        request.setValue(config.provider, forHTTPHeaderField: "X-Relay-Provider")
         if let json {
             request.httpBody = try JSONSerialization.data(withJSONObject: json)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

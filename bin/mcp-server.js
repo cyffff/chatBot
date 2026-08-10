@@ -5,16 +5,18 @@ import { z } from "zod";
 
 const baseUrl = (process.env.GROUP_RELAY_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const groupId = process.env.GROUP_RELAY_GROUP_ID;
-const token = process.env.GROUP_RELAY_MEMBER_TOKEN;
+const email = process.env.GROUP_RELAY_EMAIL;
+const provider = process.env.GROUP_RELAY_PROVIDER;
 
-if (!groupId || !token) {
-  console.error("GROUP_RELAY_GROUP_ID and GROUP_RELAY_MEMBER_TOKEN are required");
+if (!groupId || !email) {
+  console.error("GROUP_RELAY_GROUP_ID and GROUP_RELAY_EMAIL are required");
   process.exit(1);
 }
 
 async function relay(path, options = {}) {
   const headers = new Headers(options.headers);
-  headers.set("Authorization", `Bearer ${token}`);
+  headers.set("X-Relay-Email", email);
+  if (provider) headers.set("X-Relay-Provider", provider);
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const retryable = !options.method
     || ["GET", "HEAD"].includes(options.method.toUpperCase())

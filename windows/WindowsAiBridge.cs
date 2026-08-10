@@ -13,7 +13,7 @@ internal sealed class DesktopAiWorkerConfig
     public string BaseUrl { get; set; } = "";
     public string GroupId { get; set; } = "";
     public string MemberId { get; set; } = "";
-    public string MemberToken { get; set; } = "";
+    public string Email { get; set; } = "";
     public string MemberName { get; set; } = "";
     public string Provider { get; set; } = "";
     public string OwnerName { get; set; } = "";
@@ -100,7 +100,7 @@ internal sealed class WindowsAiBridgeManager : IDisposable
                 HttpMethod.Get,
                 $"{rawServerUrl.TrimEnd('/')}/api/account/desktop-workers"
             );
-            request.Headers.Add("X-Account-Token", credential.Value.AccountToken);
+            request.Headers.Add("X-Relay-Email", credential);
             using var response = await client.SendAsync(request);
             if (!response.IsSuccessStatusCode) return;
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -151,7 +151,7 @@ internal sealed class WindowsAiBridgeManager : IDisposable
             return existing is not null
                 && existing.GroupId == worker.GetProperty("groupId").GetString()
                 && existing.MemberId == worker.GetProperty("memberId").GetString()
-                && existing.MemberToken == worker.GetProperty("memberToken").GetString()
+                && existing.Email == worker.GetProperty("email").GetString()
                 && existing.Provider == worker.GetProperty("provider").GetString()
                 && existing.BaseUrl.TrimEnd('/') == (worker.GetProperty("baseUrl").GetString() ?? "").TrimEnd('/');
         }
@@ -241,7 +241,7 @@ internal sealed class WindowsAiBridgeManager : IDisposable
             throw new InvalidDataException("不支持的 AI provider");
         if (!Uri.TryCreate(config.BaseUrl, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https"))
             throw new InvalidDataException("Group Relay 地址无效");
-        if (!Guid.TryParse(config.GroupId, out _) || string.IsNullOrWhiteSpace(config.MemberToken))
+        if (!Guid.TryParse(config.GroupId, out _) || string.IsNullOrWhiteSpace(config.Email))
             throw new InvalidDataException("群组 AI 凭证无效");
     }
 
@@ -313,7 +313,9 @@ internal sealed class WindowsAiWorker
         this.configFile = configFile;
         this.saveConfig = saveConfig;
         client = new HttpClient { BaseAddress = new Uri(config.BaseUrl.TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(40) };
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", config.MemberToken);
+        // 身份是 email + provider,服务端不再发成员 token。
+        client.DefaultRequestHeaders.Add("X-Relay-Email", config.Email);
+        client.DefaultRequestHeaders.Add("X-Relay-Provider", config.Provider);
     }
 
     public async Task Run(CancellationToken cancellation)

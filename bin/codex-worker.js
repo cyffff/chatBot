@@ -64,7 +64,8 @@ async function saveConfig(config) {
 
 async function relay(config, pathname, options = {}) {
   const headers = new Headers(options.headers);
-  headers.set("Authorization", `Bearer ${config.memberToken}`);
+  headers.set("X-Relay-Email", config.email);
+  if (config.provider) headers.set("X-Relay-Provider", config.provider);
   if (options.body && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }

@@ -12,7 +12,8 @@ import {
 const $ = (selector) => document.querySelector(selector);
 const state = {
   groupId: null,
-  token: null,
+  // 身份只有一个:email。原来的成员 token 和账号 token 都没有了。
+  email: null,
   inviteToken: null,
   cursor: null,
   rendered: new Set(),
@@ -25,7 +26,6 @@ const state = {
   members: [],
   canManageTrustedExecution: false,
   account: null,
-  accountToken: null,
   accountSessions: [],
   aiProviderStatus: [],
   tasks: [],
@@ -88,7 +88,7 @@ function requestNative(action, payload = {}) {
 
 async function api(url, options = {}) {
   const headers = new Headers(options.headers);
-  if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+  if (state.email) headers.set("X-Relay-Email", state.email);
   if (!(options.body instanceof FormData) && options.body) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
@@ -98,7 +98,7 @@ async function api(url, options = {}) {
 
 async function accountApi(url, options = {}) {
   const headers = new Headers(options.headers);
-  if (state.accountToken) headers.set("X-Account-Token", state.accountToken);
+  if (state.email) headers.set("X-Relay-Email", state.email);
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
@@ -109,11 +109,11 @@ async function accountApi(url, options = {}) {
 function loadAccountCredential() {
   try {
     const credential = JSON.parse(localStorage.getItem(accountStorageKey) || "null");
-    if (!credential?.accountToken) return false;
+    if (!credential?.email) return false;
     if (desktopNativeBridge() && String(credential.email ?? "").endsWith("@device.group-relay.example.com")) {
       return false;
     }
-    state.accountToken = credential.accountToken;
+    state.email = credential.email;
     return true;
   } catch {
     localStorage.removeItem(accountStorageKey);
@@ -121,15 +121,14 @@ function loadAccountCredential() {
   }
 }
 
-function saveAccountCredential(account, accountToken) {
+function saveAccountCredential(account) {
   state.account = account;
-  state.accountToken = accountToken;
+  state.email = account.email;
   localStorage.setItem(accountStorageKey, JSON.stringify({
     email: account.email,
-    accountToken
   }));
   if (desktopNativeBridge() && !isAutomaticAccount(account)) {
-    void requestNative("saveAccountCredential", { email: account.email, accountToken }).catch(() => {});
+    void requestNative("saveAccountCredential", { email: account.email }).catch(() => {});
   }
 }
 
@@ -139,11 +138,11 @@ function isAutomaticAccount(account = state.account) {
 
 async function createAutomaticAccount() {
   const deviceId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const { account, accountToken } = await accountApi("/api/accounts", {
+  const { account } = await accountApi("/api/accounts", {
     method: "POST",
     body: JSON.stringify({ email: `device-${deviceId}@device.group-relay.example.com` })
   });
-  saveAccountCredential(account, accountToken);
+  saveAccountCredential(account);
   const cached = localBrowserSessionCredentials();
   if (cached.length) await importSessions(cached);
   return account;
@@ -153,13 +152,13 @@ async function restoreNativeAccountCredential() {
   if (!desktopNativeBridge()) return false;
   try {
     const credential = await requestNative("getAccountCredential");
-    if (!credential?.accountToken) return false;
-    state.accountToken = credential.accountToken;
+    if (!credential?.email) return false;
+    state.email = credential.email;
     const { account } = await accountApi("/api/account");
-    saveAccountCredential(account, credential.accountToken);
+    saveAccountCredential(account);
     return true;
   } catch {
-    state.accountToken = null;
+    state.email = null;
     return false;
   }
 }
@@ -187,7 +186,7 @@ function localBrowserSessionCredentials() {
     if (!match) continue;
     try {
       const saved = JSON.parse(localStorage.getItem(key) || "null");
-      if (saved?.token) sessions.push({ groupId: match[1], memberToken: saved.token });
+      if (saved?.email) sessions.push({ groupId: match[1] });
     } catch {
       // Ignore malformed legacy cache entries.
     }
@@ -202,18 +201,18 @@ async function importSessions(sessions) {
     body: JSON.stringify({ sessions })
   });
   for (const session of result.sessions) {
-    localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
+    localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ email: session.email }));
   }
   return result;
 }
 
 async function linkCurrentSessionToAccount() {
-  if (!loadAccountCredential() || !state.groupId || !state.token) return;
-  await importSessions([{ groupId: state.groupId, memberToken: state.token }]);
+  if (!loadAccountCredential() || !state.groupId || !state.email) return;
+  await importSessions([{ groupId: state.groupId }]);
 }
 
 function saveSession() {
-  localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ token: state.token }));
+  localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ email: state.email }));
   if (state.inviteToken) {
     localStorage.setItem(`relay-invite:${state.inviteToken}`, state.groupId);
   }
@@ -224,11 +223,11 @@ async function resumeSession(groupId, inviteToken = null) {
   if (!saved?.token) return false;
   const previous = {
     groupId: state.groupId,
-    token: state.token,
+    email: state.email,
     inviteToken: state.inviteToken
   };
   state.groupId = groupId;
-  state.token = saved.token;
+  state.email = saved.email;
   state.inviteToken = inviteToken;
   showChatLoading();
   try {
@@ -243,7 +242,7 @@ async function resumeSession(groupId, inviteToken = null) {
     localStorage.removeItem(`relay:${groupId}`);
     if (inviteToken) localStorage.removeItem(`relay-invite:${inviteToken}`);
     state.groupId = previous.groupId;
-    state.token = previous.token;
+    state.email = previous.email;
     state.inviteToken = previous.inviteToken;
     return false;
   }
@@ -259,7 +258,7 @@ async function findKnownSessions() {
       const saved = JSON.parse(localStorage.getItem(key) || "null");
       if (!saved?.token) continue;
       const response = await fetch(`/api/groups/${match[1]}`, {
-        headers: { Authorization: `Bearer ${saved.token}` }
+        headers: { "X-Relay-Email": saved.email }
       });
       if (!response.ok) continue;
       const { group } = await response.json();
@@ -625,7 +624,7 @@ function updateRenderedMessage(message) {
 function attachmentNode(attachment) {
   const link = document.createElement("a");
   link.className = "attachment";
-  link.href = `${attachment.url}?token=${encodeURIComponent(state.token)}`;
+  link.href = `${attachment.url}?email=${encodeURIComponent(state.email)}`;
   link.target = "_blank";
   link.rel = "noreferrer";
   if (attachment.mimeType.startsWith("image/")) {
@@ -751,7 +750,7 @@ function startRealtime() {
 
 function connectEvents() {
   state.eventSource?.close();
-  const events = new EventSource(`/api/groups/${state.groupId}/events?token=${encodeURIComponent(state.token)}`);
+  const events = new EventSource(`/api/groups/${state.groupId}/events?email=${encodeURIComponent(state.email)}`);
   state.eventSource = events;
   events.addEventListener("ready", markConnected);
   events.addEventListener("message", (event) => {
@@ -775,7 +774,7 @@ function connectEvents() {
 }
 
 async function pollMessages() {
-  while (state.groupId && state.token) {
+  while (state.groupId && state.email) {
     try {
       const requestedGroupId = state.groupId;
       const query = new URLSearchParams({ timeoutMs: "25000", limit: "200" });
@@ -807,7 +806,7 @@ function stopChatRealtime() {
   state.presenceRefreshStarted = false;
   state.realtimeStarted = false;
   state.groupId = null;
-  state.token = null;
+  state.email = null;
   state.inviteToken = null;
   state.cursor = null;
   state.memberId = null;
@@ -843,8 +842,8 @@ function showChatLoading(groupName = "") {
 async function openAccountSession(session) {
   stopChatRealtime();
   state.groupId = session.group.id;
-  state.token = session.memberToken;
-  localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ token: state.token }));
+  state.email = session.email;
+  localStorage.setItem(`relay:${state.groupId}`, JSON.stringify({ email: state.email }));
   history.replaceState({}, "", `/group/${state.groupId}`);
   showChatLoading(session.group.name);
   try {
@@ -1403,7 +1402,7 @@ async function loadAccountDashboard() {
   renderOverviewHeader(account);
   renderOverviewCalendar();
   for (const session of sessions) {
-    localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ token: session.memberToken }));
+    localStorage.setItem(`relay:${session.group.id}`, JSON.stringify({ email: session.email }));
   }
   renderAccountSessions(sessions);
   renderAITasks();
@@ -1430,7 +1429,7 @@ async function showAccountView() {
       localStorage.removeItem(accountStorageKey);
       if (desktopNativeBridge()) void requestNative("deleteAccountCredential").catch(() => {});
       state.account = null;
-      state.accountToken = null;
+      state.email = null;
       await createAutomaticAccount();
       await loadAccountDashboard();
       toast("旧账户已失效，已自动恢复本机群组");
@@ -1444,27 +1443,27 @@ async function showAccountView() {
   }
 }
 
+// 备份里已经没有秘密可言:身份就是 email,恢复 = 认回这个 email 和它加入过的群 id。
 async function restoreAccountBackup(backup) {
-  const accountToken = backup.accountToken ?? backup.account?.accountToken;
-  if (!accountToken || !Array.isArray(backup.sessions)) {
+  const email = backup.email ?? backup.account?.email;
+  if (!email || !Array.isArray(backup.sessions)) {
     throw new Error("不是有效的 Group Relay 账户备份");
   }
-  const previousToken = state.accountToken;
+  const previousEmail = state.email;
   const previousAccount = state.account;
-  state.accountToken = accountToken;
+  state.email = email;
   let account;
   try {
     ({ account } = await accountApi("/api/account"));
   } catch (error) {
-    state.accountToken = previousToken;
+    state.email = previousEmail;
     state.account = previousAccount;
     throw error;
   }
-  saveAccountCredential(account, accountToken);
+  saveAccountCredential(account);
   const sessions = backup.sessions.map((session) => ({
-    groupId: session.groupId ?? session.group?.id,
-    memberToken: session.memberToken
-  })).filter((session) => session.groupId && session.memberToken);
+    groupId: session.groupId ?? session.group?.id
+  })).filter((session) => session.groupId);
   if (sessions.length) await importSessions(sessions);
   await loadAccountDashboard();
   toast("账户和会话已恢复");
@@ -1476,7 +1475,7 @@ async function handleBackupInput(event) {
   if (!file) return;
   try {
     const backup = JSON.parse(await file.text());
-    const hasAccount = Boolean(backup.accountToken ?? backup.account?.accountToken);
+    const hasAccount = Boolean(backup.email ?? backup.account?.email);
     if (hasAccount) {
       await restoreAccountBackup(backup);
       return;
@@ -1484,11 +1483,10 @@ async function handleBackupInput(event) {
     if (!Array.isArray(backup.sessions)) {
       throw new Error("不是有效的 Group Relay 备份");
     }
-    if (!state.accountToken && !loadAccountCredential()) await createAutomaticAccount();
+    if (!state.email && !loadAccountCredential()) await createAutomaticAccount();
     const sessions = backup.sessions.map((session) => ({
       groupId: session.groupId ?? session.group?.id,
-      memberToken: session.memberToken
-    })).filter((session) => session.groupId && session.memberToken);
+    })).filter((session) => session.groupId);
     if (!sessions.length) throw new Error("备份中没有有效会话");
     const result = await importSessions(sessions);
     await loadAccountDashboard();
@@ -1603,11 +1601,9 @@ $("#export-account").addEventListener("click", async () => {
       version: 1,
       exportedAt: new Date().toISOString(),
       email: state.account.email,
-      accountToken: state.accountToken,
       sessions: sessions.map((session) => ({
         groupId: session.group.id,
-        groupName: session.group.name,
-        memberToken: session.memberToken
+        groupName: session.group.name
       }))
     };
     const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], { type: "application/json" });
@@ -1629,7 +1625,7 @@ $("#account-logout").addEventListener("click", async () => {
   localStorage.removeItem(accountStorageKey);
   if (desktopNativeBridge()) await requestNative("deleteAccountCredential").catch(() => {});
   state.account = null;
-  state.accountToken = null;
+  state.email = null;
   clearInterval(state.taskRefreshTimer);
   state.taskRefreshTimer = null;
   try {
@@ -1856,12 +1852,18 @@ $("#cancel-account-create").addEventListener("click", () => {
 
 async function createGroup(formElement) {
   const form = new FormData(formElement);
+  // 建群要先有 email —— 那就是身份。没有就先建一个本机账户。
+  if (!state.email && !loadAccountCredential()) await createAutomaticAccount();
   const result = await api("/api/groups", {
     method: "POST",
-    body: JSON.stringify(Object.fromEntries(form))
+    body: JSON.stringify({
+      name: form.get("name"),
+      email: state.email,
+      displayName: form.get("ownerName")
+    })
   });
   state.groupId = result.group.id;
-  state.token = result.member.token;
+  state.email = result.member.email;
   state.inviteToken = result.group.inviteToken;
   saveSession();
   await linkCurrentSessionToAccount().catch(() => {});
@@ -1901,11 +1903,12 @@ $("#account-create-form").addEventListener("submit", async (event) => {
 $("#join-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
+  if (!state.email && !loadAccountCredential()) await createAutomaticAccount();
   const input = {
+    email: state.email,
     name: form.get("name"),
     type: "human",
-    provider: null,
-    ownerName: null
+    provider: null
   };
   try {
     const result = await api(`/api/invites/${state.inviteToken}/join`, {
@@ -1913,7 +1916,7 @@ $("#join-form").addEventListener("submit", async (event) => {
       body: JSON.stringify(input)
     });
     state.groupId = result.group.id;
-    state.token = result.member.token;
+    state.email = result.member.email;
     saveSession();
     await linkCurrentSessionToAccount().catch(() => {});
     history.replaceState({}, "", `/group/${state.groupId}`);
@@ -2080,7 +2083,7 @@ async function boot() {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || "桌面账户同步失败");
-      saveAccountCredential(result.account, result.accountToken);
+      saveAccountCredential(result.account);
       $("#transfer-title").textContent = "桌面账户已同步";
       $("#transfer-message").textContent = "昵称、群组和 AI 任务已载入，正在打开工作台…";
       $(".transfer-loader").classList.add("complete");

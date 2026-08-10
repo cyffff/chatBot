@@ -87,13 +87,13 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     }
 
     @objc func openInBrowser() {
-        guard let credential = accountCredential(), let accountToken = credential["accountToken"] as? String else {
+        guard let credential = accountCredential(), let email = credential["email"] as? String else {
             showError("还没有可同步的账户", detail: "请先在 Group Relay 客户端完成邮箱账户登录。")
             return
         }
         var request = URLRequest(url: serverURL.appendingPathComponent("api/account/web-logins"))
         request.httpMethod = "POST"
-        request.setValue(accountToken, forHTTPHeaderField: "X-Account-Token")
+        request.setValue(email, forHTTPHeaderField: "X-Relay-Email")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data("{}".utf8)
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
@@ -198,10 +198,9 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             case "saveAccountCredential":
                 guard
                     let requestId,
-                    let email = body["email"] as? String,
-                    let accountToken = body["accountToken"] as? String
+                    let email = body["email"] as? String
                 else { return }
-                try saveAccountCredential(email: email, accountToken: accountToken)
+                try saveAccountCredential(email: email)
                 sendNativeResponse(requestId: requestId, result: ["saved": true])
             case "deleteAccountCredential":
                 guard let requestId else { return }
@@ -239,25 +238,18 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         guard
             let value = jsonObject(at: accountCredentialURL),
             let email = value["email"] as? String,
-            email.contains("@"),
-            let accountToken = value["accountToken"] as? String,
-            !accountToken.isEmpty
+            email.contains("@")
         else { return nil }
-        return ["email": email, "accountToken": accountToken]
+        return ["email": email]
     }
 
-    private func saveAccountCredential(email: String, accountToken: String) throws {
+    /// 身份就是 email,没有 account token 可存。
+    private func saveAccountCredential(email: String) throws {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let token = accountToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard
-            normalizedEmail.contains("@"),
-            normalizedEmail.utf8.count <= 254,
-            !token.isEmpty,
-            token.utf8.count <= 10_000
-        else {
+        guard normalizedEmail.contains("@"), normalizedEmail.utf8.count <= 254 else {
             throw NSError(domain: "GroupRelay", code: 24, userInfo: [NSLocalizedDescriptionKey: "账户凭证无效"])
         }
-        try writeJSONObject(["email": normalizedEmail, "accountToken": token], to: accountCredentialURL)
+        try writeJSONObject(["email": normalizedEmail], to: accountCredentialURL)
     }
 
     private func writeAppLog(_ message: String) {
@@ -442,7 +434,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             relayURL.host == serverURL.host,
             let groupId = incoming["groupId"] as? String,
             UUID(uuidString: groupId) != nil,
-            incoming["memberToken"] as? String != nil
+            incoming["email"] as? String != nil
         else {
             throw NSError(
                 domain: "GroupRelay",
@@ -665,8 +657,8 @@ final class LocalAIBridgeManager {
         guard
             let credentialData = try? Data(contentsOf: credentialURL),
             let credential = try? JSONSerialization.jsonObject(with: credentialData) as? [String: Any],
-            let accountToken = credential["accountToken"] as? String,
-            !accountToken.isEmpty
+            let email = credential["email"] as? String,
+            !email.isEmpty
         else { return }
         let configured = UserDefaults.standard.string(forKey: serverPreferenceKey)
         let bundled = Bundle.main.object(forInfoDictionaryKey: "DefaultRelayURL") as? String
@@ -675,7 +667,7 @@ final class LocalAIBridgeManager {
             let endpoint = URL(string: "/api/account/desktop-workers", relativeTo: serverURL)?.absoluteURL
         else { return }
         var request = URLRequest(url: endpoint)
-        request.setValue(accountToken, forHTTPHeaderField: "X-Account-Token")
+        request.setValue(email, forHTTPHeaderField: "X-Relay-Email")
         remoteSyncInFlight = true
         URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
             DispatchQueue.main.async {
@@ -720,7 +712,7 @@ final class LocalAIBridgeManager {
                 URL(string: rawBaseURL)?.host == serverURL.host,
                 let groupId = incoming["groupId"] as? String,
                 UUID(uuidString: groupId) != nil,
-                incoming["memberToken"] as? String != nil
+                incoming["email"] as? String != nil
             else { continue }
             if
                 let entry = workers[workerId] as? [String: Any],
@@ -729,7 +721,7 @@ final class LocalAIBridgeManager {
                 let existing = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any],
                 existing["groupId"] as? String == groupId,
                 existing["memberId"] as? String == incoming["memberId"] as? String,
-                existing["memberToken"] as? String == incoming["memberToken"] as? String,
+                existing["email"] as? String == incoming["email"] as? String,
                 existing["provider"] as? String == provider,
                 (existing["baseUrl"] as? String)?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                     == rawBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))

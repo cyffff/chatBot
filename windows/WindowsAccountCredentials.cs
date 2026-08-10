@@ -12,7 +12,7 @@ internal static class WindowsAccountCredentials
     private const uint CredPersistLocalMachine = 2;
     private const int ErrorNotFound = 1168;
 
-    public static (string Email, string AccountToken)? Read()
+    public static string? Read()
     {
         if (!CredRead(TargetName, CredTypeGeneric, 0, out var pointer))
         {
@@ -26,7 +26,7 @@ internal static class WindowsAccountCredentials
             var bytes = new byte[credential.CredentialBlobSize];
             Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
             var value = JsonSerializer.Deserialize<AccountCredential>(Encoding.Unicode.GetString(bytes).TrimEnd('\0'));
-            return value is null ? null : (value.Email, value.AccountToken);
+            return value?.Email;
         }
         finally
         {
@@ -34,13 +34,13 @@ internal static class WindowsAccountCredentials
         }
     }
 
-    public static void Save(string email, string accountToken)
+    // 身份就是 email,没有 account token 可存。
+    public static void Save(string email)
     {
         var normalizedEmail = email.Trim().ToLowerInvariant();
-        var token = accountToken.Trim();
-        if (!normalizedEmail.Contains('@') || normalizedEmail.Length > 254 || token.Length is 0 or > 10_000)
+        if (!normalizedEmail.Contains('@') || normalizedEmail.Length > 254)
             throw new InvalidDataException("账户凭证无效");
-        var bytes = Encoding.Unicode.GetBytes(JsonSerializer.Serialize(new AccountCredential(normalizedEmail, token)));
+        var bytes = Encoding.Unicode.GetBytes(JsonSerializer.Serialize(new AccountCredential(normalizedEmail)));
         var blob = Marshal.AllocCoTaskMem(bytes.Length);
         try
         {
@@ -69,7 +69,7 @@ internal static class WindowsAccountCredentials
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 
-    private sealed record AccountCredential(string Email, string AccountToken);
+    private sealed record AccountCredential(string Email);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct Credential

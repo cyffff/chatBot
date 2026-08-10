@@ -33,7 +33,8 @@ async function loadBinding(sessionId) {
 
 async function request(config, pathname, options = {}) {
   const headers = new Headers(options.headers);
-  headers.set("Authorization", `Bearer ${config.memberToken}`);
+  headers.set("X-Relay-Email", config.email);
+  if (config.provider) headers.set("X-Relay-Provider", config.provider);
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   let lastError;
   for (const delay of [0, 300, 1_000, 2_000]) {

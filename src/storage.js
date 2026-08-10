@@ -9,6 +9,10 @@ const gunzip = promisify(zlib.gunzip);
 
 const id = () => crypto.randomUUID();
 const secret = () => crypto.randomBytes(24).toString("base64url");
+const normalizeEmail = (email) => String(email ?? "").trim().toLocaleLowerCase("en-US");
+// 成员 id 由 email 推出来,所以服务端不需要保存任何 id → 身份的映射。
+const humanMemberId = (email) => `human:${normalizeEmail(email)}`;
+const aiMemberId = (email, provider) => `ai:${normalizeEmail(email)}:${provider}`;
 const dayOf = (iso = new Date().toISOString()) => iso.slice(0, 10);
 
 async function exists(file) {
@@ -57,11 +61,12 @@ export class FileStore {
   constructor(root) {
     this.root = path.resolve(root);
     this.groupsDir = path.join(this.root, "groups");
-    this.invitesFile = path.join(this.root, "invites.json");
     this.accountsFile = path.join(this.root, "accounts.json");
     this.uploadTempDir = path.join(this.root, "tmp", "uploads");
+    this.groupsById = new Map();
+    this.invitesByToken = new Map();
+    this.presenceByMember = new Map();
     this.writeQueues = new Map();
-    this.memberQueues = new Map();
     this.taskQueues = new Map();
     this.approvalQueues = new Map();
     this.accountQueue = Promise.resolve();
@@ -70,8 +75,8 @@ export class FileStore {
   async init() {
     await fs.mkdir(this.groupsDir, { recursive: true });
     await fs.mkdir(this.uploadTempDir, { recursive: true });
-    if (!(await exists(this.invitesFile))) await writeJsonAtomic(this.invitesFile, {});
     if (!(await exists(this.accountsFile))) await writeJsonAtomic(this.accountsFile, {});
+    this.indexGroups(await this.accounts());
   }
 
   groupDir(groupId) {
@@ -79,58 +84,12 @@ export class FileStore {
     return path.join(this.groupsDir, groupId);
   }
 
-  async createGroup({ name, ownerName }) {
-    const groupId = id();
-    const inviteToken = secret();
-    const owner = {
-      id: id(),
-      name: ownerName,
-      type: "human",
-      provider: null,
-      token: secret(),
-      joinedAt: new Date().toISOString()
-    };
-    const group = {
-      id: groupId,
-      name,
-      createdAt: new Date().toISOString(),
-      inviteToken,
-      ownerMemberId: owner.id
-    };
-    const dir = this.groupDir(groupId);
-    await fs.mkdir(path.join(dir, "messages"), { recursive: true });
-    await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
-    await writeJsonAtomic(path.join(dir, "group.json"), group);
-    await writeJsonAtomic(path.join(dir, "members.json"), [owner]);
-    await writeJsonAtomic(path.join(dir, "tasks.json"), []);
-    await writeJsonAtomic(path.join(dir, "approvals.json"), []);
-    const invites = await readJson(this.invitesFile);
-    invites[inviteToken] = groupId;
-    await writeJsonAtomic(this.invitesFile, invites);
-    return { group, owner };
-  }
-
-  async groupFromInvite(inviteToken) {
-    const invites = await readJson(this.invitesFile);
-    const groupId = invites[inviteToken];
-    if (!groupId) return null;
-    return this.getGroup(groupId);
-  }
-
-  async getGroup(groupId) {
-    const dir = this.groupDir(groupId);
-    if (!(await exists(path.join(dir, "group.json")))) return null;
-    return readJson(path.join(dir, "group.json"));
-  }
-
-  async listMembers(groupId) {
-    return readJson(path.join(this.groupDir(groupId), "members.json"));
-  }
-
-  async authenticate(groupId, token) {
-    if (!token) return null;
-    return (await this.listMembers(groupId)).find((member) => member.token === token) ?? null;
-  }
+  // ── 账号即身份 ───────────────────────────────────────────────────────────────
+  // 远端只存 email、这个 email 创建的群组、以及它加入的群组 id。群成员名册不再是
+  // 每群一份的 members.json,而是从所有账号里推导出来的;邀请 token → groupId 同理。
+  // 成员 id 由 email 决定,所以不需要任何映射表:human:<email> / ai:<email>:<provider>。
+  //
+  // 没有鉴权:知道 email 和群 id 就能读写。这是明确的产品决定,不是遗漏。
 
   async accounts() {
     return readJson(this.accountsFile);
@@ -141,42 +100,62 @@ export class FileStore {
       const accounts = await this.accounts();
       const result = await update(accounts);
       await writeJsonAtomic(this.accountsFile, accounts);
+      this.indexGroups(accounts);
       return result;
     });
     this.accountQueue = next.catch(() => {});
     return next;
   }
 
-  async createAccount(email) {
-    const normalizedEmail = email.trim().toLocaleLowerCase("en-US");
+  /// 群组和邀请 token 都散在各账号的 createdGroups 里,每次请求全表扫会很蠢,
+  /// 所以写完就重建两张内存索引;accounts.json 仍是唯一真源。
+  indexGroups(accounts) {
+    this.groupsById = new Map();
+    this.invitesByToken = new Map();
+    for (const account of Object.values(accounts)) {
+      for (const group of account.createdGroups ?? []) {
+        this.groupsById.set(group.id, { ...group, ownerEmail: account.email });
+        this.invitesByToken.set(group.inviteToken, group.id);
+      }
+    }
+  }
+
+  emailOf(value) {
+    return normalizeEmail(value);
+  }
+
+  async ensureAccount(email, displayName) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return null;
     return this.updateAccounts((accounts) => {
-      if (Object.values(accounts).some((account) => account.normalizedEmail === normalizedEmail)) {
-        return null;
+      const existing = accounts[normalized];
+      if (existing) {
+        if (displayName) existing.displayName = displayName;
+        return existing;
       }
       const account = {
-        id: id(),
-        email: normalizedEmail,
-        normalizedEmail,
-        displayName: normalizedEmail.split("@")[0],
+        email: normalized,
+        displayName: displayName || normalized.split("@")[0],
         avatarDataUrl: null,
-        token: secret(),
         createdAt: new Date().toISOString(),
-        memberships: []
+        createdGroups: [],
+        joinedGroups: [],
+        ais: []
       };
-      accounts[account.id] = account;
+      accounts[normalized] = account;
       return account;
     });
   }
 
-  async authenticateAccount(token) {
-    if (!token) return null;
-    return Object.values(await this.accounts())
-      .find((account) => account.token === token) ?? null;
+  async accountByEmail(email) {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return null;
+    return (await this.accounts())[normalized] ?? null;
   }
 
-  async updateAccountProfile(accountId, profile) {
+  async updateAccountProfile(email, profile) {
     return this.updateAccounts((accounts) => {
-      const account = accounts[accountId];
+      const account = accounts[normalizeEmail(email)];
       if (!account) return null;
       account.displayName = profile.displayName;
       account.avatarDataUrl = profile.avatarDataUrl;
@@ -185,59 +164,27 @@ export class FileStore {
     });
   }
 
-  async renameAccountMemberships(account, displayName) {
-    const updated = [];
-    for (const membership of account.memberships ?? []) {
-      const members = await this.updateMembers(membership.groupId, (items) => {
-        const changed = [];
-        const human = items.find((member) => member.id === membership.memberId && member.type === "human");
-        if (human && human.name !== displayName) {
-          human.name = displayName;
-          changed.push(human);
-        }
-        for (const member of items) {
-          if (member.type === "ai" && member.desktopOwnerAccountId === account.id && member.ownerName !== displayName) {
-            member.ownerName = displayName;
-            changed.push(member);
-          }
-        }
-        return changed;
-      }).catch(() => []);
-      updated.push(...members.map((member) => ({ groupId: membership.groupId, member })));
-    }
-    return updated;
+  /// 改昵称会影响这个 email 在所有群里的显示名和它名下 AI 的 ownerName —— 名册是
+  /// 推导出来的,所以改一处就够,不需要遍历每个群去改副本。
+  async renameAccount(email, displayName) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      if (!found) return null;
+      found.displayName = displayName;
+      return found;
+    });
+    if (!account) return [];
+    return this.groupIdsFor(account).map((groupId) => ({ groupId, account }));
   }
 
-  async linkAccountMemberships(accountId, memberships) {
-    return this.updateAccounts((accounts) => {
-      const account = accounts[accountId];
-      if (!account) return null;
-      for (const membership of memberships) {
-        const existing = account.memberships.find((item) => item.groupId === membership.groupId);
-        if (existing) {
-          existing.memberId = membership.memberId;
-          existing.memberToken = membership.memberToken;
-          existing.linkedAt = new Date().toISOString();
-        } else {
-          account.memberships.push({
-            ...membership,
-            linkedAt: new Date().toISOString()
-          });
-        }
-      }
-      return account;
-    });
+  groupIdsFor(account) {
+    return [
+      ...(account.createdGroups ?? []).map((group) => group.id),
+      ...(account.joinedGroups ?? [])
+    ];
   }
 
-  async unlinkAccountMembership(accountId, groupId) {
-    return this.updateAccounts((accounts) => {
-      const account = accounts[accountId];
-      if (!account) return false;
-      const before = account.memberships.length;
-      account.memberships = account.memberships.filter((membership) => membership.groupId !== groupId);
-      return account.memberships.length !== before;
-    });
-  }
+  // ── 任务与审批(存 id 引用,不存正文)─────────────────────────────────────────
 
   async listTasks(groupId) {
     const file = path.join(this.groupDir(groupId), "tasks.json");
@@ -391,126 +338,238 @@ export class FileStore {
     });
   }
 
-  async updateMembers(groupId, update) {
-    const previous = this.memberQueues.get(groupId) ?? Promise.resolve();
-    const next = previous.then(async () => {
-      const members = await this.listMembers(groupId);
-      const result = await update(members);
-      await writeJsonAtomic(path.join(this.groupDir(groupId), "members.json"), members);
-      return result;
-    });
-    this.memberQueues.set(groupId, next.catch(() => {}));
-    return next;
-  }
+  // ── 群组 ────────────────────────────────────────────────────────────────────
 
-  async setTrustedExecution(groupId, aiMemberId, ownerMemberId, enabled) {
-    return this.updateMembers(groupId, (members) => {
-      const member = members.find((candidate) => candidate.id === aiMemberId);
-      if (!member || member.type !== "ai") return null;
-      member.trustedOwnerMemberId = enabled ? ownerMemberId : null;
-      return member;
-    });
-  }
-
-  async addDesktopAI(
-    groupId,
-    { name, provider, ownerName, ownerMemberId, ownerAccountId, trustedOwnerMemberId = null }
-  ) {
-    return this.updateMembers(groupId, (members) => {
-      const existing = members.find((member) => (
-        member.type === "ai"
-        && member.provider === provider
-        && member.desktopOwnerAccountId === ownerAccountId
-      ));
-      if (existing) return { member: existing, created: false };
-      const member = {
-        id: id(),
-        name,
-        type: "ai",
-        provider,
-        ownerName,
-        desktopOwnerAccountId: ownerAccountId,
-        desktopOwnerMemberId: ownerMemberId,
-        trustedOwnerMemberId,
-        activeMessageIds: [],
-        presence: {
-          status: "online",
-          lastSeenAt: new Date().toISOString()
-        },
-        token: secret(),
-        joinedAt: new Date().toISOString()
-      };
-      members.push(member);
-      return { member, created: true };
-    });
-  }
-
-  async removeMember(groupId, memberId) {
-    return this.updateMembers(groupId, (members) => {
-      const index = members.findIndex((member) => member.id === memberId);
-      if (index < 0) return false;
-      members.splice(index, 1);
-      return true;
-    });
-  }
-
-  async updatePresence(groupId, memberId, status) {
-    return this.updateMembers(groupId, (members) => {
-      const member = members.find((candidate) => candidate.id === memberId);
-      if (!member || member.type !== "ai") return null;
-      member.presence = {
-        status: status === "online" && member.activeMessageIds?.length ? "busy" : status,
-        lastSeenAt: new Date().toISOString()
-      };
-      return member.presence;
-    });
-  }
-
-  async setMessageActivity(groupId, memberId, messageId, processing) {
-    return this.updateMembers(groupId, (members) => {
-      const member = members.find((candidate) => candidate.id === memberId);
-      if (!member || member.type !== "ai") return null;
-      const active = new Set(member.activeMessageIds ?? []);
-      if (processing) active.add(messageId);
-      else active.delete(messageId);
-      member.activeMessageIds = [...active];
-      member.presence = {
-        status: member.activeMessageIds.length ? "busy" : "online",
-        lastSeenAt: new Date().toISOString()
-      };
-      return member.presence;
-    });
-  }
-
-  async joinGroup(inviteToken, { name, type, provider, ownerName }) {
-    const group = await this.groupFromInvite(inviteToken);
-    if (!group) return null;
-    const member = {
-      id: id(),
+  async createGroup({ name, email, displayName }) {
+    const account = await this.ensureAccount(email, displayName);
+    if (!account) throw new Error("email is required to create a group");
+    const groupId = id();
+    const group = {
+      id: groupId,
       name,
-      type,
-      provider: type === "ai" ? provider : null,
-      ownerName: type === "ai" ? ownerName : null,
-      presence: type === "ai" ? {
-        status: "online",
-        lastSeenAt: new Date().toISOString()
-      } : null,
-      token: secret(),
-      joinedAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      inviteToken: secret()
     };
-    await this.updateMembers(group.id, (members) => members.push(member));
-    return { group, member };
+    const dir = this.groupDir(groupId);
+    await fs.mkdir(path.join(dir, "messages"), { recursive: true });
+    await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
+    await writeJsonAtomic(path.join(dir, "tasks.json"), []);
+    await writeJsonAtomic(path.join(dir, "approvals.json"), []);
+    await this.updateAccounts((accounts) => {
+      accounts[account.email].createdGroups.push(group);
+    });
+    return { group: this.groupWithOwner(groupId), owner: await this.memberFor(groupId, account.email) };
+  }
+
+  groupWithOwner(groupId) {
+    const indexed = this.groupsById.get(groupId);
+    if (!indexed) return null;
+    const { ownerEmail, ...group } = indexed;
+    // ownerMemberId 是从建群人的 email 推出来的,调用方不用知道 email 也能比对成员。
+    return { ...group, ownerMemberId: humanMemberId(ownerEmail) };
+  }
+
+  async getGroup(groupId) {
+    if (!/^[0-9a-f-]{36}$/i.test(groupId)) throw new Error("invalid group id");
+    return this.groupWithOwner(groupId);
+  }
+
+  async groupFromInvite(inviteToken) {
+    const groupId = this.invitesByToken.get(inviteToken);
+    return groupId ? this.getGroup(groupId) : null;
   }
 
   async rotateInvite(groupId) {
-    const group = await this.getGroup(groupId);
-    const invites = await readJson(this.invitesFile);
-    delete invites[group.inviteToken];
-    group.inviteToken = secret();
-    invites[group.inviteToken] = groupId;
-    await writeJsonAtomic(path.join(this.groupDir(groupId), "group.json"), group);
-    await writeJsonAtomic(this.invitesFile, invites);
-    return group.inviteToken;
+    const indexed = this.groupsById.get(groupId);
+    if (!indexed) return null;
+    const inviteToken = secret();
+    await this.updateAccounts((accounts) => {
+      const group = accounts[indexed.ownerEmail]?.createdGroups
+        ?.find((candidate) => candidate.id === groupId);
+      if (group) group.inviteToken = inviteToken;
+    });
+    return inviteToken;
+  }
+
+  async joinGroup(inviteToken, { email, displayName }) {
+    const group = await this.groupFromInvite(inviteToken);
+    if (!group) return null;
+    const account = await this.ensureAccount(email, displayName);
+    if (!account) return null;
+    await this.updateAccounts((accounts) => {
+      const found = accounts[account.email];
+      const alreadyIn = found.createdGroups.some((candidate) => candidate.id === group.id)
+        || found.joinedGroups.includes(group.id);
+      if (!alreadyIn) found.joinedGroups.push(group.id);
+    });
+    return { group, member: await this.memberFor(group.id, account.email) };
+  }
+
+  /// 会话迁移用:把一批群 id 挂到这个 email 下。没有 token 可搬,搬的就是这层关系。
+  async linkGroups(email, groupIds) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[normalizeEmail(email)];
+      if (!account) return null;
+      for (const groupId of groupIds) {
+        const alreadyIn = account.createdGroups.some((group) => group.id === groupId)
+          || account.joinedGroups.includes(groupId);
+        if (!alreadyIn) account.joinedGroups.push(groupId);
+      }
+      return account;
+    });
+  }
+
+  async leaveGroup(groupId, email) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[normalizeEmail(email)];
+      if (!account) return false;
+      const before = account.joinedGroups.length + account.ais.length;
+      account.joinedGroups = account.joinedGroups.filter((candidate) => candidate !== groupId);
+      account.ais = account.ais.filter((ai) => ai.groupId !== groupId);
+      return account.joinedGroups.length + account.ais.length !== before;
+    });
+  }
+
+  // ── 成员(从账号推导,不落盘)──────────────────────────────────────────────────
+
+  /// presence 和 activeMessageIds 只活在内存里:心跳 45 秒一次、超时 90 秒,本来就是
+  /// 易失状态。放进 accounts.json 的话每次心跳都要整文件重写,9 个 worker 会把这台
+  /// 1G 的机器写穿。服务重启后 worker 会在一轮心跳内自己报回来。
+  livePresence(memberId) {
+    let live = this.presenceByMember.get(memberId);
+    if (!live) {
+      live = { status: "online", lastSeenAt: new Date().toISOString(), activeMessageIds: [] };
+      this.presenceByMember.set(memberId, live);
+    }
+    return live;
+  }
+
+  humanMember(account, groupId) {
+    return {
+      id: humanMemberId(account.email),
+      name: account.displayName,
+      type: "human",
+      provider: null,
+      email: account.email,
+      groupId,
+      joinedAt: account.createdAt
+    };
+  }
+
+  aiMember(account, registration) {
+    const memberId = aiMemberId(account.email, registration.provider);
+    const live = this.livePresence(memberId);
+    return {
+      id: memberId,
+      name: registration.name,
+      type: "ai",
+      provider: registration.provider,
+      ownerName: account.displayName,
+      email: account.email,
+      groupId: registration.groupId,
+      // 名下的人类成员就是它的主人;免审批开关记在注册项上。
+      desktopOwnerAccountId: account.email,
+      desktopOwnerMemberId: humanMemberId(account.email),
+      trustedOwnerMemberId: registration.trusted ? humanMemberId(account.email) : null,
+      activeMessageIds: live.activeMessageIds,
+      presence: { status: live.status, lastSeenAt: live.lastSeenAt },
+      joinedAt: registration.joinedAt
+    };
+  }
+
+  async listMembers(groupId) {
+    const accounts = await this.accounts();
+    const members = [];
+    for (const account of Object.values(accounts)) {
+      if (this.groupIdsFor(account).includes(groupId)) {
+        members.push(this.humanMember(account, groupId));
+      }
+      for (const registration of account.ais ?? []) {
+        if (registration.groupId === groupId) members.push(this.aiMember(account, registration));
+      }
+    }
+    return members;
+  }
+
+  /// 身份解析入口:email(+provider)决定是谁。provider 缺省即真人成员。
+  async memberFor(groupId, email, provider = null) {
+    const account = await this.accountByEmail(email);
+    if (!account) return null;
+    if (provider) {
+      const registration = (account.ais ?? [])
+        .find((ai) => ai.groupId === groupId && ai.provider === provider);
+      return registration ? this.aiMember(account, registration) : null;
+    }
+    if (!this.groupIdsFor(account).includes(groupId)) return null;
+    return this.humanMember(account, groupId);
+  }
+
+  async memberById(groupId, memberId) {
+    return (await this.listMembers(groupId)).find((member) => member.id === memberId) ?? null;
+  }
+
+  async addDesktopAI(groupId, { name, provider, email, trusted = false }) {
+    const account = await this.accountByEmail(email);
+    if (!account) return null;
+    const existing = (account.ais ?? [])
+      .find((ai) => ai.groupId === groupId && ai.provider === provider);
+    if (existing) return { member: this.aiMember(account, existing), created: false };
+    const registration = {
+      groupId,
+      provider,
+      name,
+      trusted,
+      joinedAt: new Date().toISOString()
+    };
+    await this.updateAccounts((accounts) => {
+      accounts[account.email].ais.push(registration);
+    });
+    return { member: this.aiMember(await this.accountByEmail(email), registration), created: true };
+  }
+
+  async removeDesktopAI(groupId, email, provider) {
+    return this.updateAccounts((accounts) => {
+      const account = accounts[normalizeEmail(email)];
+      if (!account) return false;
+      const before = account.ais.length;
+      account.ais = account.ais
+        .filter((ai) => !(ai.groupId === groupId && ai.provider === provider));
+      return account.ais.length !== before;
+    });
+  }
+
+  async setTrustedExecution(groupId, email, provider, enabled) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      const registration = found?.ais
+        ?.find((ai) => ai.groupId === groupId && ai.provider === provider);
+      if (!registration) return null;
+      registration.trusted = enabled;
+      return found;
+    });
+    return account ? this.memberFor(groupId, email, provider) : null;
+  }
+
+  async updatePresence(groupId, memberId, status) {
+    const member = await this.memberById(groupId, memberId);
+    if (!member || member.type !== "ai") return null;
+    const live = this.livePresence(memberId);
+    live.status = status === "online" && live.activeMessageIds.length ? "busy" : status;
+    live.lastSeenAt = new Date().toISOString();
+    return { status: live.status, lastSeenAt: live.lastSeenAt };
+  }
+
+  async setMessageActivity(groupId, memberId, messageId, processing) {
+    const member = await this.memberById(groupId, memberId);
+    if (!member || member.type !== "ai") return null;
+    const live = this.livePresence(memberId);
+    const active = new Set(live.activeMessageIds);
+    if (processing) active.add(messageId);
+    else active.delete(messageId);
+    live.activeMessageIds = [...active];
+    live.status = live.activeMessageIds.length ? "busy" : "online";
+    live.lastSeenAt = new Date().toISOString();
+    return { status: live.status, lastSeenAt: live.lastSeenAt };
   }
 
   async saveAttachments(groupId, files) {
