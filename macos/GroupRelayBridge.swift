@@ -2,17 +2,47 @@ import Foundation
 import Security
 import Darwin
 
-private let aiTaskTimeout: TimeInterval = 10 * 60
+// 任务不再按总耗时硬杀,而是按"是否还在动"判定。三个 provider 中途都不写 stdout
+// (claude 是 --output-format text、cursor 是 --output-format json,都结束才吐;codex 走 -o 文件),
+// 所以进程树的 CPU 时间是"正在思考但不出声"时唯一可靠的活性信号。只要有任何一纳秒 CPU
+// 推进就重置计时,因此只有真正卡死(整棵树零 CPU、零输出)才会触发。
+private let aiIdleTimeout: TimeInterval = 5 * 60
+private let aiTaskHardCap: TimeInterval = 60 * 60
+private let aiActivityPollInterval: TimeInterval = 1
+private let aiCPUSampleInterval: TimeInterval = 15
 private let approvalMarker = "GROUP_RELAY_APPROVAL_REQUIRED:"
+
+private struct ActivityFootprint: Equatable {
+    var stdoutBytes: Int
+    var stderrBytes: Int
+    var outputFileBytes: Int
+}
+
+private func processCPUNanos(_ pid: pid_t) -> UInt64 {
+    var info = rusage_info_v2()
+    let status = withUnsafeMutablePointer(to: &info) { pointer -> Int32 in
+        pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rebound in
+            proc_pid_rusage(pid, RUSAGE_INFO_V2, rebound)
+        }
+    }
+    guard status == 0 else { return 0 }
+    return info.ri_user_time &+ info.ri_system_time
+}
 
 private final class CapturedOutput: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
 
-    func store(_ value: Data) {
+    func append(_ value: Data) {
         lock.lock()
-        data = value
+        data.append(value)
         lock.unlock()
+    }
+
+    var byteCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return data.count
     }
 
     func read() -> Data {
@@ -360,13 +390,20 @@ private final class RelayWorker {
         process.environment = environment
         let stdout = Pipe()
         process.standardOutput = stdout
-        let errorLog = FileManager.default.homeDirectoryForCurrentUser
+        // 每个任务写自己的 stderr 文件:共享的 ai-stderr.log 由所有 worker 追加写,拿它的字节数
+        // 当活性信号会被兄弟 worker 的输出顶起来,真正卡死的任务就要等满硬上限才被发现。
+        // 任务结束后整段并入共享日志,排查体验和原来一致。
+        let sharedErrorLog = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Group Relay/ai-stderr.log")
-        try FileManager.default.createDirectory(at: errorLog.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: errorLog.path) { FileManager.default.createFile(atPath: errorLog.path, contents: nil) }
+        try FileManager.default.createDirectory(at: sharedErrorLog.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let errorLog = temporary.appendingPathComponent("stderr.log")
+        FileManager.default.createFile(atPath: errorLog.path, contents: nil)
         let errorHandle = try FileHandle(forWritingTo: errorLog)
-        try errorHandle.seekToEnd()
         process.standardError = errorHandle
+        defer {
+            try? errorHandle.close()
+            appendErrorLog(from: errorLog, to: sharedErrorLog)
+        }
         let heartbeat = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         heartbeat.schedule(deadline: .now() + 45, repeating: 45)
         heartbeat.setEventHandler { [weak self] in try? self?.presence("busy") }
@@ -376,21 +413,58 @@ private final class RelayWorker {
         let capturedOutput = CapturedOutput()
         let outputFinished = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .utility).async {
-            capturedOutput.store(stdout.fileHandleForReading.readDataToEndOfFile())
+            let handle = stdout.fileHandleForReading
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                capturedOutput.append(chunk)
+            }
             outputFinished.signal()
         }
-        let deadline = Date().addingTimeInterval(aiTaskTimeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.25)
+        let started = Date()
+        var lastActivity = started
+        var lastFootprint = activityFootprint(
+            stdoutBytes: capturedOutput.byteCount, errorLog: errorLog, outputFile: outputFile
+        )
+        var lastCPU = processTreeCPUNanos(process)
+        var lastCPUSampleAt = started
+        var idleTimedOut = false
+        var hardCapped = false
+        while process.isRunning {
+            Thread.sleep(forTimeInterval: aiActivityPollInterval)
+            let now = Date()
+            let footprint = activityFootprint(
+                stdoutBytes: capturedOutput.byteCount, errorLog: errorLog, outputFile: outputFile
+            )
+            if footprint != lastFootprint {
+                lastFootprint = footprint
+                lastActivity = now
+            }
+            // 进程树遍历要 fork 一次 ps,所以按较粗的节奏采样;闲置阈值是分钟级,够用。
+            if now.timeIntervalSince(lastCPUSampleAt) >= aiCPUSampleInterval {
+                let cpu = processTreeCPUNanos(process)
+                lastCPUSampleAt = now
+                if cpu != lastCPU {
+                    lastCPU = cpu
+                    lastActivity = now
+                }
+            }
+            if now.timeIntervalSince(lastActivity) >= aiIdleTimeout { idleTimedOut = true; break }
+            if now.timeIntervalSince(started) >= aiTaskHardCap { hardCapped = true; break }
         }
-        let timedOut = process.isRunning
-        if timedOut { terminateProcessTree(process) }
+        if idleTimedOut || hardCapped { terminateProcessTree(process) }
         process.waitUntilExit()
         _ = outputFinished.wait(timeout: .now() + 5)
         let stdoutData = capturedOutput.read()
-        try errorHandle.close()
-        if timedOut {
-            throw BridgeError.message("AI 单次任务超过 10 分钟，已自动停止；请拆分任务后重试")
+        if idleTimedOut || hardCapped {
+            let reason = idleTimedOut
+                ? "AI 已静默 \(Int(aiIdleTimeout / 60)) 分钟（无输出、进程零 CPU），判定卡死并停止"
+                : "AI 单次任务超过 \(Int(aiTaskHardCap / 60)) 分钟上限，已自动停止"
+            guard let partial = salvagePartialReply(stdoutData: stdoutData, outputFile: outputFile) else {
+                throw BridgeError.message(reason + "；未拿到任何输出，请重试或拆分任务")
+            }
+            let notice = "⚠️ \(reason)。以下是中断前已产出的内容，可能不完整：\n\n"
+            return String((notice + partial).prefix(20_000))
         }
         guard process.terminationStatus == 0 else {
             throw BridgeError.message("\(config.provider) exited with status \(process.terminationStatus)")
@@ -410,6 +484,88 @@ private final class RelayWorker {
         let reply = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if reply.isEmpty { throw BridgeError.message("AI returned an empty reply") }
         return String(reply.prefix(20_000))
+    }
+
+    /// 超时被杀时尽力抢救已产出的内容:codex 写 -o 文件,claude/cursor 走 stdout。
+    /// 截断的 JSON 解不出来就退回原始文本 —— 给用户半个答案也强过只给一句报错。
+    private func salvagePartialReply(stdoutData: Data, outputFile: URL?) -> String? {
+        var candidates: [String] = []
+        if let outputFile, let text = try? String(contentsOf: outputFile, encoding: .utf8) {
+            candidates.append(text)
+        }
+        if let text = String(data: stdoutData, encoding: .utf8) {
+            candidates.append(text)
+        }
+        for candidate in candidates {
+            if let data = candidate.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let result = object["result"] as? String {
+                let parsed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !parsed.isEmpty { return parsed }
+            }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    private func appendErrorLog(from source: URL, to destination: URL) {
+        guard let data = try? Data(contentsOf: source), !data.isEmpty else { return }
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            FileManager.default.createFile(atPath: destination.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: destination) else { return }
+        defer { try? handle.close() }
+        guard (try? handle.seekToEnd()) != nil else { return }
+        try? handle.write(contentsOf: data)
+    }
+
+    private func fileByteCount(_ url: URL) -> Int {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? Int else { return 0 }
+        return size
+    }
+
+    private func activityFootprint(stdoutBytes: Int, errorLog: URL, outputFile: URL?) -> ActivityFootprint {
+        ActivityFootprint(
+            stdoutBytes: stdoutBytes,
+            stderrBytes: fileByteCount(errorLog),
+            outputFileBytes: outputFile.map(fileByteCount) ?? 0
+        )
+    }
+
+    /// 一次 `ps` 拿到全表再在内存里建树,避免 `descendantProcessIDs` 那样逐节点 fork `pgrep`。
+    private func processTreePIDs(root: pid_t) -> [pid_t] {
+        let query = Process()
+        query.executableURL = URL(fileURLWithPath: "/bin/ps")
+        query.arguments = ["-Ao", "pid=,ppid="]
+        let output = Pipe()
+        query.standardOutput = output
+        query.standardError = FileHandle.nullDevice
+        guard (try? query.run()) != nil else { return [root] }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        query.waitUntilExit()
+        var children: [pid_t: [pid_t]] = [:]
+        for line in (String(data: data, encoding: .utf8) ?? "").split(separator: "\n") {
+            let fields = line.split(whereSeparator: { $0.isWhitespace }).compactMap { pid_t($0) }
+            guard fields.count == 2 else { continue }
+            children[fields[1], default: []].append(fields[0])
+        }
+        var result: [pid_t] = []
+        var seen: Set<pid_t> = []
+        var stack: [pid_t] = [root]
+        while let pid = stack.popLast() {
+            guard seen.insert(pid).inserted else { continue }
+            result.append(pid)
+            stack.append(contentsOf: children[pid] ?? [])
+        }
+        return result
+    }
+
+    private func processTreeCPUNanos(_ process: Process) -> UInt64 {
+        let root = process.processIdentifier
+        guard root > 0 else { return 0 }
+        return processTreePIDs(root: root).reduce(UInt64(0)) { $0 &+ processCPUNanos($1) }
     }
 
     private func directChildProcessIDs(_ parent: pid_t) -> [pid_t] {
