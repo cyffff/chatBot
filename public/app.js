@@ -44,7 +44,7 @@ const serverStorageKey = "relay-server-url";
 const aiProviderLabels = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
 const nativeRequests = new Map();
 let nativeRequestSequence = 0;
-const views = ["#create-view", "#join-view", "#invalid-view", "#account-view", "#transfer-view", "#chat-view"];
+const views = ["#identity-view", "#create-view", "#join-view", "#invalid-view", "#account-view", "#transfer-view", "#chat-view"];
 function show(selector) {
   views.forEach((view) => $(view).classList.toggle("hidden", view !== selector));
 }
@@ -168,11 +168,70 @@ async function ensureAccountCredential() {
   if (loadAccountCredential()) return;
   if (!state.accountBootstrapPromise) {
     state.accountBootstrapPromise = restoreNativeAccountCredential()
-      .then((restored) => restored || createAutomaticAccount())
+      .then((restored) => restored || askForAccountEmail())
       .finally(() => { state.accountBootstrapPromise = null; });
   }
   await state.accountBootstrapPromise;
 }
+
+/// 网页版第一次打开时先问邮箱。默默注册一个 device-… 账号的话,这个人已有的群一个都
+/// 看不到 —— 工作台是空的,而且他没有任何入口说明自己是谁。桌面端有原生凭证可恢复,
+/// 走不到这里。
+function askForAccountEmail() {
+  return new Promise((resolve) => {
+    show("#identity-view");
+    const form = $("#identity-form");
+    const submit = async (event) => {
+      event.preventDefault();
+      const email = String(new FormData(form).get("email") ?? "").trim().toLowerCase();
+      if (!email) return;
+      try {
+        await useAccountEmail(email);
+        cleanup();
+        resolve();
+      } catch (error) {
+        toast(error.message);
+      }
+    };
+    const skip = async () => {
+      cleanup();
+      await createAutomaticAccount();
+      resolve();
+    };
+    function cleanup() {
+      form.removeEventListener("submit", submit);
+      $("#skip-identity").removeEventListener("click", skip);
+    }
+    form.addEventListener("submit", submit);
+    $("#skip-identity").addEventListener("click", skip);
+  });
+}
+
+const isAutomaticEmail = (email) => Boolean(email?.endsWith("@device.group-relay.example.com"));
+
+function renderIdentitySettings() {
+  const current = $("#identity-current");
+  if (!current) return;
+  current.textContent = isAutomaticEmail(state.email)
+    ? `当前是本机自动账号（${state.email}），换成你自己的邮箱即可看到你的群组。`
+    : `当前身份：${state.email}`;
+}
+
+$("#identity-settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = String($("#identity-email").value ?? "").trim().toLowerCase();
+  if (!email) return toast("请填写邮箱");
+  if (email === state.email) return toast("已经是这个邮箱了");
+  try {
+    await useAccountEmail(email);
+    await loadAccountDashboard();
+    renderIdentitySettings();
+    $("#identity-email").value = "";
+    toast(`已切换到 ${email}`);
+  } catch (error) {
+    toast(error.message);
+  }
+});
 
 async function ensureAccountForCurrentSession() {
   await ensureAccountCredential();
@@ -269,6 +328,25 @@ async function findKnownSessions() {
     }
   }
   return sessions;
+}
+
+/// 把这个邮箱认作本机身份:已经是它就什么都不做,否则注册/取回并存下来。
+async function useAccountEmail(email) {
+  if (state.email === email) return;
+  const { account } = await accountApi("/api/accounts", {
+    method: "POST",
+    body: JSON.stringify({ email })
+  });
+  saveAccountCredential(account);
+}
+
+function prefillJoinEmail() {
+  const field = $("#join-form [name=email]");
+  if (!field || field.value) return;
+  const stored = state.email ?? loadAccountCredential() ?? null;
+  const email = state.email ?? (typeof stored === "string" ? stored : null);
+  // 自动生成的本机账号不预填 —— 那不是人愿意用的身份。
+  if (email && !email.endsWith("@device.group-relay.example.com")) field.value = email;
 }
 
 function showInvalidInvite(sessions = []) {
@@ -1413,6 +1491,7 @@ async function loadAccountDashboard() {
   startTaskRefresh();
   void renderHistoryStats();
   renderServerSettings();
+  renderIdentitySettings();
   void followServerMove();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
@@ -1572,22 +1651,19 @@ async function syncAccountToServer(targetBaseUrl) {
   return { synced, applied };
 }
 
-async function runServerSync(targetBaseUrl, { thenSwitch }) {
+async function runServerSync(targetBaseUrl) {
   const summary = `账号 ${state.account.email}、${state.accountSessions.length} 个群组`;
-  const question = thenSwitch
-    ? `把 ${summary} 同步到 ${targetBaseUrl}，然后切换过去？\n\n聊天记录留在本机，不会上传。`
-    : `把 ${summary} 同步到 ${targetBaseUrl}？\n\n聊天记录留在本机，不会上传。`;
-  if (!confirm(question)) return;
+  if (!confirm(
+    `把 ${summary} 同步到 ${targetBaseUrl}，然后切换过去？\n\n聊天记录留在本机，不会上传。`
+  )) return;
   const result = $("#server-sync-result");
   result.textContent = "正在同步…";
   try {
     const { synced, applied } = await syncAccountToServer(targetBaseUrl);
     const detail = `已同步 ${synced.createdGroups} 个自建群组、${synced.joinedGroups} 个加入的群组、`
       + `${synced.ais} 个 AI；对方新增 ${applied.groups ?? 0} 个群组。`;
-    result.textContent = detail;
+    result.textContent = `${detail} 正在切换…`;
     toast(detail);
-    if (!thenSwitch) return;
-    if (!confirm(`同步完成。现在切换到 ${targetBaseUrl}？`)) return;
     localStorage.setItem(serverStorageKey, targetBaseUrl);
     if (desktopNativeBridge()) {
       await requestNative("setServerUrl", { serverUrl: targetBaseUrl });
@@ -1631,19 +1707,12 @@ function renderServerSettings() {
   if (!field.value) field.value = localStorage.getItem(serverStorageKey) ?? "";
 }
 
-$("#sync-server").addEventListener("click", () => {
-  const target = normalizedServerUrl($("#server-url").value);
-  if (!target) return toast("请填写完整的服务器地址，例如 https://chat.example.com");
-  if (target === location.origin) return toast("这就是当前连接的服务器");
-  void runServerSync(target, { thenSwitch: false });
-});
-
 $("#server-settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const target = normalizedServerUrl($("#server-url").value);
   if (!target) return toast("请填写完整的服务器地址，例如 https://chat.example.com");
   if (target === location.origin) return toast("这就是当前连接的服务器");
-  void runServerSync(target, { thenSwitch: true });
+  void runServerSync(target);
 });
 
 function downloadJson(payload, filename) {
@@ -2008,9 +2077,13 @@ $("#account-create-form").addEventListener("submit", async (event) => {
 $("#join-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  if (!state.email && !loadAccountCredential()) await createAutomaticAccount();
+  // 身份就是邮箱,所以必须问。不问的话点邀请链接会悄悄注册一个一次性设备账号,
+  // 群组不会出现在这个人真正的工作台里 —— 这正是之前踩到的坑。
+  const email = String(form.get("email") ?? "").trim().toLowerCase();
+  if (!email) return toast("请填写你的邮箱");
+  await useAccountEmail(email);
   const input = {
-    email: state.email,
+    email,
     name: form.get("name"),
     type: "human",
     provider: null
@@ -2213,6 +2286,7 @@ async function boot() {
       const { group } = await api(`/api/invites/${state.inviteToken}`);
       if (await resumeSession(group.id, state.inviteToken)) return;
       $("#join-title").textContent = `加入「${group.name}」`;
+      prefillJoinEmail();
       show("#join-view");
     } catch (error) {
       if (error.message === "invite not found") {
