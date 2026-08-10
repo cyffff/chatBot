@@ -106,6 +106,7 @@ export async function createApp(options = {}) {
   const dataDir = options.dataDir ?? process.env.GROUP_RELAY_DATA_DIR ?? "./data";
   const configuredPublicBaseUrl = options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL;
   const presenceTimeoutMs = Number(options.presenceTimeoutMs ?? 90_000);
+  const movedTo = (options.movedTo ?? process.env.GROUP_RELAY_MOVED_TO ?? "").trim() || null;
   const expiredTokenGraceMs = Number(options.expiredTokenGraceMs ?? 10 * 60_000);
   const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
   const store = options.store ?? new FileStore(dataDir);
@@ -401,7 +402,10 @@ export async function createApp(options = {}) {
   app.get("/health", (_req, res) => res.json({
     ok: true,
     identity: "email",
-    capabilities: ["account-sync", "client-history"]
+    capabilities: ["account-sync", "client-history"],
+    // 搬迁地址只能由部署方通过环境变量设置。这里不开写接口:没有鉴权的服务上,
+    // 一个「所有客户端自动跟随」的可写字段等于把全部客户端拱手让人。
+    ...(movedTo ? { movedTo } : {})
   }));
 
   app.post("/api/accounts", async (req, res, next) => {
@@ -1236,5 +1240,28 @@ export async function createApp(options = {}) {
     res.status(500).json({ error: "internal server error" });
   });
 
-  return { app, store, sweepExpiredTokens };
+  /// 部署方设了 GROUP_RELAY_MOVED_TO 之后,老服务器启动时把**所有**账号推给新服务器,
+  /// 然后每个客户端下次接触 /health 时自己跟过去。用户什么都不用点。
+  async function pushEverythingToNewServer() {
+    if (!movedTo) return null;
+    const compatibility = await targetCompatibility(movedTo);
+    if (!compatibility.ok) return { movedTo, error: compatibility.error };
+    const payloads = await store.exportAllAccounts();
+    const target = new URL("/api/account/import", movedTo);
+    let migrated = 0;
+    const failed = [];
+    for (const payload of payloads) {
+      const response = await fetch(target, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(20_000)
+      }).catch((error) => ({ ok: false, statusText: error.message }));
+      if (response.ok) migrated += 1;
+      else failed.push(`${payload.account.email}: ${response.statusText}`);
+    }
+    return { movedTo, accounts: payloads.length, migrated, failed };
+  }
+
+  return { app, store, sweepExpiredTokens, movedTo, pushEverythingToNewServer };
 }
