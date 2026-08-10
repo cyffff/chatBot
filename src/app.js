@@ -868,11 +868,13 @@ export async function createApp(options = {}) {
       }
       const presence = await store.updatePresence(req.params.groupId, req.member.id, status);
       if (!presence) return res.status(404).json({ error: "member not found" });
+      // 回带 email:走宽限期进来的旧客户端靠这个把自己的配置换成新身份。
+      res.set("X-Relay-Resolved-Email", req.member.email);
       publish(req.params.groupId, "member_presence", {
         id: req.member.id,
         presence
       });
-      res.json({ presence });
+      res.json({ presence, email: req.member.email });
     } catch (error) {
       next(error);
     }

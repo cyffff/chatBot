@@ -4,6 +4,15 @@ const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
 const { app, store } = await createApp();
 
+if (store.migration) {
+  const { accounts, groups, legacyTokens, rewrittenRecords } = store.migration;
+  console.log(
+    `Migrated legacy data to email identity: ${accounts} accounts, ${groups} groups, `
+    + `${rewrittenRecords} records re-keyed, ${legacyTokens} legacy tokens honoured `
+    + "(delete data/legacy-tokens.json to end the grace period)"
+  );
+}
+
 const server = app.listen(port, host, () => {
   console.log(`Group Relay listening on http://${host}:${port}`);
 });

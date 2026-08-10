@@ -85,7 +85,7 @@ async function loadCodexConnection(name) {
     connectionName: name,
     cursor: null
   };
-  if (!config.baseUrl || !config.groupId || !config.email) {
+  if (!config.baseUrl || !config.groupId || !(config.email || config.memberToken)) {
     throw new Error(`Codex MCP connection "${name}" is missing Group Relay settings.`);
   }
   return config;
@@ -178,8 +178,10 @@ async function reportPresence(config, status, { persist = true } = {}) {
 
 async function request(config, pathname, options = {}) {
   const headers = new Headers(options.headers);
-  // 身份是 email(+provider),没有 token。
+  // 身份是 email(+provider)。迁移前建的 session 配置里只有 memberToken,
+  // 这时退回旧头让服务端的宽限期认它,而不是直接失败。
   if (config.email) headers.set("X-Relay-Email", config.email);
+  else if (config.memberToken) headers.set("Authorization", `Bearer ${config.memberToken}`);
   if (config.provider) headers.set("X-Relay-Provider", config.provider);
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const retryable = !options.method
