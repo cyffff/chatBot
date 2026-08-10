@@ -283,6 +283,16 @@ internal sealed class WindowsAiBridgeManager : IDisposable
 internal sealed class WindowsAiWorker
 {
     private const string ApprovalMarker = "GROUP_RELAY_APPROVAL_REQUIRED:";
+    // 任务不再按总耗时硬杀,而是按"是否还在动"判定。三个 provider 中途都不写 stdout
+    // (claude 是 --output-format text、cursor 是 --output-format json,都结束才吐;codex 走 -o 文件),
+    // 所以 CPU 时间是"正在思考但不出声"时最可靠的活性信号,任何推进都会重置计时。
+    // 与 macOS 端的差异:那边用 ps 建树统计整棵树的 CPU,这里为了不引入 WMI/System.Management
+    // 依赖,只统计根进程的 CPU —— 三个 agent CLI 的活都在根进程上,配合另外三路信号足够。
+    private static readonly TimeSpan AiIdleTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan AiTaskHardCap = TimeSpan.FromMinutes(60);
+    private static readonly TimeSpan AiActivityPollInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan AiCpuSampleInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan AiPresenceInterval = TimeSpan.FromSeconds(45);
     private readonly DesktopAiWorkerConfig config;
     private readonly string configFile;
     private readonly Action<DesktopAiWorkerConfig, string> saveConfig;
@@ -526,9 +536,8 @@ internal sealed class WindowsAiWorker
 
     private async Task<string> RunProvider(string prompt, bool trusted, CancellationToken cancellation)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        timeout.CancelAfter(TimeSpan.FromMinutes(10));
-        var taskCancellation = timeout.Token;
+        // 超时判定挪到下面的轮询循环里,按活性决定,所以这里不再挂 CancelAfter。
+        var taskCancellation = cancellation;
         var temporary = Path.Combine(Path.GetTempPath(), $"group-relay-{Guid.NewGuid():N}");
         Directory.CreateDirectory(temporary);
         try
@@ -599,18 +608,103 @@ internal sealed class WindowsAiWorker
             {
                 try { if (!process.HasExited) process.Kill(true); } catch { }
             });
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(taskCancellation);
-            var stderrTask = process.StandardError.ReadToEndAsync(taskCancellation);
+            // 增量收集 stdout/stderr:既要能中途统计字节数做活性判定,也要在被杀时保住已产出的内容
+            // (原来的 ReadToEndAsync 一旦被取消就连半截结果都拿不到)。
+            var outputLock = new object();
+            var stdoutBuffer = new StringBuilder();
+            var stderrBuffer = new StringBuilder();
+            process.OutputDataReceived += (_, e) =>
+            {
+                if (e.Data is null) return;
+                lock (outputLock) stdoutBuffer.AppendLine(e.Data);
+            };
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (e.Data is null) return;
+                lock (outputLock) stderrBuffer.AppendLine(e.Data);
+            };
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            (int Stdout, int Stderr, long OutputFile) Footprint()
+            {
+                var fileBytes = 0L;
+                if (outputFile is not null)
+                {
+                    try
+                    {
+                        var info = new FileInfo(outputFile);
+                        if (info.Exists) fileBytes = info.Length;
+                    }
+                    catch { }
+                }
+                lock (outputLock)
+                {
+                    return (stdoutBuffer.Length, stderrBuffer.Length, fileBytes);
+                }
+            }
+
+            var started = DateTime.UtcNow;
+            var lastActivity = started;
+            var lastPresence = started;
+            var lastFootprint = Footprint();
+            var lastCpu = SafeProcessorTime(process);
+            var lastCpuSample = started;
+            var idleTimedOut = false;
+            var hardCapped = false;
             var exitTask = process.WaitForExitAsync(taskCancellation);
             while (!exitTask.IsCompleted)
             {
-                var completed = await Task.WhenAny(exitTask, Task.Delay(TimeSpan.FromSeconds(45), taskCancellation));
-                if (completed != exitTask) await Presence("busy", taskCancellation);
+                var completed = await Task.WhenAny(exitTask, Task.Delay(AiActivityPollInterval, taskCancellation));
+                if (completed == exitTask) break;
+                var now = DateTime.UtcNow;
+                var footprint = Footprint();
+                if (footprint != lastFootprint)
+                {
+                    lastFootprint = footprint;
+                    lastActivity = now;
+                }
+                if (now - lastCpuSample >= AiCpuSampleInterval)
+                {
+                    var cpu = SafeProcessorTime(process);
+                    lastCpuSample = now;
+                    if (cpu is not null && cpu != lastCpu)
+                    {
+                        lastCpu = cpu;
+                        lastActivity = now;
+                    }
+                }
+                if (now - lastPresence >= AiPresenceInterval)
+                {
+                    lastPresence = now;
+                    await Presence("busy", taskCancellation);
+                }
+                if (now - lastActivity >= AiIdleTimeout) { idleTimedOut = true; break; }
+                if (now - started >= AiTaskHardCap) { hardCapped = true; break; }
             }
-            await exitTask;
-            var stdout = await stdoutTask;
-            var stderr = await stderrTask;
+            if (idleTimedOut || hardCapped)
+            {
+                try { if (!process.HasExited) process.Kill(true); } catch { }
+            }
+            try { await exitTask; }
+            catch (OperationCanceledException) when (!cancellation.IsCancellationRequested) { }
+            string stdout, stderr;
+            lock (outputLock)
+            {
+                stdout = stdoutBuffer.ToString();
+                stderr = stderrBuffer.ToString();
+            }
             if (!string.IsNullOrWhiteSpace(stderr)) Log(stderr.Trim());
+            if (idleTimedOut || hardCapped)
+            {
+                var reason = idleTimedOut
+                    ? $"AI 已静默 {AiIdleTimeout.TotalMinutes:0} 分钟（无输出、进程零 CPU），判定卡死并停止"
+                    : $"AI 单次任务超过 {AiTaskHardCap.TotalMinutes:0} 分钟上限，已自动停止";
+                var partial = SalvagePartialReply(stdout, outputFile);
+                if (partial is null) throw new TimeoutException($"{reason}；未拿到任何输出，请重试或拆分任务");
+                var salvaged = $"⚠️ {reason}。以下是中断前已产出的内容，可能不完整：\n\n{partial}";
+                return salvaged.Length > 20_000 ? salvaged[..20_000] : salvaged;
+            }
             if (process.ExitCode != 0) throw new InvalidOperationException($"{config.Provider} 退出码 {process.ExitCode}");
             var raw = outputFile is not null ? await File.ReadAllTextAsync(outputFile, taskCancellation) : stdout;
             if (config.Provider == "cursor")
@@ -621,14 +715,51 @@ internal sealed class WindowsAiWorker
             if (reply.Length == 0) throw new InvalidOperationException("AI 返回了空回复");
             return reply.Length > 20_000 ? reply[..20_000] : reply;
         }
-        catch (OperationCanceledException) when (!cancellation.IsCancellationRequested)
-        {
-            throw new TimeoutException("AI 单次任务超过 10 分钟，已自动停止；请拆分任务后重试");
-        }
         finally
         {
             try { Directory.Delete(temporary, true); } catch { }
         }
+    }
+
+    /// 根进程累计 CPU 时间。取不到时返回 null,调用方会跳过本次比较 ——
+    /// 不能拿 0 顶替,否则一次瞬时异常会被误判成"有活动"而白白重置闲置计时。
+    /// Process 缓存快照,必须先 Refresh 才拿得到新值。
+    private static TimeSpan? SafeProcessorTime(Process process)
+    {
+        try
+        {
+            process.Refresh();
+            return process.TotalProcessorTime;
+        }
+        catch { return null; }
+    }
+
+    /// 超时被杀时尽力抢救已产出的内容:codex 写 -o 文件,claude/cursor 走 stdout。
+    /// 截断的 JSON 解不出来就退回原始文本 —— 给用户半个答案也强过只给一句报错。
+    private static string? SalvagePartialReply(string stdout, string? outputFile)
+    {
+        var candidates = new List<string>();
+        if (outputFile is not null)
+        {
+            try
+            {
+                if (File.Exists(outputFile)) candidates.Add(File.ReadAllText(outputFile));
+            }
+            catch { }
+        }
+        candidates.Add(stdout);
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var parsed = JsonDocument.Parse(candidate).RootElement.GetProperty("result").GetString();
+                if (!string.IsNullOrWhiteSpace(parsed)) return parsed.Trim();
+            }
+            catch { }
+            var trimmed = candidate.Trim();
+            if (trimmed.Length > 0) return trimmed;
+        }
+        return null;
     }
 
     private string FindExecutable()
