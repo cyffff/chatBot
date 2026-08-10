@@ -406,6 +406,11 @@ export class FileStore {
       const source = current[from];
       const target = current[to];
       if (!source || !target) return null;
+      // 群里的人认的是设备身份那个昵称。只有目标账号的昵称还是邮箱前缀(也就是从没有人
+      // 设过)时才继承,否则会覆盖掉人家自己改过的名字。
+      if (source.displayName && target.displayName === to.split("@")[0]) {
+        target.displayName = source.displayName;
+      }
       for (const group of source.createdGroups) {
         // 这个群可能已经在目标账号的「加入」里(claim 之前他是以成员身份在里面的)。
         // 不摘掉的话建群和加入两处都有同一个 id,群列表会重复一条。
