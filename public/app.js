@@ -734,6 +734,8 @@ async function refreshMembers() {
 function startPresenceRefresh() {
   if (state.presenceRefreshStarted) return;
   state.presenceRefreshStarted = true;
+  void followServerMove();
+  setInterval(() => void followServerMove(), 60_000);
   state.presenceRefreshTimer = setInterval(() => refreshMembers().catch(() => {}), 30_000);
 }
 
@@ -1411,6 +1413,7 @@ async function loadAccountDashboard() {
   startTaskRefresh();
   void renderHistoryStats();
   renderServerSettings();
+  void followServerMove();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
   $("#account-create-panel").classList.add("hidden");
@@ -1595,6 +1598,30 @@ async function runServerSync(targetBaseUrl, { thenSwitch }) {
     result.textContent = `同步失败：${error.message}`;
     toast(`同步失败：${error.message}`);
   }
+}
+
+// 老服务器被标记为已搬迁时,客户端自己跟过去。用户只需要在提醒上点一下确认。
+let followingMove = false;
+
+async function followServerMove() {
+  if (followingMove) return;
+  const health = await fetch("/health").then((response) => response.json()).catch(() => ({}));
+  const movedTo = normalizedServerUrl(health.movedTo);
+  if (!movedTo || movedTo === location.origin) return;
+  followingMove = true;
+  const message = `这台服务器已迁移到 ${movedTo}。\n\n`
+    + "你的账号和群组已经在那边了，聊天记录一直在本机。现在切换过去？";
+  if (!confirm(message)) {
+    followingMove = false;
+    return;
+  }
+  localStorage.setItem(serverStorageKey, movedTo);
+  toast(`正在切换到 ${movedTo}…`);
+  if (desktopNativeBridge()) {
+    await requestNative("setServerUrl", { serverUrl: movedTo }).catch(() => {});
+    return;
+  }
+  location.href = `${movedTo}/app`;
 }
 
 function renderServerSettings() {

@@ -59,7 +59,7 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
-  const { app, store, sweepExpiredTokens } = await createApp({
+  const { app, store, sweepExpiredTokens, movedTo, pushEverythingToNewServer } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
     ...options
@@ -69,7 +69,7 @@ async function fixture(t, options = {}) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, store, dataDir, sweepExpiredTokens };
+  return { base, store, dataDir, sweepExpiredTokens, movedTo, pushEverythingToNewServer };
 }
 
 async function json(base, url, options = {}) {
@@ -1901,4 +1901,59 @@ test("refuses to sync to a server that is still on the old protocol", async (t) 
   });
   assert.equal(unreachable.response.status, 409);
   assert.match(unreachable.body.error, /无法访问/);
+});
+
+test("a whole server migrates itself, so nobody has to press anything", async (t) => {
+  const target = await fixture(t);
+  const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-moving-"));
+  t.after(() => fs.rm(sourceDir, { recursive: true, force: true }));
+  const source = await fixture(t, { dataDir: sourceDir });
+
+  const created = await json(source.base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Whole server", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  for (const [email, name] of [["member@example.com", "Member"], ["zoe@example.com", "Zoe"]]) {
+    await json(source.base, `/api/invites/${created.body.group.inviteToken}/join`, {
+      method: "POST",
+      body: JSON.stringify({ email, name, type: "human" })
+    });
+  }
+  await json(source.base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "owner@example.com" },
+    body: JSON.stringify({ provider: "codex" })
+  });
+
+  // 部署方设置搬迁地址后重启老服务器,它把所有账号推过去。
+  const moving = await fixture(t, { dataDir: sourceDir, movedTo: target.base });
+  const result = await moving.pushEverythingToNewServer();
+  assert.equal(result.migrated, 3);
+  assert.deepEqual(result.failed, []);
+
+  // 三个人谁都没点过按钮,群主是否先同步也不再重要。
+  for (const email of ["owner@example.com", "member@example.com", "zoe@example.com"]) {
+    const sessions = await json(target.base, "/api/account/sessions", {
+      headers: { "X-Relay-Email": email }
+    });
+    assert.equal(sessions.body.sessions.length, 1, email);
+    assert.equal(sessions.body.sessions[0].group.id, groupId);
+  }
+  const roster = await json(target.base, `/api/groups/${groupId}`, {
+    headers: { "X-Relay-Email": "owner@example.com" }
+  });
+  assert.deepEqual(
+    roster.body.members.map((member) => `${member.type}:${member.name}`).sort(),
+    ["ai:Codex", "human:Member", "human:Owner", "human:Zoe"]
+  );
+  assert.equal(roster.body.group.inviteToken, created.body.group.inviteToken);
+
+  // 老服务器公告新地址,客户端据此自己跟随;并且不能有写接口能改它。
+  const health = await json(moving.base, "/health");
+  assert.equal(health.body.movedTo, target.base);
+  assert.equal((await json(target.base, "/health")).body.movedTo, undefined);
+
+  // 聊天记录不随服务器走
+  assert.equal((await target.store.readMessages(groupId)).length, 0);
 });

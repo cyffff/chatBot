@@ -376,6 +376,18 @@ export class FileStore {
 
   /// 幂等合并。群必须保留原来的 id 和邀请 token —— 客户端本地记录、桌面 worker 配置和
   /// 已经发出去的邀请链接全都按 id 认群,重新生成等于把这些全断掉。
+  /// 整机搬迁用:把每个账号都导一份。服务端自己就有全部账号,所以不需要每个人各自点一次,
+  /// 也不会出现「成员先同步、群主还没过去」那种暂时看不到群的顺序问题。
+  async exportAllAccounts() {
+    const emails = Object.keys(await this.accounts());
+    const payloads = [];
+    for (const email of emails) {
+      const payload = await this.exportAccount(email);
+      if (payload) payloads.push(payload);
+    }
+    return payloads;
+  }
+
   async importAccount(payload) {
     if (payload?.format !== exportFormat) throw new Error("not a Group Relay account export");
     const email = normalizeEmail(payload.account?.email);
