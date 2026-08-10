@@ -55,6 +55,14 @@ const createGroupSchema = z.object({
   displayName: z.string().trim().min(1).max(60)
 });
 
+// 只允许 http/https,并且推过去的永远只有这个账号自己的数据。
+const syncSchema = z.object({
+  targetBaseUrl: z.string().trim().url().refine(
+    (value) => /^https?:$/.test(new URL(value).protocol),
+    { message: "server URL must be http or https" }
+  )
+});
+
 const accountSchema = z.object({
   email: z.string().trim().email().max(254)
 });
@@ -395,6 +403,65 @@ export async function createApp(options = {}) {
       }
       res.json({ account: publicAccount(account) });
     } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/api/account/export", requireAccount, async (req, res, next) => {
+    try {
+      res.json(await store.exportAccount(req.account.email));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/account/import", async (req, res, next) => {
+    try {
+      res.json(await store.importAccount(req.body));
+    } catch (error) {
+      if (error instanceof SyntaxError || /export/.test(error.message)) {
+        return res.status(400).json({ error: error.message });
+      }
+      next(error);
+    }
+  });
+
+  /// 同步在服务端之间直接做,不走浏览器 —— 否则要给每台服务器配 CORS,而且换域名时
+  /// 页面还在旧域名下,跨域 POST 一定被拦。
+  app.post("/api/account/sync", requireAccount, async (req, res, next) => {
+    try {
+      const { targetBaseUrl } = syncSchema.parse(req.body);
+      const target = new URL("/api/account/import", targetBaseUrl);
+      const payload = await store.exportAccount(req.account.email);
+      const response = await fetch(target, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(20_000)
+      }).catch((error) => {
+        throw new Error(`目标服务器无法访问：${error.message}`);
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return res.status(502).json({
+          error: body.error || `目标服务器返回 ${response.status}`,
+          targetBaseUrl
+        });
+      }
+      res.json({
+        targetBaseUrl,
+        synced: {
+          email: payload.account.email,
+          createdGroups: payload.createdGroups.length,
+          joinedGroups: payload.joinedGroups.length,
+          ais: payload.ais.length
+        },
+        applied: body
+      });
+    } catch (error) {
+      if (error?.message?.startsWith("目标服务器")) {
+        return res.status(502).json({ error: error.message });
+      }
       next(error);
     }
   });

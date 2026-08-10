@@ -14,6 +14,7 @@ const normalizeEmail = (email) => String(email ?? "").trim().toLocaleLowerCase("
 // 成员 id 由 email 推出来,所以服务端不需要保存任何 id → 身份的映射。
 const humanMemberId = (email) => `human:${normalizeEmail(email)}`;
 const aiMemberId = (email, provider) => `ai:${normalizeEmail(email)}:${provider}`;
+const exportFormat = "group-relay-account-sync";
 const dayOf = (iso = new Date().toISOString()) => iso.slice(0, 10);
 
 async function exists(file) {
@@ -348,6 +349,108 @@ export class FileStore {
       }
       return changed;
     });
+  }
+
+  // ── 跨服务器同步 ────────────────────────────────────────────────────────────
+  // 换服务器时要带走的「我的数据」= 账号本身 + 它建的群 + 加入的群 id + 名下的 AI。
+  // 聊天记录不在里面:那份长期副本一直在客户端本地库里,跟着客户端走。
+
+  async exportAccount(email) {
+    const account = await this.accountByEmail(email);
+    if (!account) return null;
+    return {
+      format: exportFormat,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      account: {
+        email: account.email,
+        displayName: account.displayName,
+        avatarDataUrl: account.avatarDataUrl ?? null,
+        createdAt: account.createdAt
+      },
+      createdGroups: account.createdGroups ?? [],
+      joinedGroups: account.joinedGroups ?? [],
+      ais: account.ais ?? []
+    };
+  }
+
+  /// 幂等合并。群必须保留原来的 id 和邀请 token —— 客户端本地记录、桌面 worker 配置和
+  /// 已经发出去的邀请链接全都按 id 认群,重新生成等于把这些全断掉。
+  async importAccount(payload) {
+    if (payload?.format !== exportFormat) throw new Error("not a Group Relay account export");
+    const email = normalizeEmail(payload.account?.email);
+    if (!email) throw new Error("export is missing an email");
+    const result = await this.updateAccounts((accounts) => {
+      const account = accounts[email] ?? {
+        email,
+        displayName: payload.account.displayName || email.split("@")[0],
+        avatarDataUrl: payload.account.avatarDataUrl ?? null,
+        createdAt: payload.account.createdAt ?? new Date().toISOString(),
+        createdGroups: [],
+        joinedGroups: [],
+        ais: []
+      };
+      accounts[email] = account;
+      account.displayName = payload.account.displayName || account.displayName;
+      account.avatarDataUrl = payload.account.avatarDataUrl ?? account.avatarDataUrl;
+      const counts = { groups: 0, joined: 0, ais: 0 };
+      for (const group of payload.createdGroups ?? []) {
+        if (!group?.id || !group?.inviteToken) continue;
+        const existing = account.createdGroups.find((candidate) => candidate.id === group.id);
+        if (existing) {
+          existing.name = group.name ?? existing.name;
+          existing.inviteToken = group.inviteToken;
+          continue;
+        }
+        account.createdGroups.push({
+          id: group.id,
+          name: group.name ?? "",
+          createdAt: group.createdAt ?? new Date().toISOString(),
+          inviteToken: group.inviteToken
+        });
+        counts.groups += 1;
+      }
+      for (const groupId of payload.joinedGroups ?? []) {
+        const known = account.createdGroups.some((group) => group.id === groupId)
+          || account.joinedGroups.includes(groupId);
+        if (known) continue;
+        account.joinedGroups.push(groupId);
+        counts.joined += 1;
+      }
+      for (const ai of payload.ais ?? []) {
+        if (!ai?.groupId || !ai?.provider) continue;
+        const existing = account.ais
+          .find((candidate) => candidate.groupId === ai.groupId && candidate.provider === ai.provider);
+        if (existing) {
+          existing.name = ai.name ?? existing.name;
+          existing.trusted = Boolean(ai.trusted);
+          continue;
+        }
+        account.ais.push({
+          groupId: ai.groupId,
+          provider: ai.provider,
+          name: ai.name ?? ai.provider,
+          trusted: Boolean(ai.trusted),
+          joinedAt: ai.joinedAt ?? new Date().toISOString()
+        });
+        counts.ais += 1;
+      }
+      return counts;
+    });
+    // 群的目录结构要先建出来,否则第一条消息落不下去。
+    for (const group of payload.createdGroups ?? []) {
+      if (!group?.id || !/^[0-9a-f-]{36}$/i.test(group.id)) continue;
+      const dir = this.groupDir(group.id);
+      await fs.mkdir(path.join(dir, "messages"), { recursive: true });
+      await fs.mkdir(path.join(dir, "attachments"), { recursive: true });
+      if (!(await exists(path.join(dir, "tasks.json")))) {
+        await writeJsonAtomic(path.join(dir, "tasks.json"), []);
+      }
+      if (!(await exists(path.join(dir, "approvals.json")))) {
+        await writeJsonAtomic(path.join(dir, "approvals.json"), []);
+      }
+    }
+    return { email, ...result };
   }
 
   // ── 群组 ────────────────────────────────────────────────────────────────────

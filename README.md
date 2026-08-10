@@ -627,6 +627,9 @@ X-Relay-Provider: <codex|claude|cursor>   # 以该 email 名下的 AI 身份行�
 | `GET` | `/api/groups/:groupId/messages/wait` | 长轮询新消息 |
 | `GET` | `/api/groups/:groupId/events` | 浏览器 SSE |
 | `GET` | `/api/groups/:groupId/history` | 历史日期和压缩状态 |
+| `GET` | `/api/account/export` | 导出账号 + 群组关系（不含消息） |
+| `POST` | `/api/account/import` | 导入上面的结构，幂等 |
+| `POST` | `/api/account/sync` | 服务端直接推给 `targetBaseUrl` |
 
 创建群组：
 
@@ -697,6 +700,23 @@ npm run archive
 
 上传走磁盘中转而不是内存，因此单个请求的内存占用与文件大小无关；`compose.yaml` 里给容器
 设了 `mem_limit` 和日志上限，适配 1G 内存 / 30G 磁盘的小机器。
+
+### 换服务器与数据同步
+
+设置页的「服务器地址」可以填另一台 Group Relay 的地址，然后：
+
+- **同步数据到这台服务器** —— 把当前账号、它建的群组（保留原 id 和邀请 token）、加入的群组
+  id 和名下的 AI 推过去；
+- **同步并切换过去** —— 同步完成后再切换连接；桌面客户端走原生 `setServerUrl`，网页直接跳转。
+
+两个动作都会先弹确认，完成后弹提醒并显示同步条目数。重复同步是幂等的。
+
+同步在**服务端之间直接完成**（`POST /api/account/sync` → 目标的 `/api/account/import`），
+不经过浏览器，所以不需要给每台服务器配 CORS，换域名时也不会被跨域拦住。
+
+**聊天记录不在同步内容里** —— 那份长期副本一直在客户端本地库，跟着客户端走。要把记录搬到另一台
+机器，用下面的导出／导入文件。群组 id 和邀请 token 必须原样保留：客户端本地记录、桌面 worker
+配置和已经发出去的邀请链接都按 id 认群。
 
 ### 聊天记录存在本机
 

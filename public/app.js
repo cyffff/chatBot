@@ -40,6 +40,7 @@ const state = {
 };
 
 const accountStorageKey = "relay-account-v1";
+const serverStorageKey = "relay-server-url";
 const aiProviderLabels = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
 const nativeRequests = new Map();
 let nativeRequestSequence = 0;
@@ -1409,6 +1410,7 @@ async function loadAccountDashboard() {
   renderApprovals();
   startTaskRefresh();
   void renderHistoryStats();
+  renderServerSettings();
   const ownerInput = $("#account-create-form [name=ownerName]");
   if (!ownerInput.value) ownerInput.value = accountOwnerName(account);
   $("#account-create-panel").classList.add("hidden");
@@ -1539,6 +1541,82 @@ $("#start-browser-transfer").addEventListener("click", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+// ── 换服务器 ──────────────────────────────────────────────────────────────────
+// 同步在服务端之间直接做(见 /api/account/sync),浏览器只负责触发和确认,所以不需要
+// 给每台服务器配 CORS。聊天记录不在同步内容里 —— 它一直在本机 IndexedDB。
+
+function normalizedServerUrl(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  // 没写协议时默认 https,但本机地址默认 http —— 否则填 localhost:8798 会连不上。
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:|$)/i.test(raw);
+  try {
+    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `${local ? "http" : "https"}://${raw}`);
+    if (!/^https?:$/.test(url.protocol)) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+async function syncAccountToServer(targetBaseUrl) {
+  const { synced, applied } = await accountApi("/api/account/sync", {
+    method: "POST",
+    body: JSON.stringify({ targetBaseUrl })
+  });
+  return { synced, applied };
+}
+
+async function runServerSync(targetBaseUrl, { thenSwitch }) {
+  const summary = `账号 ${state.account.email}、${state.accountSessions.length} 个群组`;
+  const question = thenSwitch
+    ? `把 ${summary} 同步到 ${targetBaseUrl}，然后切换过去？\n\n聊天记录留在本机，不会上传。`
+    : `把 ${summary} 同步到 ${targetBaseUrl}？\n\n聊天记录留在本机，不会上传。`;
+  if (!confirm(question)) return;
+  const result = $("#server-sync-result");
+  result.textContent = "正在同步…";
+  try {
+    const { synced, applied } = await syncAccountToServer(targetBaseUrl);
+    const detail = `已同步 ${synced.createdGroups} 个自建群组、${synced.joinedGroups} 个加入的群组、`
+      + `${synced.ais} 个 AI；对方新增 ${applied.groups ?? 0} 个群组。`;
+    result.textContent = detail;
+    toast(detail);
+    if (!thenSwitch) return;
+    if (!confirm(`同步完成。现在切换到 ${targetBaseUrl}？`)) return;
+    localStorage.setItem(serverStorageKey, targetBaseUrl);
+    if (desktopNativeBridge()) {
+      await requestNative("setServerUrl", { serverUrl: targetBaseUrl });
+      return;
+    }
+    location.href = `${targetBaseUrl}/app`;
+  } catch (error) {
+    result.textContent = `同步失败：${error.message}`;
+    toast(`同步失败：${error.message}`);
+  }
+}
+
+function renderServerSettings() {
+  const field = $("#server-url");
+  if (!field) return;
+  $("#server-current").textContent = `当前连接：${location.origin}`;
+  if (!field.value) field.value = localStorage.getItem(serverStorageKey) ?? "";
+}
+
+$("#sync-server").addEventListener("click", () => {
+  const target = normalizedServerUrl($("#server-url").value);
+  if (!target) return toast("请填写完整的服务器地址，例如 https://chat.example.com");
+  if (target === location.origin) return toast("这就是当前连接的服务器");
+  void runServerSync(target, { thenSwitch: false });
+});
+
+$("#server-settings-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const target = normalizedServerUrl($("#server-url").value);
+  if (!target) return toast("请填写完整的服务器地址，例如 https://chat.example.com");
+  if (target === location.origin) return toast("这就是当前连接的服务器");
+  void runServerSync(target, { thenSwitch: true });
 });
 
 function downloadJson(payload, filename) {

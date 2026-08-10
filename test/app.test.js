@@ -1796,3 +1796,73 @@ test("migrates legacy token-based data to email-keyed accounts", async (t) => {
   const { migrateLegacyData } = await import("../src/migrate-legacy.js");
   assert.equal(await migrateLegacyData(dataDir), null);
 });
+
+test("account data syncs to another server, keeping group ids and invite links", async (t) => {
+  const source = await fixture(t);
+  const target = await fixture(t);
+
+  const created = await json(source.base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Moving day", email: "mover@example.com", displayName: "Mover" })
+  });
+  const groupId = created.body.group.id;
+  const inviteToken = created.body.group.inviteToken;
+  await json(source.base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ provider: "codex" })
+  });
+
+  const synced = await json(source.base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ targetBaseUrl: target.base })
+  });
+  assert.equal(synced.response.status, 200);
+  assert.deepEqual(synced.body.synced, {
+    email: "mover@example.com", createdGroups: 1, joinedGroups: 0, ais: 1
+  });
+  assert.equal(synced.body.applied.groups, 1);
+
+  // 群 id 和邀请 token 必须原样落在新服务器上:客户端本地记录和已发出的邀请链接都按它们认群。
+  const onTarget = await json(target.base, `/api/groups/${groupId}`, {
+    headers: { "X-Relay-Email": "mover@example.com" }
+  });
+  assert.equal(onTarget.response.status, 200);
+  assert.equal(onTarget.body.group.name, "Moving day");
+  assert.equal(onTarget.body.group.inviteToken, inviteToken);
+  assert.deepEqual(
+    onTarget.body.members.map((member) => member.id).sort(),
+    ["ai:mover@example.com:codex", "human:mover@example.com"]
+  );
+  const invite = await json(target.base, `/api/invites/${inviteToken}`);
+  assert.equal(invite.body.group.id, groupId);
+
+  // 新服务器上立刻能发消息(群目录已经建好),而聊天记录不在同步内容里
+  const message = new FormData();
+  message.set("text", "在新服务器上发的第一条");
+  const sent = await fetch(`${target.base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: message
+  });
+  assert.equal(sent.status, 201);
+  assert.equal((await target.store.readMessages(groupId)).length, 1);
+  assert.equal((await source.store.readMessages(groupId)).length, 0);
+
+  // 幂等:再同步一次不重复建群
+  const again = await json(source.base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ targetBaseUrl: target.base })
+  });
+  assert.equal(again.body.applied.groups, 0);
+  assert.equal((await target.store.accounts())["mover@example.com"].createdGroups.length, 1);
+
+  const refused = await json(source.base, "/api/account/sync", {
+    method: "POST",
+    headers: { "X-Relay-Email": "mover@example.com" },
+    body: JSON.stringify({ targetBaseUrl: "ftp://example.com" })
+  });
+  assert.equal(refused.response.status, 400);
+});

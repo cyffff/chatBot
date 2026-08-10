@@ -154,6 +154,17 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         let requestId = body["requestId"] as? String
         do {
             switch action {
+            case "setServerUrl":
+                // 网页同步完账号数据后要求切服务器:和菜单里的「服务器设置…」走同一条路。
+                guard
+                    let requestId,
+                    let raw = body["serverUrl"] as? String,
+                    let url = RelayWindowController.normalizedServerURL(raw)
+                else { return }
+                serverURL = url
+                UserDefaults.standard.set(url.absoluteString, forKey: serverPreferenceKey)
+                sendNativeResponse(requestId: requestId, result: ["serverUrl": url.absoluteString])
+                loadClient()
             case "openExternal":
                 guard
                     let rawURL = body["url"] as? String,
