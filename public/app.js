@@ -871,9 +871,16 @@ async function withoutBlocking(work, fallback, milliseconds = 2_500) {
   try {
     return await Promise.race([
       work,
-      new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), milliseconds); })
+      new Promise((resolve) => {
+        timer = setTimeout(() => {
+          state.historyError = `等了 ${milliseconds / 1000} 秒没有响应`;
+          resolve(fallback);
+        }, milliseconds);
+      })
     ]);
-  } catch {
+  } catch (error) {
+    // 原因要留下来:本机记录用不了会让每次开群都退回服务端整屏拉取,不能只说一句「打不开」。
+    state.historyError = error?.message || String(error);
     return fallback;
   } finally {
     clearTimeout(timer);
@@ -883,7 +890,10 @@ async function withoutBlocking(work, fallback, milliseconds = 2_500) {
 function warnHistoryUnavailable() {
   if (state.historyWarned) return;
   state.historyWarned = true;
-  toast("本机聊天记录暂时打不开，先只显示服务端最近的消息");
+  const reason = state.historyError || "原因不明";
+  console.warn("本机聊天记录打不开:", reason);
+  // 这条要连原因一起说:本机副本用不了的话,长期记录也没在存,而服务端只留 30 天。
+  toast(`本机聊天记录打不开：${reason}`);
 }
 
 // 整屏重画:按 id 去重 + 按时间排序,而不是直接接在后面。
