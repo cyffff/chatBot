@@ -2442,7 +2442,16 @@ $("#message-form").addEventListener("submit", async (event) => {
 
 /// 链接带上归属人和邮箱:AI 抓这个链接拿到的接入说明才填得满,不用再问一轮。
 /// 这套本来没有鉴权、邀请链接已经等于访问权,所以不新增暴露面。
+/// 发给人的链接:干净的,不带任何身份。带上群主邮箱会让对方以为要用那个邮箱登录 ——
+/// Zoe 把链接转给同事,同事就顶着她的身份进了群(见 df562de)。那两个参数只服务于 AI
+/// 接入说明,所以只放进下面那个链接里。
 function currentInviteUrl() {
+  return new URL(`/join/${state.inviteToken}`, location.origin).toString();
+}
+
+/// 发给自己的 AI 的链接:带上归属人和邮箱,让 /join 返回的接入说明能直接填好命令。
+/// 这里泄露的是复制者自己的邮箱,而且是他自己主动发给自己的 AI 的。
+function aiOnboardingUrl() {
   const url = new URL(`/join/${state.inviteToken}`, location.origin);
   const owner = state.account?.displayName;
   if (owner) url.searchParams.set("owner", owner);
@@ -2453,7 +2462,16 @@ function currentInviteUrl() {
 $("#invite-button").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(currentInviteUrl());
-    toast("邀请链接已复制。发给人是进群，发给自己的 AI 它会自己接入。");
+    toast("邀请链接已复制，直接发给要进群的人");
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$("#chat-ai-invite").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(aiOnboardingUrl());
+    toast("AI 接入链接已复制，只发给自己的 AI —— 它带着你的邮箱");
   } catch (error) {
     toast(error.message);
   }
@@ -2475,6 +2493,12 @@ $("#chat-ai-settings").addEventListener("click", () => {
 });
 
 async function boot() {
+  /// 早先发出去的邀请链接尾巴上带着分享者的 owner/email —— 那两个参数只给 /join 返回的
+  /// AI 接入说明用,网页这边一处都不读。人打开时先从地址栏抹掉:留在那儿只会让人以为
+  /// 该用那个邮箱登录,Zoe 的链接转给同事就是这么出事的。
+  if (new URLSearchParams(location.search).has("email") || new URLSearchParams(location.search).has("owner")) {
+    history.replaceState({}, "", `${location.pathname}${location.hash}`);
+  }
   const nativeMacClient = navigator.userAgent.includes("GroupRelayMac/");
   const nativeWindowsClient = navigator.userAgent.includes("GroupRelayWindows/");
   const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
@@ -2545,6 +2569,8 @@ async function boot() {
   }
   if (parts[0] === "join" && parts[1]) {
     state.inviteToken = parts[1];
+    /// 早先发出去的链接尾巴上还带着分享者的 owner/email(那两个参数只给 AI 接入说明用)。
+    /// 人打开时先把它们从地址栏抹掉:留在那儿只会让人以为该用那个邮箱登录。
     const mappedGroupId = localStorage.getItem(`relay-invite:${state.inviteToken}`);
     if (mappedGroupId && await resumeSession(mappedGroupId, state.inviteToken)) return;
     try {

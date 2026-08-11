@@ -690,7 +690,8 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 .presence-dot.busy { background: #e49a2f; }
 .presence-dot.offline { background: #9aa19c; }
 .chat-ai-panel { margin-top: 22px; padding: 12px; border: 1px solid #dbe5dc; border-radius: 12px; background: white; }
-.chat-ai-panel > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* 侧边栏很窄,三个东西(标题 + 两个链接按钮)挤不下就换行,别把标题压掉。 */
+.chat-ai-panel > div:first-child { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; }
 .chat-ai-panel > div:first-child strong { font-size: 12px; }
 .chat-ai-panel > div:first-child button { padding: 3px; font-size: 9px; }
 .chat-ai-panel p { margin: 8px 0 10px; color: #7b857e; font-size: 10px; line-height: 1.45; }
