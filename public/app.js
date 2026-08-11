@@ -886,6 +886,15 @@ function warnHistoryUnavailable() {
   toast("本机聊天记录暂时打不开，先只显示服务端最近的消息");
 }
 
+// 整屏重画:按 id 去重 + 按时间排序,而不是直接接在后面。
+function renderMessageList(messages) {
+  $("#messages").innerHTML = "";
+  state.rendered.clear();
+  [...new Map(messages.map((message) => [message.id, message])).values()]
+    .sort((left, right) => (left.createdAt < right.createdAt ? -1 : 1))
+    .forEach(renderMessage);
+}
+
 async function loadChat() {
   const requestedGroupId = state.groupId;
   // 先拿本地历史,再只向服务端要它之后的增量。服务端过了保留期已经没有这些消息了,
@@ -899,25 +908,58 @@ async function loadChat() {
   const cached = localHistory ?? [];
   const incremental = catchUpParams(cached, lastSyncedAt);
   if (cached.length) incremental.set("after", cached.at(-1).id);
-  const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor, syncedAt }] = await Promise.all([
-    api(`/api/groups/${state.groupId}`),
-    api(`/api/groups/${state.groupId}/messages?${incremental}`)
-  ]);
-  if (state.groupId !== requestedGroupId) return false;
-  state.inviteToken = group.inviteToken;
-  state.memberId = currentMemberId;
-  state.canManageTrustedExecution = canManageTrustedExecution === true;
+
+  /// 本机有副本就先画出来。两个请求要各走一次隧道(实测 0.4-1s),等它们回来才显示等于
+  /// 每次开群都空等一次往返 —— 而本机那份已经是绝大部分内容,服务端回来的只是增量和改动。
+  const paintedFromCache = cached.length > 0;
+  if (paintedFromCache) {
+    renderMessageList(cached);
+    show("#chat-view");
+    requestAnimationFrame(scrollMessagesToBottom);
+  }
+
+  let group;
+  let members;
+  let messages;
+  let cursor;
+  let syncedAt;
+  try {
+    const [groupPayload, messagePayload] = await Promise.all([
+      api(`/api/groups/${state.groupId}`),
+      api(`/api/groups/${state.groupId}/messages?${incremental}`)
+    ]);
+    if (state.groupId !== requestedGroupId) return false;
+    ({ group, members } = groupPayload);
+    ({ messages, cursor, syncedAt } = messagePayload);
+    state.inviteToken = group.inviteToken;
+    state.memberId = groupPayload.currentMemberId;
+    state.canManageTrustedExecution = groupPayload.canManageTrustedExecution === true;
+  } catch (error) {
+    // 隧道抖一下不该把人踢回群组列表:本机那份已经在屏上了,轮询会自己接上并补齐。
+    if (!paintedFromCache) throw error;
+    if (state.groupId !== requestedGroupId) return false;
+    $("#connection").textContent = "正在重连";
+    $("#connection").classList.remove("online");
+    startRealtime();
+    startPresenceRefresh();
+    void refreshChatAIControls();
+    return true;
+  }
   $("#group-name").textContent = group.name;
-  $("#messages").innerHTML = "";
-  state.rendered.clear();
   renderMembers(members);
   // 游标被保留期清掉时服务端会退回「最新 200 条」,那批可能和本地重叠、也可能比本地
-  // 某些消息更旧,所以按 id 去重 + 按时间排序后再渲染,而不是直接接在后面。
-  const merged = new Map(cached.map((message) => [message.id, message]));
-  for (const message of messages) merged.set(message.id, message);
-  [...merged.values()]
-    .sort((left, right) => (left.createdAt < right.createdAt ? -1 : 1))
-    .forEach(renderMessage);
+  // 某些消息更旧。顺序会乱的只有这一种情况,这时才整屏重画;平时补上新的、改掉变过的。
+  const outOfOrder = paintedFromCache && messages.some((message) => (
+    !state.rendered.has(message.id) && message.createdAt < cached.at(-1).createdAt
+  ));
+  if (!paintedFromCache || outOfOrder) {
+    const merged = new Map(cached.map((message) => [message.id, message]));
+    for (const message of messages) merged.set(message.id, message);
+    renderMessageList([...merged.values()]);
+  } else {
+    // 已经在屏上的按 id 改内容,没画过的当新消息补上 —— updateRenderedMessage 两种都管。
+    messages.forEach((message) => updateRenderedMessage(message));
+  }
   recordMessages(messages);
   state.cursor = cursor ?? state.cursor;
   void saveSyncPoint(requestedGroupId, syncedAt).catch(() => {});

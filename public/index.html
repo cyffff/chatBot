@@ -12,6 +12,11 @@
     <link rel="manifest" href="/manifest.json" />
     <link rel="apple-touch-icon" href="/icon-180.png" />
     <link rel="stylesheet" href="/style.css" />
+    <!-- app.js 里 import 的这两个,浏览器要等 app.js 到齐才会去拿。隧道一次往返半秒上下,
+         白排一轮很明显,所以让它们和 app.js 一起出发。 -->
+    <link rel="modulepreload" href="/app.js" />
+    <link rel="modulepreload" href="/history.js" />
+    <link rel="modulepreload" href="/markdown.js" />
   </head>
   <body>
     <main>
