@@ -252,7 +252,7 @@ Mac/Windows 客户端不能直接读取 Chrome 或 Safari 的沙盒缓存。“�
 3. 第一次运行未公证版本时右键选择“打开”。
 4. 在顶部菜单“Group Relay → 服务器设置…”填写服务地址。
 
-当前构建支持 Apple Silicon M1–M5，版本 1.7.0。客户端关闭窗口后只隐藏，后台 AI
+当前构建支持 Apple Silicon M1–M5，版本 1.9.0。客户端关闭窗口后只隐藏，后台 AI
 继续工作；选择菜单中的“退出 Group Relay”才会停止。
 
 #### Mac 后台 AI 桥接
