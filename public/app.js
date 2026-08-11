@@ -702,8 +702,78 @@ function updateRenderedMessage(message) {
     return;
   }
   const shouldFollow = messagesAreNearBottom();
+  const wasProcessing = item.classList.contains("processing");
   updateMessageNode(item, message);
   if (shouldFollow) requestAnimationFrame(scrollMessagesToBottom);
+  if (wasProcessing && message.status !== "processing") announceSettled(item, message);
+}
+
+function flash(item, className, milliseconds) {
+  item.classList.remove(className);
+  void item.offsetWidth;   // 连续两次触发同一个动画,中间要让浏览器重排一次才会重放
+  item.classList.add(className);
+  setTimeout(() => item.classList.remove(className), milliseconds);
+}
+
+function isInMessagesView(item) {
+  const view = $("#messages").getBoundingClientRect();
+  const box = item.getBoundingClientRect();
+  return box.bottom > view.top && box.top < view.bottom;
+}
+
+/// 一个跑了五分钟的回答是回写到上面某处的旧气泡里的:内容换了,但既不是新消息也不
+/// 挪位置,提问人多半发现不了。所以终态时闪一下;那条本来就在视野外的,再说一句。
+function announceSettled(item, message) {
+  flash(item, "just-answered", 3_000);
+  if (isInMessagesView(item)) return;
+  const who = displayName(message.sender);
+  toast(message.status === "failed"
+    ? `${who} 的任务失败了，在上面那条消息里`
+    : `${who} 的回答写好了，在上面那条消息里`);
+}
+
+function jumpToMessage(messageId) {
+  const list = $("#messages");
+  const target = list.querySelector(`[data-message-id="${messageId}"]`);
+  if (!target) {
+    toast("那条消息不在当前这一屏里");
+    return;
+  }
+  // 自己算偏移量,不用 scrollIntoView:它在滚动容器里的平滑滚动不是每个 WebView 都动,
+  // 而滚不过去的话这个跳转就等于没有。
+  const box = target.getBoundingClientRect();
+  const view = list.getBoundingClientRect();
+  list.scrollTop += box.top - view.top - (view.height - box.height) / 2;
+  flash(target, "jump-target", 1_500);
+}
+
+function quoteText(message, limit = 60) {
+  const text = String(message?.text ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return message?.attachments?.length ? `${message.attachments.length} 个附件` : "";
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+/// 先看已经渲染出来的那条(最常见的情况:问题就在同一屏),再退回本机记录 —— 服务端
+/// 过了保留期就没有它了,本地那份才是永久副本。
+async function replySnippet(replyTo) {
+  const rendered = $("#messages").querySelector(`[data-message-id="${replyTo}"] .bubble`);
+  if (rendered) return quoteText({ text: rendered.textContent });
+  const found = await messagesByIds([replyTo]).catch(() => new Map());
+  return quoteText(found.get(replyTo));
+}
+
+/// replyTo 服务端一直在存(AI 回答时就带着它),但界面从来不画,所以问题和答案之间
+/// 没有任何关联,也没法跳过去。
+function replyQuoteNode(replyTo) {
+  const quote = document.createElement("button");
+  quote.type = "button";
+  quote.className = "reply-quote";
+  quote.textContent = "回复上面的一条消息";
+  quote.addEventListener("click", () => jumpToMessage(replyTo));
+  void replySnippet(replyTo)
+    .then((snippet) => { if (snippet) quote.textContent = `回复：${snippet}`; })
+    .catch(() => {});
+  return quote;
 }
 
 function attachmentNode(attachment) {
@@ -750,6 +820,7 @@ function renderMessage(message) {
   time.textContent = new Date(message.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
   head.append(time);
   item.append(head);
+  if (message.replyTo) item.append(replyQuoteNode(message.replyTo));
   updateMessageNode(item, message);
   if (message.attachments?.length) {
     const attachments = document.createElement("div");

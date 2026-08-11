@@ -832,6 +832,24 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   from { background-position: 200% 0; }
   to { background-position: -200% 0; }
 }
+.reply-quote {
+  display: block; max-width: 100%; margin: 0 0 6px; padding: 5px 9px;
+  border: 0; border-left: 3px solid #b9c6bb; border-radius: 0 7px 7px 0;
+  background: #e7eee8; color: #4c5a50; font-size: 12px; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reply-quote:hover { background: #dde7de; color: #2b3a2f; }
+/* 回写进来的答案要有一点动静,否则和旧内容一模一样地待在原地。 */
+.message.just-answered .bubble { animation: settled-flash 3s ease-out 1; }
+.message.jump-target .bubble { animation: jump-flash 1.5s ease-out 1; }
+@keyframes settled-flash {
+  from { border-color: #7ba98a; background: #eef8f1; }
+  to { border-color: #e1e6e1; background: white; }
+}
+@keyframes jump-flash {
+  from { border-color: #7893ca; background: #eef1fa; }
+  to { border-color: #e1e6e1; background: white; }
+}
 .composer-actions { display: flex; align-items: center; gap: 12px; }
 .composer-actions button { margin-left: auto; }
 .file-button { display: inline-block; width: auto; padding: 8px 10px; border-radius: 8px; background: #edf2ed; cursor: pointer; }
