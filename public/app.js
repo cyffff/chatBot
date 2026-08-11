@@ -341,7 +341,17 @@ async function useAccountEmail(email) {
 
 function prefillJoinEmail() {
   const field = $("#join-form [name=email]");
-  if (!field || field.value) return;
+  if (!field) return;
+  // 链接上带了身份就直接用(同一个人换浏览器点自己的链接)
+  const params = new URLSearchParams(location.search);
+  const fromLink = params.get("email");
+  const nameFromLink = params.get("owner");
+  if (fromLink && !field.value) field.value = fromLink;
+  if (nameFromLink) {
+    const nameField = $("#join-form [name=name]");
+    if (nameField && !nameField.value) nameField.value = nameFromLink;
+  }
+  if (field.value) return;
   const stored = state.email ?? loadAccountCredential() ?? null;
   const email = state.email ?? (typeof stored === "string" ? stored : null);
   // 自动生成的本机账号不预填 —— 那不是人愿意用的身份。
@@ -2229,11 +2239,20 @@ $("#message-form").addEventListener("submit", async (event) => {
   }
 });
 
+/// 链接带上归属人和邮箱:AI 抓这个链接拿到的接入说明才填得满,不用再问一轮。
+/// 这套本来没有鉴权、邀请链接已经等于访问权,所以不新增暴露面。
+function currentInviteUrl() {
+  const url = new URL(`/join/${state.inviteToken}`, location.origin);
+  const owner = state.account?.displayName;
+  if (owner) url.searchParams.set("owner", owner);
+  if (state.email && !isAutomaticEmail(state.email)) url.searchParams.set("email", state.email);
+  return url.toString();
+}
+
 $("#invite-button").addEventListener("click", async () => {
   try {
-    const inviteUrl = `${location.origin}/join/${state.inviteToken}`;
-    await navigator.clipboard.writeText(inviteUrl);
-    toast("邀请链接已复制");
+    await navigator.clipboard.writeText(currentInviteUrl());
+    toast("邀请链接已复制。发给人是进群，发给自己的 AI 它会自己接入。");
   } catch (error) {
     toast(error.message);
   }
