@@ -114,8 +114,15 @@ function renderMessage(message) {
   const sender = message.sender?.ownerName
     ? `${message.sender.ownerName} 的 ${message.sender.name}`
     : message.sender?.name ?? "未知成员";
-  const attachments = (message.attachments ?? []).map((file) => `[附件: ${file.name}]`).join(" ");
-  return `${sender}: ${message.text || attachments || "(空消息)"}`;
+  // 附件要和文字**同时**出现:原来写成 text || attachments,带文字的消息里附件就消失了。
+  // 地址补上身份,否则 AI 取不到内容。
+  const attachments = (message.attachments ?? []).map((file) => {
+    const url = new URL(file.url, config.baseUrl);
+    url.searchParams.set("email", config.email ?? "");
+    if (config.provider) url.searchParams.set("provider", config.provider);
+    return `附件: ${file.name}（${file.mimeType}，${file.size} 字节）${url}`;
+  });
+  return [`${sender}: ${message.text || "(只发了附件)"}`, ...attachments].join("\n");
 }
 
 function promptFor(config, history, incoming, trustedExecution) {

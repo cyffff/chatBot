@@ -309,17 +309,80 @@ private final class RelayWorker {
         _ = try FileManager.default.replaceItemAt(configURL, withItemAt: temporary)
     }
 
-    private func render(_ message: [String: Any]) -> String {
+    private func render(_ message: [String: Any], attachmentsInto directory: URL? = nil) -> String {
         let sender = message["sender"] as? [String: Any]
         let name = sender?["name"] as? String ?? "未知成员"
         let owner = sender?["ownerName"] as? String
         let display = owner.map { "\($0) 的 \(name)" } ?? name
-        let text = message["text"] as? String ?? "(附件消息)"
-        return "\(display): \(text)"
+        let text = message["text"] as? String ?? ""
+        var lines = ["\(display): \(text.isEmpty ? "(只发了附件)" : text)"]
+        // 附件原来完全没进 prompt,所以带文件的消息在 AI 眼里只有文字 —— 它只能回
+        // 「没收到文件」。这里下载到本机再把路径(必要时连内容)一起给它。
+        for attachment in message["attachments"] as? [[String: Any]] ?? [] {
+            guard let name = attachment["name"] as? String,
+                  let path = attachment["url"] as? String else { continue }
+            let mime = attachment["mimeType"] as? String ?? "application/octet-stream"
+            let size = attachment["size"] as? Int ?? 0
+            var line = "附件：\(name)（\(mime)，\(size) 字节）"
+            if let directory, let saved = downloadAttachment(path: path, name: name, into: directory) {
+                line += "\n本地路径：\(saved.path)"
+                if let inline = inlineAttachmentText(at: saved, mime: mime, name: name) {
+                    line += "\n内容：\n\(inline)"
+                }
+            } else {
+                line += "\n（下载失败，可让发送者把内容贴成文字）"
+            }
+            lines.append(line)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 附件接口要身份,所以带上和其他请求一样的 email + provider。
+    private func downloadAttachment(path: String, name: String, into directory: URL) -> URL? {
+        guard let url = URL(string: config.baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + path) else {
+            return nil
+        }
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        if let email = config.email {
+            request.setValue(email, forHTTPHeaderField: "X-Relay-Email")
+        } else if let legacy = config.memberToken {
+            request.setValue("Bearer \(legacy)", forHTTPHeaderField: "Authorization")
+        }
+        request.setValue(config.provider, forHTTPHeaderField: "X-Relay-Provider")
+        let semaphore = DispatchSemaphore(value: 0)
+        var payload: Data?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return }
+            payload = data
+        }.resume()
+        semaphore.wait()
+        guard let payload else { return nil }
+        let safeName = name.replacingOccurrences(of: "/", with: "_")
+        let target = directory.appendingPathComponent(safeName.isEmpty ? UUID().uuidString : safeName)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard (try? payload.write(to: target)) != nil else { return nil }
+        return target
+    }
+
+    /// 文本类附件直接内联一段:受限模式下的 CLI 不一定读得了本机文件,给了路径也没用。
+    private func inlineAttachmentText(at url: URL, mime: String, name: String) -> String? {
+        let textual = mime.hasPrefix("text/")
+            || ["json", "csv", "tsv", "md", "sql", "log", "yml", "yaml", "xml", "txt", "sh", "py", "js", "ts", "java"]
+                .contains((name as NSString).pathExtension.lowercased())
+        guard textual, let data = try? Data(contentsOf: url), data.count <= 200_000,
+              let body = String(data: data, encoding: .utf8) else { return nil }
+        return String(body.prefix(20_000))
     }
 
     private func askLocalAI(_ incoming: [[String: Any]], trustedExecution: Bool) throws -> String {
-        let question = incoming.map(render).joined(separator: "\n")
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("group-relay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let attachmentsDirectory = temporary.appendingPathComponent("attachments")
+        let question = incoming
+            .map { render($0, attachmentsInto: attachmentsDirectory) }
+            .joined(separator: "\n")
         let prompt: String
         if trustedExecution {
             prompt = """
@@ -333,7 +396,8 @@ private final class RelayWorker {
             \(question)
             """
         } else {
-            let history = try recentMessages().map(render).joined(separator: "\n")
+            // 历史消息只列附件名,不重复下载 —— 需要的是当前这条的内容。
+            let history = try recentMessages().map { render($0) }.joined(separator: "\n")
             prompt = """
             你是 \(config.ownerName ?? "本机用户") 的 \(config.memberName ?? config.provider)，正在 Group Relay 群聊中回复消息。
             只输出要发到群里的最终回复，不要输出分析、工具过程或代码围栏。回复应自然、简洁。
@@ -349,9 +413,6 @@ private final class RelayWorker {
             \(question)
             """
         }
-        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("group-relay-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temporary) }
         let workspace = try workspaceURL()
         let workingDirectory = trustedExecution ? workspace : temporary
         let executable = try findExecutable()
