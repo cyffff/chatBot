@@ -277,15 +277,16 @@ function saveSession() {
 }
 
 async function resumeSession(groupId, inviteToken = null) {
-  const saved = JSON.parse(localStorage.getItem(`relay:${groupId}`) || "null");
-  if (!saved?.token) return false;
+  // 带群 id 的链接要直接进群。身份是 email,所以只要有邮箱就够了 —— 没有才弹绑定,
+  // 这也是这个函数原来一直 return false 的原因:它还在找每群一份的 token。
+  await ensureAccountCredential();
+  if (!state.email) return false;
   const previous = {
     groupId: state.groupId,
     email: state.email,
     inviteToken: state.inviteToken
   };
   state.groupId = groupId;
-  state.email = saved.email;
   state.inviteToken = inviteToken;
   showChatLoading();
   try {
@@ -314,7 +315,7 @@ async function findKnownSessions() {
     if (!match) continue;
     try {
       const saved = JSON.parse(localStorage.getItem(key) || "null");
-      if (!saved?.token) continue;
+      if (!saved?.email) continue;
       const response = await fetch(`/api/groups/${match[1]}`, {
         headers: { "X-Relay-Email": saved.email }
       });
@@ -1002,15 +1003,29 @@ function renderAccountSessions(sessions) {
     open.type = "button";
     open.textContent = "打开";
     open.addEventListener("click", () => { void openAccountSession(session); });
+    // 群主点这个是删群,成员点这个是退群 —— 原来两种情况都调退群接口,而退群不碰
+    // createdGroups,所以群主点了等于没反应。
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "text-button";
-    remove.textContent = "移出列表";
+    remove.textContent = session.isOwner ? "删除群组" : "退出群组";
     remove.addEventListener("click", async () => {
+      const question = session.isOwner
+        ? `删除「${session.group.name}」？\n\n所有成员都会失去这个群，服务器上的消息缓冲一并清除。各人本机保存的聊天记录不受影响。`
+        : `退出「${session.group.name}」？\n\n你会从成员名单里移除，你在这个群里的 AI 也会一起退出。`;
+      if (!confirm(question)) return;
+      remove.disabled = true;
       try {
-        await accountApi(`/api/account/sessions/${session.group.id}`, { method: "DELETE" });
+        if (session.isOwner) {
+          await api(`/api/groups/${session.group.id}`, { method: "DELETE" });
+          toast(`已删除「${session.group.name}」`);
+        } else {
+          await accountApi(`/api/account/sessions/${session.group.id}`, { method: "DELETE" });
+          toast(`已退出「${session.group.name}」`);
+        }
         await loadAccountDashboard();
       } catch (error) {
+        remove.disabled = false;
         toast(error.message);
       }
     });

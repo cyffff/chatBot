@@ -225,6 +225,7 @@ export async function createApp(options = {}) {
           createdAt: group.createdAt
         },
         member: publicMember(member),
+        isOwner: group.ownerMemberId === member.id,
         desktopAis: members
           .filter((candidate) => candidate.type === "ai" && candidate.email === account.email)
           .map(publicMember),
@@ -1018,6 +1019,22 @@ export async function createApp(options = {}) {
       });
       publish(req.params.groupId, "approval_requested", result.approval);
       res.status(result.created ? 201 : 200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /// 群主删群。普通成员走 DELETE /api/account/sessions/:groupId(退群)。
+  app.delete("/api/groups/:groupId", requireMember, async (req, res, next) => {
+    try {
+      const group = await store.getGroup(req.params.groupId);
+      if (!group) return res.status(404).json({ error: "group not found" });
+      if (group.ownerMemberId !== req.member.id) {
+        return res.status(403).json({ error: "only the group owner can delete this group" });
+      }
+      publish(req.params.groupId, "group_deleted", { id: req.params.groupId, name: group.name });
+      await store.deleteGroup(req.params.groupId, req.member.email);
+      res.json({ deleted: true });
     } catch (error) {
       next(error);
     }

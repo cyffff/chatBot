@@ -2027,3 +2027,61 @@ test("an old device identity binds an email and takes its groups with it", async
   assert.equal(leftover.response.status, 200);
   assert.deepEqual(leftover.body.sessions, []);
 });
+
+test("the owner deletes a group while a member only leaves it", async (t) => {
+  const { base, store } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "退与删", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "member@example.com", name: "Member", type: "human" })
+  });
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "member@example.com" },
+    body: JSON.stringify({ provider: "codex" })
+  });
+
+  // 列表要告诉客户端自己是不是群主,按钮才知道该删还是该退
+  const ownerList = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": "owner@example.com" }
+  });
+  assert.equal(ownerList.body.sessions[0].isOwner, true);
+  const memberList = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": "member@example.com" }
+  });
+  assert.equal(memberList.body.sessions[0].isOwner, false);
+
+  // 成员删不掉群
+  const refused = await json(base, `/api/groups/${groupId}`, {
+    method: "DELETE",
+    headers: { "X-Relay-Email": "member@example.com" }
+  });
+  assert.equal(refused.response.status, 403);
+
+  // 成员退群:自己和自己的 AI 走,群还在
+  await json(base, `/api/account/sessions/${groupId}`, {
+    method: "DELETE",
+    headers: { "X-Relay-Email": "member@example.com" }
+  });
+  assert.deepEqual(
+    (await store.listMembers(groupId)).map((member) => member.id),
+    ["human:owner@example.com"]
+  );
+  assert.ok(await store.getGroup(groupId));
+
+  // 群主删群:群没了,群主列表也空了
+  const deleted = await json(base, `/api/groups/${groupId}`, {
+    method: "DELETE",
+    headers: { "X-Relay-Email": "owner@example.com" }
+  });
+  assert.equal(deleted.response.status, 200);
+  assert.equal(await store.getGroup(groupId), null);
+  const after = await json(base, "/api/account/sessions", {
+    headers: { "X-Relay-Email": "owner@example.com" }
+  });
+  assert.deepEqual(after.body.sessions, []);
+});

@@ -671,6 +671,22 @@ export class FileStore {
     });
   }
 
+  /// 群主删群:群整个消失,所有人的列表、AI 注册和消息目录一起清掉。
+  /// 普通成员用 leaveGroup —— 那只摘掉自己,群还在。
+  async deleteGroup(groupId, ownerEmail) {
+    const group = await this.getGroup(groupId);
+    if (!group || group.ownerMemberId !== humanMemberId(ownerEmail)) return false;
+    await this.updateAccounts((accounts) => {
+      for (const account of Object.values(accounts)) {
+        account.createdGroups = account.createdGroups.filter((candidate) => candidate.id !== groupId);
+        account.joinedGroups = account.joinedGroups.filter((id) => id !== groupId);
+        account.ais = account.ais.filter((ai) => ai.groupId !== groupId);
+      }
+    });
+    await fs.rm(this.groupDir(groupId), { recursive: true, force: true });
+    return true;
+  }
+
   async leaveGroup(groupId, email) {
     return this.updateAccounts((accounts) => {
       const account = accounts[normalizeEmail(email)];
