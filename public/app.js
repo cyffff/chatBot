@@ -864,12 +864,39 @@ function catchUpParams(cached, syncedAt) {
   return query;
 }
 
+/// 本机记录是加速和长期副本,不是打开群聊的前提:它打不开、或者干脆不回话(升级被
+/// 另一个标签页卡住就会这样),群聊也必须照常开出来,只是暂时只有服务端那一份。
+async function withoutBlocking(work, fallback, milliseconds = 2_500) {
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), milliseconds); })
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function warnHistoryUnavailable() {
+  if (state.historyWarned) return;
+  state.historyWarned = true;
+  toast("本机聊天记录暂时打不开，先只显示服务端最近的消息");
+}
+
 async function loadChat() {
   const requestedGroupId = state.groupId;
   // 先拿本地历史,再只向服务端要它之后的增量。服务端过了保留期已经没有这些消息了,
   // 本地这一份才是长期副本。
-  const cached = await recentMessages(state.groupId).catch(() => []);
-  const lastSyncedAt = await syncPoint(state.groupId).catch(() => null);
+  // 两个读互不依赖,并行等 —— 串着等的话本机记录卡住时开群要多等一倍。
+  const [localHistory, lastSyncedAt] = await Promise.all([
+    withoutBlocking(recentMessages(state.groupId), null),
+    withoutBlocking(syncPoint(state.groupId), null)
+  ]);
+  if (!localHistory) warnHistoryUnavailable();
+  const cached = localHistory ?? [];
   const incremental = catchUpParams(cached, lastSyncedAt);
   if (cached.length) incremental.set("after", cached.at(-1).id);
   const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor, syncedAt }] = await Promise.all([
@@ -960,8 +987,10 @@ function connectEvents() {
 async function catchUpOnEdits() {
   const requestedGroupId = state.groupId;
   if (!requestedGroupId) return;
-  const cached = await recentMessages(requestedGroupId).catch(() => []);
-  const lastSyncedAt = await syncPoint(requestedGroupId).catch(() => null);
+  const [cached, lastSyncedAt] = await Promise.all([
+    withoutBlocking(recentMessages(requestedGroupId), []),
+    withoutBlocking(syncPoint(requestedGroupId), null)
+  ]);
   const query = catchUpParams(cached, lastSyncedAt);
   if (!query.has("updatedSince") && !query.has("ids")) return;
   if (state.cursor) query.set("after", state.cursor);

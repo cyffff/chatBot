@@ -44,8 +44,33 @@ export async function openHistory() {
       database.createObjectStore(syncStore, { keyPath: "groupId" });
     }
   };
-  connection = await request(open);
+  /// 另一个标签页还开着上一版的库时,升级请求会一直停在 blocked —— 既不成功也不失败。
+  /// 干等的话调用方(打开群聊)就永远停在「正在进入群组」,所以这里必须变成一个错误。
+  let abandoned = false;
+  const opened = request(open).then((database) => {
+    // blocked 之后才打开成功的连接不能留着:它会反过来把别的标签页卡在同一个地方。
+    if (abandoned) {
+      database.close();
+      return null;
+    }
+    return database;
+  });
+  opened.catch(() => {});
+  const database = await new Promise((resolve, reject) => {
+    open.onblocked = () => {
+      abandoned = true;
+      reject(new Error("另一个标签页还开着旧版本的本机记录，关掉或刷新那一页就好"));
+    };
+    opened.then(resolve, reject);
+  });
+  if (!database) throw new Error("本机记录这次没打开成功，稍后再试");
+  connection = database;
   connection.onclose = () => { connection = null; };
+  /// 下一次升版本时主动让路,否则这一页就是把别人卡住的那一页。
+  connection.onversionchange = () => {
+    connection?.close();
+    connection = null;
+  };
   return connection;
 }
 
