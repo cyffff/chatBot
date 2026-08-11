@@ -2563,6 +2563,11 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/service-worker.js").catch(() => {});
   });
+  /// 界面是先用缓存那份画出来的(不然网页端每次开群都要等隧道),所以新版本要自己吱一声。
+  /// 不自动刷新:那会打断正在打的字和看的位置。
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data?.type === "shell-updated") toast("有新版本了，刷新一下就用上");
+  });
 }
 
 boot();

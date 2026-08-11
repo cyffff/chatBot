@@ -152,10 +152,12 @@ export async function createApp(options = {}) {
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false }));
   app.use(express.static(publicDir, {
-    etag: false,
-    lastModified: false,
     setHeaders(response) {
-      response.set("Cache-Control", "no-store");
+      /// no-cache 不是「不许缓存」:浏览器可以存下来,但每次都带 If-None-Match 回来问一句,
+      /// 没变就回 304,几十字节。之前这里是 no-store(连存都不许)且关掉了 etag,于是每次
+      /// 打开网页都把整个 shell 重下一遍 —— 隧道上一趟 0.5-1.8 秒,而桌面客户端窗口一直
+      /// 开着、根本不重新加载,这就是「客户端很快、网页端慢」的来源。
+      response.set("Cache-Control", "no-cache");
     }
   }));
 
