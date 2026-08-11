@@ -13,6 +13,17 @@ const publicDir = path.resolve(here, "../public");
 const cleanText = (value, max) => String(value ?? "").trim().slice(0, max);
 const jiraUrlPattern = /https?:\/\/[^\s<>"']+\/browse\/[a-z][a-z0-9_]*-\d+[^\s<>"']*/gi;
 
+/// 客户端点名要补的消息 id:逗号分隔,最多 50 个。
+const parseMessageIds = (value) => String(value ?? "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter((id) => /^[0-9a-f-]{36}$/i.test(id))
+  .slice(0, 50);
+
+const withoutDuplicates = (messages) => [
+  ...new Map(messages.map((message) => [message.id, message])).values()
+];
+
 function jiraReferences(text) {
   const references = [];
   const seen = new Set();
@@ -1052,17 +1063,28 @@ export async function createApp(options = {}) {
   app.get("/api/groups/:groupId/messages", requireMember, async (req, res, next) => {
     try {
       await reportActivity(req, "online");
+      // 客户端下次带回来当 updatedSince。留一秒重叠,免得和这次读之间落下的改动
+      // 正好卡在同一毫秒上;重复送一条改动是幂等的,漏一条是永久的。
+      const syncedAt = new Date(Date.now() - 1_000).toISOString();
       const messages = await store.readMessages(req.params.groupId, {
         after: req.query.after,
         limit: req.query.limit
       });
       const isRouted = req.query.routed === "1";
+      // 追赶只给人的界面。AI 是靠 routed 拉待办的,把改过的旧消息再喂给它等于让它重做一遍。
+      const changed = isRouted ? [] : await store.readChangedMessages(req.params.groupId, {
+        updatedSince: req.query.updatedSince,
+        ids: parseMessageIds(req.query.ids),
+        limit: req.query.limit
+      });
       const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
       const routed = routedMessages(messages, req.member, isRouted, groupMembers);
       if (isRouted && routed.length) await reportActivity(req, "busy");
       res.json({
-        messages: routed,
-        cursor: messages.at(-1)?.id ?? req.query.after ?? null
+        // 补回来的改动排在增量前面(它们本来就更旧),客户端按 id 去重后自己排序。
+        messages: withoutDuplicates([...changed, ...routed]),
+        cursor: messages.at(-1)?.id ?? req.query.after ?? null,
+        syncedAt
       });
     } catch (error) {
       next(error);
@@ -1072,6 +1094,9 @@ export async function createApp(options = {}) {
   app.get("/api/groups/:groupId/messages/wait", requireMember, async (req, res, next) => {
     try {
       await reportActivity(req, "online");
+      // 这一轮长轮询在线期间的改动都会走 message_updated 事件送到,所以轮询成功就等于
+      // 追赶到了这个时刻:客户端把它存下来,断线重连时当 updatedSince 用。
+      const syncedAt = new Date(Date.now() - 1_000).toISOString();
       const existing = await store.readMessages(req.params.groupId, {
         after: req.query.after,
         limit: req.query.limit ?? 100
@@ -1083,7 +1108,8 @@ export async function createApp(options = {}) {
         if (routed.length) await reportActivity(req, "busy");
         return res.json({
           messages: routed,
-          cursor: existing.at(-1).id
+          cursor: existing.at(-1).id,
+          syncedAt
         });
       }
       const timeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
@@ -1116,7 +1142,8 @@ export async function createApp(options = {}) {
         messages: routed,
         cursor: update?.event === "message" ? update.payload.id : req.query.after ?? null,
         event: update?.event ?? null,
-        eventPayload: update?.event === "message" ? null : update?.payload ?? null
+        eventPayload: update?.event === "message" ? null : update?.payload ?? null,
+        syncedAt
       });
     } catch (error) {
       next(error);

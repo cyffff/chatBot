@@ -1003,6 +1003,42 @@ export class FileStore {
     return messages.slice(start).slice(-capped);
   }
 
+  /// 按 id 的游标表达不了「一条旧消息被改了」:编辑不产生新 id,after=<id> 之后什么都没有。
+  /// 客户端错过那一次实时事件后就再也补不回来 —— AI 的占位气泡会永远停在「正在处理」。
+  /// 这里按修改时间(updatedSince)、以及客户端点名的 id(ids,通常是本地还没写完的占位)
+  /// 把改动捞回去。
+  async readChangedMessages(groupId, { updatedSince = null, ids = [], limit = 100 } = {}) {
+    const capped = Math.min(Math.max(Number(limit) || 100, 1), 500);
+    const wanted = new Set((Array.isArray(ids) ? ids : []).filter(Boolean).slice(0, 50));
+    const since = updatedSince ? Date.parse(updatedSince) : Number.NaN;
+    const hasSince = Number.isFinite(since);
+    if (!hasSince && !wanted.size) return [];
+    const files = await this.messageFiles(groupId);
+    const changed = [];
+    // 改动可能落在任何一天的文件里(20 天前的消息今天也能被改),所以不能像 readMessages
+    // 那样读到游标就停。但改写必然动 mtime,所以 updatedSince 之后没被写过的文件里
+    // 不可能有新改动,直接跳过、不解压。
+    for (let index = files.length - 1; index >= 0; index -= 1) {
+      if (!wanted.size) {
+        if (!hasSince) break;
+        const stats = await fs.stat(files[index]).catch(() => null);
+        if (stats && stats.mtimeMs < since) continue;
+      }
+      const day = await this.readMessageFile(files[index]);
+      for (const message of day) {
+        const pickedById = wanted.delete(message.id);
+        const editedSince = hasSince
+          && message.updatedAt
+          && Date.parse(message.updatedAt) > since;
+        if (pickedById || editedSince) changed.push(message);
+      }
+      if (changed.length >= capped) break;
+    }
+    return changed
+      .sort((left, right) => (left.createdAt < right.createdAt ? -1 : 1))
+      .slice(-capped);
+  }
+
   async history(groupId) {
     return (await this.messageFiles(groupId)).map((file) => {
       const name = path.basename(file);

@@ -2,8 +2,9 @@
 // Windows 是 WebView2(带持久 userDataFolder),两端都用默认持久存储,所以这一份
 // IndexedDB 实现同时覆盖网页和两个桌面客户端。
 const databaseName = "group-relay-history";
-const databaseVersion = 1;
+const databaseVersion = 2;
 const messageStore = "messages";
+const syncStore = "sync";
 const groupTimeIndex = "group_time";
 const exportFormat = "group-relay-history";
 
@@ -33,10 +34,15 @@ export async function openHistory() {
   const open = indexedDB.open(databaseName, databaseVersion);
   open.onupgradeneeded = () => {
     const database = open.result;
-    if (database.objectStoreNames.contains(messageStore)) return;
-    const store = database.createObjectStore(messageStore, { keyPath: "id" });
-    // createdAt 是 ISO 字符串,字典序即时间序。
-    store.createIndex(groupTimeIndex, ["groupId", "createdAt"]);
+    if (!database.objectStoreNames.contains(messageStore)) {
+      const store = database.createObjectStore(messageStore, { keyPath: "id" });
+      // createdAt 是 ISO 字符串,字典序即时间序。
+      store.createIndex(groupTimeIndex, ["groupId", "createdAt"]);
+    }
+    // v2:每个群记一个「上次追赶到哪个时刻」,重连后用它把错过的编辑要回来。
+    if (!database.objectStoreNames.contains(syncStore)) {
+      database.createObjectStore(syncStore, { keyPath: "groupId" });
+    }
   };
   connection = await request(open);
   connection.onclose = () => { connection = null; };
@@ -92,6 +98,28 @@ export async function messagesByIds(ids) {
     if (message) found.set(id, message);
   }));
   return found;
+}
+
+/// 「本地这份副本追赶到哪个时刻」。编辑不会产生新 id,所以按 id 的游标带不回它 ——
+/// 重连和重开时把这个时刻交给服务端,才能把断线期间的改动补齐。
+export async function syncPoint(groupId) {
+  if (!groupId) return null;
+  const database = await openHistory();
+  const transaction = database.transaction(syncStore, "readonly");
+  const row = await request(transaction.objectStore(syncStore).get(groupId));
+  return row?.syncedAt ?? null;
+}
+
+/// 只前进不后退:轮询和首屏各自报自己的时刻,乱序到达时不能把已经追上的进度往回拨。
+export async function saveSyncPoint(groupId, syncedAt) {
+  if (!groupId || !syncedAt) return null;
+  const database = await openHistory();
+  const transaction = database.transaction(syncStore, "readwrite");
+  const store = transaction.objectStore(syncStore);
+  const row = await request(store.get(groupId));
+  if (!row?.syncedAt || row.syncedAt < syncedAt) store.put({ groupId, syncedAt });
+  await finished(transaction);
+  return syncedAt;
 }
 
 export async function latestMessageId(groupId) {

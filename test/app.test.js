@@ -2254,3 +2254,96 @@ test("an AI can still fill in its placeholder after the day file was compressed"
   const failed = await store.failProcessingMessages(groupId, `ai:owner@example.com:claude`, "桥接重启，已中止");
   assert.equal(failed.filter((message) => message.id === stuck.message.id).length, 1);
 });
+
+test("an edit that landed while the client was away comes back on the next open", async (t) => {
+  const { base, store } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "补编辑", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ provider: "claude" })
+  });
+  const aiHeaders = { ...owner, "X-Relay-Provider": "claude" };
+
+  const placeholder = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: aiHeaders,
+    body: new URLSearchParams({ text: "正在处理这个问题，请稍等…", status: "processing" })
+  }).then((response) => response.json());
+
+  // 占位消息在更早的一天,而且已经被归档压缩:改动只会落回那个文件,不会变成新消息。
+  const messagesDir = path.join(store.groupDir(groupId), "messages");
+  const [firstDay] = await fs.readdir(messagesDir);
+  await fs.rename(path.join(messagesDir, firstDay), path.join(messagesDir, "2026-08-10.jsonl"));
+  await store.archiveOldMessages(new Date("2026-08-11T00:30:00Z"));
+
+  // 之后又有新消息,所以客户端本地的最后一条比占位那条新 —— after=<它> 追不回编辑。
+  const later = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: owner,
+    body: new URLSearchParams({ text: "顺便再问一句" })
+  }).then((response) => response.json());
+
+  const away = new Date(Date.now() - 1_000).toISOString();
+  const filled = await json(base, `/api/groups/${groupId}/messages/${placeholder.message.id}`, {
+    method: "PATCH",
+    headers: aiHeaders,
+    body: JSON.stringify({ text: "这是我的答案", status: "complete" })
+  });
+  assert.equal(filled.response.status, 200);
+
+  // 断线期间错过 message_updated 的客户端:只带游标什么都拿不到,这就是气泡永远卡住的原因。
+  const cursorOnly = await json(
+    base,
+    `/api/groups/${groupId}/messages?after=${later.message.id}`,
+    { headers: owner }
+  );
+  assert.deepEqual(cursorOnly.body.messages, []);
+  assert.ok(cursorOnly.body.syncedAt, "响应要带 syncedAt,客户端下次拿它当 updatedSince");
+
+  // B:按修改时间追赶,压缩过的那天也要能捞出来。
+  const byTime = await json(
+    base,
+    `/api/groups/${groupId}/messages?after=${later.message.id}&updatedSince=${encodeURIComponent(away)}`,
+    { headers: owner }
+  );
+  assert.deepEqual(byTime.body.messages.map((message) => message.id), [placeholder.message.id]);
+  assert.equal(byTime.body.messages[0].text, "这是我的答案");
+  assert.equal(byTime.body.messages[0].status, "complete");
+  // 游标不能被补回来的旧消息带着往回走,否则下一轮长轮询会把它之后的全部重发一遍。
+  assert.equal(byTime.body.cursor, later.message.id);
+
+  // A:没有 updatedSince(比如刚升级、本地还没记过同步点)时,按 id 点名要那几条未终态的。
+  const byId = await json(
+    base,
+    `/api/groups/${groupId}/messages?after=${later.message.id}&ids=${placeholder.message.id}`,
+    { headers: owner }
+  );
+  assert.deepEqual(byId.body.messages.map((message) => message.id), [placeholder.message.id]);
+  assert.equal(byId.body.messages[0].text, "这是我的答案");
+
+  // 不认识的 id 和垃圾参数都只是拿不到东西,不能报错。
+  const nonsense = await json(
+    base,
+    `/api/groups/${groupId}/messages?after=${later.message.id}&ids=not-a-uuid,${crypto.randomUUID()}&updatedSince=昨天`,
+    { headers: owner }
+  );
+  assert.equal(nonsense.response.status, 200);
+  assert.deepEqual(nonsense.body.messages, []);
+
+  // AI 是按 routed 拉待办的,把改过的旧消息补给它等于让它把活重做一遍。
+  const routed = await json(
+    base,
+    `/api/groups/${groupId}/messages?routed=1&updatedSince=${encodeURIComponent(away)}&ids=${placeholder.message.id}`,
+    { headers: aiHeaders }
+  );
+  assert.equal(
+    routed.body.messages.some((message) => message.id === placeholder.message.id),
+    false
+  );
+});

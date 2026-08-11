@@ -6,7 +6,9 @@ import {
   importHistory,
   messagesByIds,
   recentMessages,
-  saveMessages
+  saveMessages,
+  saveSyncPoint,
+  syncPoint
 } from "./history.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -769,14 +771,37 @@ function recordMessages(messages) {
   saveMessages(messages).catch(() => {});
 }
 
+// 本地还没写完的那几条 —— AI 的占位气泡就长这样。最终内容一定在服务端,所以按 id
+// 点名要一次,把「永远停在正在处理」的坏数据修回来。
+// 只问最近一周的:本地副本是永久的,服务端只留 30 天,再老的占位问了也只是让服务端
+// 把每一天的文件都翻一遍,永远翻不到。
+function unsettledIds(messages, limit = 20) {
+  const askableSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1_000).toISOString();
+  return messages
+    .filter((message) => message.status === "processing" && message.createdAt > askableSince)
+    .map((message) => message.id)
+    .slice(-limit);
+}
+
+// 编辑不产生新 id,after=<id> 之后拿不到它;错过那一次实时事件后,本地这份副本就
+// 一直是坏的。所以每次请求增量都同时带上「上次追赶到的时刻」和还没写完的那几条 id。
+function catchUpParams(cached, syncedAt) {
+  const query = new URLSearchParams({ limit: "200" });
+  if (syncedAt) query.set("updatedSince", syncedAt);
+  const unsettled = unsettledIds(cached);
+  if (unsettled.length) query.set("ids", unsettled.join(","));
+  return query;
+}
+
 async function loadChat() {
   const requestedGroupId = state.groupId;
   // 先拿本地历史,再只向服务端要它之后的增量。服务端过了保留期已经没有这些消息了,
   // 本地这一份才是长期副本。
   const cached = await recentMessages(state.groupId).catch(() => []);
-  const incremental = new URLSearchParams({ limit: "200" });
+  const lastSyncedAt = await syncPoint(state.groupId).catch(() => null);
+  const incremental = catchUpParams(cached, lastSyncedAt);
   if (cached.length) incremental.set("after", cached.at(-1).id);
-  const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor }] = await Promise.all([
+  const [{ group, members, currentMemberId, canManageTrustedExecution }, { messages, cursor, syncedAt }] = await Promise.all([
     api(`/api/groups/${state.groupId}`),
     api(`/api/groups/${state.groupId}/messages?${incremental}`)
   ]);
@@ -797,6 +822,7 @@ async function loadChat() {
     .forEach(renderMessage);
   recordMessages(messages);
   state.cursor = cursor ?? state.cursor;
+  void saveSyncPoint(requestedGroupId, syncedAt).catch(() => {});
   show("#chat-view");
   requestAnimationFrame(() => {
     scrollMessagesToBottom();
@@ -858,13 +884,38 @@ function connectEvents() {
   };
 }
 
+/// 断线期间被改掉的消息,既不在 after 游标之后,也不会补发 message_updated ——
+/// 重连后主动按「上次追赶到的时刻」要一次,否则那几条在这台机器上就永久是旧内容了。
+async function catchUpOnEdits() {
+  const requestedGroupId = state.groupId;
+  if (!requestedGroupId) return;
+  const cached = await recentMessages(requestedGroupId).catch(() => []);
+  const lastSyncedAt = await syncPoint(requestedGroupId).catch(() => null);
+  const query = catchUpParams(cached, lastSyncedAt);
+  if (!query.has("updatedSince") && !query.has("ids")) return;
+  if (state.cursor) query.set("after", state.cursor);
+  const { messages, cursor, syncedAt } = await api(`/api/groups/${requestedGroupId}/messages?${query}`);
+  if (state.groupId !== requestedGroupId) return;
+  // 改动和新消息一视同仁:已渲染的换内容,没渲染的当新消息补上。
+  messages.forEach(updateRenderedMessage);
+  recordMessages(messages);
+  state.cursor = cursor ?? state.cursor;
+  void saveSyncPoint(requestedGroupId, syncedAt).catch(() => {});
+}
+
 async function pollMessages() {
+  let reconnected = false;
   while (state.groupId && state.email) {
     try {
       const requestedGroupId = state.groupId;
+      if (reconnected) {
+        await catchUpOnEdits();
+        if (state.groupId !== requestedGroupId) break;
+        reconnected = false;
+      }
       const query = new URLSearchParams({ timeoutMs: "25000", limit: "200" });
       if (state.cursor) query.set("after", state.cursor);
-      const { messages, event, eventPayload } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
+      const { messages, event, eventPayload, syncedAt } = await api(`/api/groups/${state.groupId}/messages/wait?${query}`);
       if (state.groupId !== requestedGroupId) break;
       messages.forEach(renderMessage);
       recordMessages(messages);
@@ -874,8 +925,11 @@ async function pollMessages() {
       } else if (event && event !== "message" && eventPayload) {
         await applyMemberEvent(event, eventPayload);
       }
+      // 这一轮在线期间的编辑都由事件送到了,所以把追赶点推到这一刻,下次重连少捞一些。
+      void saveSyncPoint(requestedGroupId, syncedAt).catch(() => {});
       markConnected();
     } catch {
+      reconnected = true;
       $("#connection").textContent = "正在重连";
       $("#connection").classList.remove("online");
       await new Promise((resolve) => setTimeout(resolve, 1500));
