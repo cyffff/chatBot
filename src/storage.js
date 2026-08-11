@@ -908,21 +908,30 @@ export class FileStore {
     return message;
   }
 
+  /// 原来这里排除了 .gz —— 归档任务每小时把非今天的文件压掉,所以跨过一次归档之后
+  /// AI 就再也改不了自己的占位泡泡:回写 404,泡泡永远停在「正在处理」,而结果只能另发
+  /// 一条新消息。压缩文件必须一样可改。
+  async writeMessageFile(file, messages) {
+    const body = `${messages.map((item) => JSON.stringify(item)).join("\n")}\n`;
+    const payload = file.endsWith(".gz") ? await gzip(Buffer.from(body)) : Buffer.from(body);
+    const temp = `${file}.${id()}.tmp`;
+    await fs.writeFile(temp, payload);
+    await fs.rename(temp, file);
+  }
+
   async updateMessage(groupId, messageId, memberId, { text, status }) {
     const previous = this.writeQueues.get(groupId) ?? Promise.resolve();
     const next = previous.then(async () => {
-      const files = (await this.messageFiles(groupId)).filter((file) => !file.endsWith(".gz")).reverse();
+      const files = (await this.messageFiles(groupId)).reverse();
       for (const file of files) {
-        const messages = parseJsonl(await fs.readFile(file, "utf8"));
+        const messages = await this.readMessageFile(file);
         const message = messages.find((candidate) => candidate.id === messageId);
         if (!message) continue;
         if (message.sender?.id !== memberId) return { forbidden: true };
         if (typeof text === "string") message.text = text;
         message.status = status;
         message.updatedAt = new Date().toISOString();
-        const temp = `${file}.${id()}.tmp`;
-        await fs.writeFile(temp, `${messages.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
-        await fs.rename(temp, file);
+        await this.writeMessageFile(file, messages);
         return { message };
       }
       return null;
@@ -935,9 +944,10 @@ export class FileStore {
     const previous = this.writeQueues.get(groupId) ?? Promise.resolve();
     const next = previous.then(async () => {
       const updated = [];
-      const files = (await this.messageFiles(groupId)).filter((file) => !file.endsWith(".gz"));
+      // 同理:重连时把中断的占位改成失败,也必须能改到已压缩的那天。
+      const files = await this.messageFiles(groupId);
       for (const file of files) {
-        const messages = parseJsonl(await fs.readFile(file, "utf8"));
+        const messages = await this.readMessageFile(file);
         let changed = false;
         for (const message of messages) {
           if (message.sender?.id !== memberId || message.status !== "processing") continue;
@@ -948,9 +958,7 @@ export class FileStore {
           changed = true;
         }
         if (!changed) continue;
-        const temp = `${file}.${id()}.tmp`;
-        await fs.writeFile(temp, `${messages.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
-        await fs.rename(temp, file);
+        await this.writeMessageFile(file, messages);
       }
       return updated;
     });

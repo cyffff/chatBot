@@ -2199,3 +2199,58 @@ test("an invite link's identity params never speak for whoever opens it", async 
   // Zoe 的昵称不能被后来者改掉
   assert.equal((await store.accountByEmail("zoe@astratech.ae")).displayName, "Zoe");
 });
+
+test("an AI can still fill in its placeholder after the day file was compressed", async (t) => {
+  const { base, store } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "跨天回写", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "owner@example.com" },
+    body: JSON.stringify({ provider: "claude" })
+  });
+  const aiHeaders = { "X-Relay-Email": "owner@example.com", "X-Relay-Provider": "claude" };
+
+  const placeholder = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: aiHeaders,
+    body: new URLSearchParams({ text: "正在处理这个问题，请稍等…", status: "processing" })
+  }).then((response) => response.json());
+
+  // 把它挪到昨天再跑归档,复现「任务跨过一次每小时归档」
+  const messagesDir = path.join(store.groupDir(groupId), "messages");
+  const [today] = await fs.readdir(messagesDir);
+  await fs.rename(path.join(messagesDir, today), path.join(messagesDir, "2026-08-10.jsonl"));
+  assert.equal(await store.archiveOldMessages(new Date("2026-08-11T00:30:00Z")), 1);
+  assert.deepEqual(await fs.readdir(messagesDir), ["2026-08-10.jsonl.gz"]);
+
+  // 压缩过也要能回写,否则泡泡永远停在「正在处理」,答案只能另发一条
+  const filled = await json(base, `/api/groups/${groupId}/messages/${placeholder.message.id}`, {
+    method: "PATCH",
+    headers: aiHeaders,
+    body: JSON.stringify({ text: "这是我的答案", status: "complete" })
+  });
+  assert.equal(filled.response.status, 200);
+  const [message] = await store.readMessages(groupId);
+  assert.equal(message.text, "这是我的答案");
+  assert.equal(message.status, "complete");
+  // 文件还是压缩的,不能因为改了一次就退回未压缩
+  assert.deepEqual(await fs.readdir(messagesDir), ["2026-08-10.jsonl.gz"]);
+
+  // 重连时把中断的占位标记为失败,同样要能改到压缩文件
+  const stuck = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: aiHeaders,
+    body: new URLSearchParams({ text: "又在处理…", status: "processing" })
+  }).then((response) => response.json());
+  const dir2 = await fs.readdir(messagesDir);
+  const plain = dir2.find((name) => name.endsWith(".jsonl"));
+  await fs.rename(path.join(messagesDir, plain), path.join(messagesDir, "2026-08-10b.jsonl"));
+  await fs.rename(path.join(messagesDir, "2026-08-10b.jsonl"), path.join(messagesDir, "2026-08-09.jsonl"));
+  await store.archiveOldMessages(new Date("2026-08-11T00:30:00Z"));
+  const failed = await store.failProcessingMessages(groupId, `ai:owner@example.com:claude`, "桥接重启，已中止");
+  assert.equal(failed.filter((message) => message.id === stuck.message.id).length, 1);
+});
