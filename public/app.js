@@ -342,20 +342,15 @@ async function useAccountEmail(email) {
 function prefillJoinEmail() {
   const field = $("#join-form [name=email]");
   if (!field) return;
-  // 链接上带了身份就直接用(同一个人换浏览器点自己的链接)
-  const params = new URLSearchParams(location.search);
-  const fromLink = params.get("email");
-  const nameFromLink = params.get("owner");
-  if (fromLink && !field.value) field.value = fromLink;
-  if (nameFromLink) {
-    const nameField = $("#join-form [name=name]");
-    if (nameField && !nameField.value) nameField.value = nameFromLink;
-  }
-  if (field.value) return;
+  // 只用这台浏览器自己存的身份预填。**绝不能**用链接上的 ?owner/?email —— 那两个参数是
+  // 给 AI 读接入说明用的,分享链接的人和收到链接的人不是同一个人:Zoe 把自己的链接发给
+  // 同事,同事打开后表单里是 Zoe,一提交就顶着 Zoe 的身份进了群。
   const stored = state.email ?? loadAccountCredential() ?? null;
   const email = state.email ?? (typeof stored === "string" ? stored : null);
-  // 自动生成的本机账号不预填 —— 那不是人愿意用的身份。
-  if (email && !email.endsWith("@device.group-relay.example.com")) field.value = email;
+  // 自动生成的本机账号也不预填 —— 那不是人愿意用的身份。
+  field.value = email && !isAutomaticEmail(email) ? email : "";
+  const nameField = $("#join-form [name=name]");
+  if (nameField && !field.value) nameField.value = "";
 }
 
 function showInvalidInvite(sessions = []) {

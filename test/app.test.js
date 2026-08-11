@@ -2167,3 +2167,35 @@ test("a Chinese attachment name survives the upload", async (t) => {
   const all = await store.readMessages(groupId);
   assert.equal(all.at(-1).attachments[0].name, "report_v2.final.txt");
 });
+
+test("an invite link's identity params never speak for whoever opens it", async (t) => {
+  const { base, store } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "转发的邀请", email: "zoe@astratech.ae", displayName: "Zoe" })
+  });
+  const token = created.body.group.inviteToken;
+  const groupId = created.body.group.id;
+
+  // AI 读的说明里必须有身份,这是参数存在的理由
+  const sheet = await (await fetch(
+    `${base}/join/${token}?owner=Zoe&email=zoe%40astratech.ae`, { headers: { Accept: "*/*" } }
+  )).text();
+  assert.match(sheet, /--email "zoe@astratech\.ae"/);
+
+  // 同事收到同一条链接后自己填邮箱加入,必须是独立身份,而不是变成 Zoe
+  const joined = await json(base, `/api/invites/${token}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "yizhen@astratech.ae", name: "Yizhen", type: "human" })
+  });
+  assert.equal(joined.response.status, 201);
+  assert.equal(joined.body.member.id, "human:yizhen@astratech.ae");
+
+  const members = await store.listMembers(groupId);
+  assert.deepEqual(
+    members.map((member) => `${member.name}(${member.id})`).sort(),
+    ["Yizhen(human:yizhen@astratech.ae)", "Zoe(human:zoe@astratech.ae)"]
+  );
+  // Zoe 的昵称不能被后来者改掉
+  assert.equal((await store.accountByEmail("zoe@astratech.ae")).displayName, "Zoe");
+});
