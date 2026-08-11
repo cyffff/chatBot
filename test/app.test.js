@@ -2085,3 +2085,44 @@ test("the owner deletes a group while a member only leaves it", async (t) => {
   });
   assert.deepEqual(after.body.sessions, []);
 });
+
+test("one invite link serves a browser and an AI differently", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "自主接入", email: "owner@astratech.ae", displayName: "Owner" })
+  });
+  const token = created.body.group.inviteToken;
+  const groupId = created.body.group.id;
+
+  // 浏览器:Accept 里有 text/html,拿到网页
+  const asBrowser = await fetch(`${base}/join/${token}`, { headers: { Accept: "text/html" } });
+  assert.equal(asBrowser.headers.get("content-type")?.includes("text/html"), true);
+  assert.match(await asBrowser.text(), /<title>Group Relay<\/title>/);
+
+  // AI:curl 那种 */*,拿到纯文本接入说明,身份从链接参数填进去
+  const asAgent = await fetch(
+    `${base}/join/${token}?owner=${encodeURIComponent("Owner")}&email=${encodeURIComponent("owner@astratech.ae")}`,
+    { headers: { Accept: "*/*" } }
+  );
+  assert.equal(asAgent.headers.get("content-type")?.includes("text/plain"), true);
+  const sheet = await asAgent.text();
+  assert.match(sheet, /npm run relay -- join/);
+  assert.match(sheet, /--email "owner@astratech\.ae"/);
+  assert.match(sheet, /--owner "Owner"/);
+  assert.ok(sheet.includes(groupId), "说明里要有群组 id 供 AI 自查");
+  assert.match(sheet, /GROUP_RELAY_APPROVAL_REQUIRED/);
+
+  // 没带身份时要让 AI 去问,而不是编一个
+  const bare = await fetch(`${base}/join/${token}`, { headers: { Accept: "*/*" } });
+  assert.match(await bare.text(), /问一下把你叫来的人/);
+
+  // 失效的邀请对 AI 也要说清楚,而不是回一个网页
+  const dead = await fetch(`${base}/join/nope-not-a-token`, { headers: { Accept: "*/*" } });
+  assert.equal(dead.status, 404);
+  assert.match(await dead.text(), /已失效/);
+
+  // ?format= 可以强制,便于人工排查
+  const forced = await fetch(`${base}/join/${token}?format=text`, { headers: { Accept: "text/html" } });
+  assert.match(await forced.text(), /AI 接入说明/);
+});
