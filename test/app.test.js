@@ -2126,3 +2126,44 @@ test("one invite link serves a browser and an AI differently", async (t) => {
   const forced = await fetch(`${base}/join/${token}?format=text`, { headers: { Accept: "text/html" } });
   assert.match(await forced.text(), /AI 接入说明/);
 });
+
+test("a Chinese attachment name survives the upload", async (t) => {
+  const { base, store } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "附件名", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const form = new FormData();
+  form.set("text", "158 条的中文名+业务逻辑表");
+  form.set("files", new Blob(["col\n"], { type: "text/csv" }), "特征中文名与业务逻辑158条.xlsx");
+  const sent = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "owner@example.com" },
+    body: form
+  });
+  assert.equal(sent.status, 201);
+
+  // multipart 头是按 latin1 解出来的,不还原就会存成 ç¹å¾…æ¡.xlsx
+  const [message] = await store.readMessages(groupId);
+  assert.equal(message.attachments[0].name, "特征中文名与业务逻辑158条.xlsx");
+
+  // 存到磁盘上的文件名同样是可读的中文,并且能按 URL 取回来
+  const download = await fetch(`${base}${message.attachments[0].url}`, {
+    headers: { "X-Relay-Email": "owner@example.com" }
+  });
+  assert.equal(download.status, 200);
+  assert.equal(await download.text(), "col\n");
+
+  // 纯 ASCII 名字不能被这套还原逻辑改坏
+  const ascii = new FormData();
+  ascii.set("text", "ascii");
+  ascii.set("files", new Blob(["x"], { type: "text/plain" }), "report_v2.final.txt");
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "owner@example.com" },
+    body: ascii
+  });
+  const all = await store.readMessages(groupId);
+  assert.equal(all.at(-1).attachments[0].name, "report_v2.final.txt");
+});

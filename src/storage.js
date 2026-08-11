@@ -44,6 +44,17 @@ function parseJsonl(text) {
     .map((line) => JSON.parse(line));
 }
 
+/// busboy 默认按 latin1 解 multipart 头里的 filename,中文名的 UTF-8 字节因此被逐字节
+/// 当成 latin1 字符 —— 「特征…158条.xlsx」会显示成「ç¹å¾…158æ¡.xlsx」。
+/// 判据很干净:被误解的串一定全落在 latin1 范围内,而正确的中文名一定有超出的码位,
+/// 所以只对前者还原,不会把本来正确的名字改坏。
+function decodeUploadName(name) {
+  const raw = String(name ?? "");
+  if (!/^[\x00-\xff]*$/.test(raw)) return raw;
+  const decoded = Buffer.from(raw, "latin1").toString("utf8");
+  return decoded.includes("\ufffd") ? raw : decoded;
+}
+
 async function moveFile(source, target) {
   try {
     await fs.rename(source, target);
@@ -847,7 +858,8 @@ export class FileStore {
     return Promise.all(
       files.map(async (file) => {
         const attachmentId = id();
-        const safeName = path.basename(file.originalname).replace(/[^\p{L}\p{N}._ -]/gu, "_");
+        const safeName = path.basename(decodeUploadName(file.originalname))
+          .replace(/[^\p{L}\p{N}._ -]/gu, "_");
         const diskName = `${attachmentId}-${safeName}`;
         const target = path.join(dir, diskName);
         // 上传现在落盘再搬,不经过内存。file.buffer 分支留着给直接注入内存文件的调用方。
