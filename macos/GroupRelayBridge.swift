@@ -467,6 +467,7 @@ private final class RelayWorker {
             """
         }
         let workspace = try workspaceURL()
+        if readonlyExecution { try requireProjectWorkspace(workspace) }
         // 只读档也在项目目录里跑 —— 受限档留在临时目录,那一档本来就不该看见项目。
         let workingDirectory = trustedExecution || readonlyExecution ? workspace : temporary
         let executable = try findExecutable()
@@ -782,9 +783,39 @@ private final class RelayWorker {
         if Darwin.kill(root, 0) == 0 { _ = Darwin.kill(root, SIGKILL) }
     }
 
+    /// 只读档不能拿整个主目录当工作区。App 在 session 没配工作区时会写 workspacePath = $HOME,
+    /// 那对「我自己的指令」还算主人自己的选择,但只读档是开放给群成员的 —— 等于把 ~/.ssh、
+    /// ~/.aws 和所有仓库的读权限一起给出去。没有具体项目目录就拒绝执行,让主人先设。
+    private func requireProjectWorkspace(_ workspace: URL) throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        guard workspace.standardizedFileURL.path != home else {
+            throw BridgeError.message(
+                "只读执行需要先指定项目目录：当前工作区是整个用户主目录，不能开放给群成员读。"
+                + "请在 ~/.group-relay/workspaces.json 里写 {\"\(config.groupId)\": \"/项目路径\"} 后重试"
+                + "（也可以用 \"default\" 给所有群兜底）。"
+            )
+        }
+    }
+
+    /// 按群指定项目目录:`~/.group-relay/workspaces.json`,形如 {"<groupId>":"/path", "default":"/path"}。
+    /// session 配置文件不行 —— App 每次同步都会从服务端 payload 重建它,手写的值会被覆盖成 $HOME。
+    /// 这个文件 App 不碰。
+    private func workspaceOverride() -> URL? {
+        let file = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".group-relay/workspaces.json")
+        guard
+            let data = try? Data(contentsOf: file),
+            let map = (try? JSONSerialization.jsonObject(with: data)) as? [String: String]
+        else { return nil }
+        let path = map[config.groupId] ?? map["default"] ?? ""
+        return path.isEmpty ? nil : URL(fileURLWithPath: path)
+    }
+
     private func workspaceURL() throws -> URL {
         let inferred = configURL.deletingLastPathComponent().deletingLastPathComponent()
-        let url = config.workspacePath.map { URL(fileURLWithPath: $0) } ?? inferred
+        let url = workspaceOverride()
+            ?? config.workspacePath.map { URL(fileURLWithPath: $0) }
+            ?? inferred
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw BridgeError.message("AI workspace does not exist: \(url.path)")

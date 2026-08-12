@@ -201,7 +201,22 @@ async function askCodex(config, messages) {
   const history = trustedExecution ? [] : await recentHistory(config);
   const prompt = promptFor(config, history, messages, trustedExecution, readonlyExecution);
   const workerDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-codex-"));
-  const workspace = path.resolve(config.workspacePath ?? path.dirname(path.dirname(configFile)));
+  // 按群指定项目目录:~/.group-relay/workspaces.json({"<groupId>":"/path","default":"/path"})。
+  // session 配置文件不行 —— App 每次同步都会重建它,手写的值会被覆盖成 $HOME。
+  const workspaceOverride = await fs.readFile(path.join(os.homedir(), ".group-relay/workspaces.json"), "utf8")
+    .then((raw) => { const map = JSON.parse(raw); return map[config.groupId] || map.default || null; })
+    .catch(() => null);
+  const workspace = path.resolve(
+    workspaceOverride ?? config.workspacePath ?? path.dirname(path.dirname(configFile))
+  );
+  // 只读档是开放给群成员的,不能拿整个主目录当工作区 —— 那等于把 ~/.ssh 和所有仓库的读权限
+  // 一起给出去。没设具体项目目录就拒绝,而不是默认 $HOME。
+  if (readonlyExecution && workspace === path.resolve(os.homedir())) {
+    throw new Error(
+      "只读执行需要先指定项目目录：当前工作区是整个用户主目录，不能开放给群成员读。"
+      + `请在 ~/.group-relay/workspaces.json 里写 {"${config.groupId}": "/项目路径"} 后重试。`
+    );
+  }
   const outputFile = path.join(workerDir, "reply.txt");
   const codexArgs = trustedExecution
     ? [
