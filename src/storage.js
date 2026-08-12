@@ -77,6 +77,9 @@ export class FileStore {
     this.accountsFile = path.join(this.root, "accounts.json");
     // 反馈工单是全服务器一份,而且不跟着保留期回收:消息是 30 天中转缓冲,工单是待办清单。
     this.feedbackFile = path.join(this.root, "feedback.json");
+    // 「我的 AI 替谁干了多少活」的累加计数。同理不进保留期:工作量越长期越有意义,
+    // 而消息 30 天就回收了 —— 从消息现推的话,一个月前的活就等于没干过。
+    this.aiWorkFile = path.join(this.root, "ai-work.json");
     this.uploadTempDir = path.join(this.root, "tmp", "uploads");
     this.groupsById = new Map();
     this.invitesByToken = new Map();
@@ -86,6 +89,7 @@ export class FileStore {
     this.approvalQueues = new Map();
     this.accountQueue = Promise.resolve();
     this.feedbackQueue = Promise.resolve();
+    this.aiWorkQueue = Promise.resolve();
   }
 
   async init() {
@@ -294,6 +298,103 @@ export class FileStore {
       approval.updatedAt = new Date().toISOString();
       approval.resolvedAt = approval.updatedAt;
       return { approval };
+    });
+  }
+
+  async readAiWork() {
+    if (!(await exists(this.aiWorkFile))) return { rows: [], pending: {} };
+    const stored = await readJson(this.aiWorkFile);
+    return { rows: stored.rows ?? [], pending: stored.pending ?? {} };
+  }
+
+  async updateAiWork(update) {
+    const next = this.aiWorkQueue.then(async () => {
+      const store = await this.readAiWork();
+      const result = await update(store);
+      await writeJsonAtomic(this.aiWorkFile, store);
+      return result;
+    });
+    this.aiWorkQueue = next.catch(() => {});
+    return next;
+  }
+
+  /// 一行 = 群 × AI × 提问人 × 日期 的计数。行数按天累加,不存正文,也不受消息回收影响。
+  aiWorkRow(store, { aiId, groupId, day, askerId, askerName }) {
+    const existing = store.rows.find((row) => (
+      row.aiId === aiId && row.groupId === groupId && row.day === day && row.askerId === askerId
+    ));
+    if (existing) {
+      if (askerName) existing.askerName = askerName;
+      return existing;
+    }
+    const row = {
+      aiId,
+      groupId,
+      day,
+      askerId,
+      askerName: askerName ?? null,
+      asked: 0,
+      answered: 0,
+      failed: 0,
+      replyChars: 0,
+      attachments: 0,
+      responseMsTotal: 0,
+      responseSamples: 0
+    };
+    store.rows.push(row);
+    return row;
+  }
+
+  /// 有人 @ 了某个 AI:记一次「被问」,并把这条问题挂进 pending,等回答落地时算响应时长。
+  /// pending 只留问题 id、提问人和时间,7 天没人回答就丢掉,不会无限长。
+  async recordAiMention(groupId, message, aiMembers) {
+    if (!aiMembers.length) return;
+    return this.updateAiWork((store) => {
+      const day = dayOf(message.createdAt);
+      for (const ai of aiMembers) {
+        const row = this.aiWorkRow(store, {
+          aiId: ai.id,
+          groupId,
+          day,
+          askerId: message.sender?.id ?? "unknown",
+          askerName: message.sender?.name ?? null
+        });
+        row.asked += 1;
+        store.pending[`${ai.id}|${message.id}`] = {
+          aiId: ai.id,
+          groupId,
+          day,
+          askerId: message.sender?.id ?? "unknown",
+          askerName: message.sender?.name ?? null,
+          askedAt: message.createdAt
+        };
+      }
+      const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1_000;
+      for (const [key, entry] of Object.entries(store.pending)) {
+        if (Date.parse(entry.askedAt) < cutoff) delete store.pending[key];
+      }
+    });
+  }
+
+  /// AI 给出了终态回复(新发一条 replyTo,或把自己的占位改成 complete/failed):
+  /// 按 pending 里那条问题结算 —— 已答/失败、响应时长、回复字数和附件数。
+  async recordAiReply(groupId, aiMemberId, { replyTo, status, text, attachments = [], createdAt }) {
+    if (!replyTo) return;
+    return this.updateAiWork((store) => {
+      const key = `${aiMemberId}|${replyTo}`;
+      const entry = store.pending[key];
+      if (!entry) return;
+      const row = this.aiWorkRow(store, entry);
+      if (status === "failed") row.failed += 1;
+      else row.answered += 1;
+      row.replyChars += (text ?? "").length;
+      row.attachments += attachments.length;
+      const elapsed = Date.parse(createdAt ?? new Date().toISOString()) - Date.parse(entry.askedAt);
+      if (Number.isFinite(elapsed) && elapsed >= 0) {
+        row.responseMsTotal += elapsed;
+        row.responseSamples += 1;
+      }
+      delete store.pending[key];
     });
   }
 

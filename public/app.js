@@ -1715,9 +1715,97 @@ function setOverviewView(view, { updateHash = true } = {}) {
     renderMentionSettings();
   }
   if (nextView === "feedback") void loadFeedback();
+  if (nextView === "tasks") void loadAiWork();
 }
 
 const feedbackStatusLabels = { open: "待处理", planned: "已排期", done: "已完成", rejected: "不做" };
+const aiWorkRanges = [[1, "今天"], [7, "最近 7 天"], [30, "最近 30 天"]];
+
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds)) return "—";
+  const minutes = milliseconds / 60_000;
+  if (minutes < 1) return `${Math.round(milliseconds / 1000)} 秒`;
+  if (minutes < 60) return `${minutes.toFixed(minutes < 10 ? 1 : 0)} 分钟`;
+  return `${(minutes / 60).toFixed(1)} 小时`;
+}
+
+async function loadAiWork(days = state.aiWorkDays ?? 7) {
+  if (!state.email) return;
+  state.aiWorkDays = days;
+  try {
+    state.aiWork = await accountApi(`/api/account/ai-work?days=${days}`);
+    renderAiWork();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function renderAiWork() {
+  const ranges = $("#ai-work-ranges");
+  ranges.innerHTML = "";
+  for (const [days, label] of aiWorkRanges) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = (state.aiWorkDays ?? 7) === days ? "active" : "";
+    button.textContent = label;
+    button.addEventListener("click", () => void loadAiWork(days));
+    ranges.append(button);
+  }
+  const work = state.aiWork;
+  const totals = work?.totals;
+  const tiles = $("#ai-work-totals");
+  tiles.innerHTML = "";
+  for (const [value, label] of [
+    [totals?.asked ?? 0, "被 @ 次数"],
+    [totals?.answered ?? 0, "已回答"],
+    [(totals?.failed ?? 0) + (totals?.unanswered ?? 0), "未答或失败"],
+    [formatDuration(totals?.avgResponseMs ?? NaN), "平均响应"],
+    [(totals?.replyChars ?? 0).toLocaleString(), "回复字数"]
+  ]) {
+    const tile = document.createElement("article");
+    const strong = document.createElement("strong");
+    strong.textContent = String(value);
+    const small = document.createElement("small");
+    small.textContent = label;
+    tile.append(strong, small);
+    tiles.append(tile);
+  }
+  const breakdown = $("#ai-work-breakdown");
+  breakdown.innerHTML = "";
+  if (!totals?.asked) {
+    const empty = document.createElement("p");
+    empty.className = "task-empty";
+    empty.textContent = "这段时间还没有人 @ 过你的 AI。";
+    breakdown.append(empty);
+    return;
+  }
+  // 「谁在用我的 AI」放第一列 —— 工单里说这是最有说服力的一项。
+  for (const [title, rows, unit] of [
+    ["按提问人", work.byAsker, "条"],
+    ["按群组", work.byGroup, "条"],
+    ["按 AI", work.byProvider, "条"],
+    ["按天", work.byDay.map((row) => ({ ...row, label: row.key.slice(5) })), "条"]
+  ]) {
+    const column = document.createElement("div");
+    column.className = "ai-work-column";
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    column.append(heading);
+    for (const row of rows.slice(0, 8)) {
+      const line = document.createElement("div");
+      line.className = "ai-work-row";
+      const name = document.createElement("span");
+      name.textContent = row.label;
+      const count = document.createElement("span");
+      count.textContent = row.avgResponseMs
+        ? `${row.asked} ${unit} · ${formatDuration(row.avgResponseMs)}`
+        : `${row.asked} ${unit}`;
+      line.append(name, count);
+      column.append(line);
+    }
+    breakdown.append(column);
+  }
+}
 
 async function loadFeedback() {
   // 账号还没就位时先不问:这一步没有身份头,服务端只会回「unknown account」。
@@ -2032,6 +2120,7 @@ async function loadAccountDashboard() {
     // 一起要,好让侧边栏的反馈角标不用等人点进去才出现。
     accountApi("/api/feedback").catch(() => ({ tickets: [], counts: {} }))
   ]);
+  void loadAiWork();
   state.account = account;
   state.accountSessions = sessions;
   state.tasks = taskData.tasks;

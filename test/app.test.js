@@ -2589,3 +2589,86 @@ test("trusted execution opens read-only work to the rest of the group, writes st
   assert.equal(afterOff["客人的第二条"], "restricted");
   assert.equal(afterOff["主人的第二条"], "restricted");
 });
+
+test("my AI's workload is counted from mentions and survives the message buffer", async (t) => {
+  const { base, store, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "工作量", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const aiId = "ai:owner@example.com:claude";
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+  await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "guest@example.com", name: "客人" })
+  });
+  const guest = { "X-Relay-Email": "guest@example.com" };
+
+  const ask = async (headers, text) => (await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers,
+    body: new URLSearchParams({ text, mentions: JSON.stringify([aiId]) })
+  }).then((response) => response.json())).message;
+
+  // 客人问两次,主人问一次
+  const first = await ask(guest, "@Claude 第一个问题");
+  const second = await ask(guest, "@Claude 第二个问题");
+  const ownerAsk = await ask(owner, "@Claude 主人也问一句");
+
+  // 第一个:先发占位再回写(答案回写进气泡,这是最常见的形态)
+  const placeholder = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "正在处理…", status: "processing", replyTo: first.id })
+  }).then((response) => response.json());
+  await json(base, `/api/groups/${groupId}/messages/${placeholder.message.id}`, {
+    method: "PATCH", headers: ai, body: JSON.stringify({ text: "十二个字的答案", status: "complete" })
+  });
+
+  // 第二个:直接新发一条带 replyTo 的回复,并且是失败
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "跑挂了", status: "failed", replyTo: second.id })
+  });
+  // 主人那条不回答 —— 应当算未回答
+
+  const stats = await json(base, "/api/account/ai-work?days=7", { headers: owner });
+  assert.equal(stats.body.totals.asked, 3);
+  assert.equal(stats.body.totals.answered, 1);
+  assert.equal(stats.body.totals.failed, 1);
+  assert.equal(stats.body.totals.unanswered, 1);
+  assert.equal(stats.body.totals.replyChars, "十二个字的答案".length + "跑挂了".length);
+  assert.ok(stats.body.totals.avgResponseMs >= 0);
+
+  // 按提问人拆开 —— 工单里说这是最有说服力的一项
+  const askers = Object.fromEntries(stats.body.byAsker.map((row) => [row.label, row.asked]));
+  assert.deepEqual(askers, { "客人": 2, "Owner": 1 });
+  assert.equal(stats.body.byGroup.length, 1);
+  assert.equal(stats.body.byGroup[0].label, "工作量");
+  assert.equal(stats.body.byDay.length, 1);
+  assert.equal(stats.body.byProvider[0].label, "claude");
+
+  // 别人的 AI 不出现在我的统计里
+  const guestStats = await json(base, "/api/account/ai-work?days=7", { headers: guest });
+  assert.equal(guestStats.body.totals.asked, 0);
+
+  // 关键设计点:消息被保留期回收之后,工作量还在
+  await store.purgeExpired({
+    messageDays: 1,
+    attachmentHours: 1,
+    now: new Date(Date.now() + 60 * 24 * 60 * 60 * 1_000)
+  });
+  assert.equal((await store.readMessages(groupId)).length, 0);
+  const afterPurge = await json(base, "/api/account/ai-work?days=7", { headers: owner });
+  assert.equal(afterPurge.body.totals.asked, 3);
+  assert.equal(afterPurge.body.totals.answered, 1);
+  // 计数落在数据根目录,和 feedback.json 一样
+  const persisted = JSON.parse(await fs.readFile(path.join(dataDir, "ai-work.json"), "utf8"));
+  assert.equal(persisted.rows.length, 2);
+});

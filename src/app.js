@@ -643,6 +643,73 @@ export async function createApp(options = {}) {
     }
   });
 
+  /// 「我的 AI 干了多少活」。只有账号主人能看自己 AI 的数字,不做群内排行榜 ——
+  /// 这是工作量说明,不是竞赛。
+  app.get("/api/account/ai-work", requireAccount, async (req, res, next) => {
+    try {
+      const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 365);
+      const since = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1_000)
+        .toISOString().slice(0, 10);
+      const mine = `ai:${req.account.email}:`;
+      const { rows } = await store.readAiWork();
+      const scoped = rows.filter((row) => row.aiId.startsWith(mine) && row.day >= since);
+      const totals = { asked: 0, answered: 0, failed: 0, replyChars: 0, attachments: 0, responseMsTotal: 0, responseSamples: 0 };
+      const group = (bucket, key, label) => {
+        bucket[key] = bucket[key] ?? { key, label, asked: 0, answered: 0, failed: 0, responseMsTotal: 0, responseSamples: 0 };
+        return bucket[key];
+      };
+      const byAsker = {};
+      const byGroup = {};
+      const byDay = {};
+      const byProvider = {};
+      for (const row of scoped) {
+        for (const field of Object.keys(totals)) totals[field] += row[field] ?? 0;
+        for (const [bucket, key, label] of [
+          [byAsker, row.askerId, row.askerName ?? row.askerId],
+          [byGroup, row.groupId, row.groupId],
+          [byDay, row.day, row.day],
+          [byProvider, row.aiId.split(":").pop(), row.aiId.split(":").pop()]
+        ]) {
+          const entry = group(bucket, key, label);
+          entry.asked += row.asked;
+          entry.answered += row.answered;
+          entry.failed += row.failed;
+          entry.responseMsTotal += row.responseMsTotal;
+          entry.responseSamples += row.responseSamples;
+        }
+      }
+      // 群名不在计数行里(只存 id),这里按当前成员关系补上,查不到就退回 id。
+      const names = new Map();
+      for (const { groupId, group: found } of await accountMemberships(req.account)) {
+        names.set(groupId, found.name);
+      }
+      const withAverage = (entries) => Object.values(entries)
+        .map((entry) => ({
+          ...entry,
+          label: names.get(entry.key) ?? entry.label,
+          avgResponseMs: entry.responseSamples ? Math.round(entry.responseMsTotal / entry.responseSamples) : null
+        }))
+        .sort((left, right) => right.asked - left.asked);
+      res.json({
+        days,
+        since,
+        totals: {
+          ...totals,
+          unanswered: Math.max(totals.asked - totals.answered - totals.failed, 0),
+          avgResponseMs: totals.responseSamples
+            ? Math.round(totals.responseMsTotal / totals.responseSamples)
+            : null
+        },
+        byAsker: withAverage(byAsker),
+        byGroup: withAverage(byGroup),
+        byProvider: withAverage(byProvider),
+        byDay: Object.values(byDay).sort((left, right) => (left.key < right.key ? -1 : 1))
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/api/feedback", requireAccount, async (req, res, next) => {
     try {
       const tickets = (await store.listFeedback())
@@ -1267,6 +1334,15 @@ export async function createApp(options = {}) {
         replyTo: cleanText(req.body.replyTo, 100) || null,
         status
       });
+      // 「我的 AI 替谁干了多少活」的计数。只算 @ 了 AI 的消息 —— 群里的普通消息不计入,
+      // 否则数字没有意义(和「只对 @ 我的消息提示」同一个取舍)。
+      const mentionedAis = mentions.filter((member) => member.type === "ai");
+      if (mentionedAis.length && req.member.type !== "ai") {
+        await store.recordAiMention(req.params.groupId, message, mentionedAis).catch(() => {});
+      }
+      if (req.member.type === "ai" && message.replyTo && status !== "processing") {
+        await store.recordAiReply(req.params.groupId, req.member.id, message).catch(() => {});
+      }
       if (req.member.type === "ai") {
         await store.setMessageActivity(
           req.params.groupId,
@@ -1314,6 +1390,13 @@ export async function createApp(options = {}) {
         input.status === "processing"
       );
       await store.updateAssignmentTasks(req.params.groupId, result.message);
+      // 答案通常是回写进占位气泡的,不是新消息:占位的 replyTo 指着原问题,按它结算工作量。
+      if (input.status !== "processing") {
+        await store.recordAiReply(req.params.groupId, req.member.id, {
+          ...result.message,
+          createdAt: result.message.updatedAt ?? result.message.createdAt
+        }).catch(() => {});
+      }
       publish(req.params.groupId, "message_updated", result.message);
       await reportActivity(req, input.status === "processing" ? "busy" : "online");
       res.json({ message: result.message });

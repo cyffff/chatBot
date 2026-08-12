@@ -153,6 +153,18 @@
                     </div>
                     <button id="refresh-ai-tasks" class="text-button" type="button">刷新</button>
                   </div>
+
+                  <section id="ai-work" class="ai-work-card" aria-labelledby="ai-work-title">
+                    <div class="ai-work-heading">
+                      <div>
+                        <strong id="ai-work-title">我的 AI 干了多少活</strong>
+                        <small>只统计 @ 了你的 AI 的消息；这份统计只有你自己看得到</small>
+                      </div>
+                      <div id="ai-work-ranges" class="ai-work-ranges"></div>
+                    </div>
+                    <div id="ai-work-totals" class="ai-work-totals"></div>
+                    <div id="ai-work-breakdown" class="ai-work-breakdown"></div>
+                  </section>
                   <div class="task-summary" aria-label="任务统计">
                     <button class="task-stat active" type="button" data-task-filter="all"><strong id="task-count-all">0</strong><span>全部</span></button>
                     <button class="task-stat" type="button" data-task-filter="assigned"><strong id="task-count-assigned">0</strong><span>待开始</span></button>
