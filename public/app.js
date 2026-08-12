@@ -460,10 +460,12 @@ function renderMembers(members) {
       const trust = document.createElement("button");
       trust.type = "button";
       trust.className = `member-trust ${member.trustedExecutionEnabled ? "enabled" : ""}`;
-      trust.textContent = member.trustedExecutionEnabled ? "免审批：开" : "免审批：关";
+      // 「开」会被读成「谁说都不用批」,而它只对你自己发的消息生效:别人让你的 AI 动你的
+      // 机器,仍然要你点头。范围写在标签上,而不是只写在没人看的 title 里。
+      trust.textContent = member.trustedExecutionEnabled ? "免审批：仅我的指令" : "免审批：关";
       trust.title = member.trustedExecutionEnabled
-        ? "只有你的消息可以让该 AI 在项目中免审批执行；点击关闭"
-        : "允许该 AI 对你的消息在绑定项目中免审批执行";
+        ? "只有你自己发的消息能让该 AI 在项目中免审批执行；群里其他人的指令仍然要你逐条批准。点击关闭"
+        : "允许该 AI 对你自己发的消息在绑定项目中免审批执行；其他人的指令始终需要你批准";
       trust.addEventListener("click", async () => {
         trust.disabled = true;
         try {
