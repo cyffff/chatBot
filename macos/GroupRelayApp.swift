@@ -272,6 +272,13 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
                 at: appLogURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
+            // app.log 同样没有上限,超过 4MB 轮转一份 .1。
+            if let size = (try? FileManager.default.attributesOfItem(atPath: appLogURL.path))?[.size] as? Int,
+               size > 4 * 1024 * 1024 {
+                let rotated = appLogURL.appendingPathExtension("1")
+                try? FileManager.default.removeItem(at: rotated)
+                try? FileManager.default.moveItem(at: appLogURL, to: rotated)
+            }
             if !FileManager.default.fileExists(atPath: appLogURL.path) {
                 try data.write(to: appLogURL, options: .atomic)
             } else {
@@ -805,6 +812,13 @@ final class LocalAIBridgeManager {
         let logURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Logs/Group Relay/bridge.log")
         try? FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // 桥接日志没有上限,只会一直涨(实测已经 6MB)。超过 8MB 就轮转一份 .1,总量封在 16MB。
+        if let size = (try? FileManager.default.attributesOfItem(atPath: logURL.path))?[.size] as? Int,
+           size > 8 * 1024 * 1024 {
+            let rotated = logURL.appendingPathExtension("1")
+            try? FileManager.default.removeItem(at: rotated)
+            try? FileManager.default.moveItem(at: logURL, to: rotated)
+        }
         if !FileManager.default.fileExists(atPath: logURL.path) {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
         }

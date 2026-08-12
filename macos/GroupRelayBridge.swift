@@ -157,11 +157,20 @@ private final class RelayWorker {
                 }
                 try presence("online")
             } catch {
-                if error.localizedDescription == "invalid member token" {
-                    log("AI session was disconnected; stopping worker")
+                /// 有些错误重试一万次也不会变:这个 AI 已经不在群里了(被移出、或群被删),
+                /// 或者身份已经失效。原来只是 return,但 App 每 10 秒会照着注册表把 worker
+                /// 拉起来,于是变成永久重试 —— cursor-main 这条在日志里刷了六万多次。
+                /// 所以退出前把注册表里这条标成 enabled=false,让它别再被拉起来。
+                let reason = error.localizedDescription
+                let membershipGone = reason == "invalid member token"
+                    || reason.contains("not a member of this group")
+                    || reason.contains("group not found")
+                if membershipGone {
+                    log("Worker \(config.sessionId ?? config.groupId) stopping: \(reason)")
+                    disableSessionInRegistry()
                     return
                 }
-                log("Worker \(config.sessionId ?? config.groupId) error: \(error.localizedDescription); retrying")
+                log("Worker \(config.sessionId ?? config.groupId) error: \(reason); retrying")
                 Thread.sleep(forTimeInterval: 2)
                 if (try? reloadConfig()) == false { return }
             }
@@ -656,8 +665,39 @@ private final class RelayWorker {
         return nil
     }
 
+    /// 注册表里把自己这条关掉,免得 App 又把这个已经没有归属的 worker 拉起来。
+    private func disableSessionInRegistry() {
+        guard let sessionId = config.sessionId else { return }
+        let registryURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".group-relay/local-workers.json")
+        guard
+            let data = try? Data(contentsOf: registryURL),
+            var registry = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return }
+        // 注册表历史上有两种形状:{"workers":{...}} 和顶层直接就是 map。
+        let nested = registry["workers"] as? [String: Any]
+        var workers = nested ?? registry
+        guard var entry = workers[sessionId] as? [String: Any] else { return }
+        entry["enabled"] = false
+        entry["disabledReason"] = "not a member of this group"
+        workers[sessionId] = entry
+        if nested != nil { registry["workers"] = workers } else { registry = workers }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: registry) else { return }
+        try? encoded.write(to: registryURL, options: .atomic)
+        log("Session \(sessionId) disabled in the worker registry")
+    }
+
+    /// 日志只会涨,不会自己停:超过上限就轮转一份 .1,总量封在两倍上限。
+    private func rotateIfLarge(_ url: URL, limit: Int = 8 * 1024 * 1024) {
+        guard fileByteCount(url) > limit else { return }
+        let rotated = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: rotated)
+        try? FileManager.default.moveItem(at: url, to: rotated)
+    }
+
     private func appendErrorLog(from source: URL, to destination: URL) {
         guard let data = try? Data(contentsOf: source), !data.isEmpty else { return }
+        rotateIfLarge(destination)
         if !FileManager.default.fileExists(atPath: destination.path) {
             FileManager.default.createFile(atPath: destination.path, contents: nil)
         }
