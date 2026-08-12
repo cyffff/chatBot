@@ -41,6 +41,8 @@ const state = {
   overviewView: "overview",
   // @ 我但还没被看到的消息 id。只装 @ 我的,群里其他消息不进这里。
   unreadMentions: new Set(),
+  // 手动展开过的工单 id:已完成/不做的默认折起来,展开过的重画时保持展开。
+  feedbackExpanded: new Set(),
   audioContext: null,
   faviconCount: null,
   faviconImage: null
@@ -1763,14 +1765,33 @@ function renderFeedback() {
   for (const ticket of shown) list.append(feedbackNode(ticket));
 }
 
+/// 已完成/不做的工单默认折起来:正文是给实现的人看的,做完之后它只该占一行,
+/// 否则列表越往后越难扫。展开状态记在内存里,改状态重画时不会被弹回去。
+function feedbackCollapsed(ticket) {
+  if (state.feedbackExpanded.has(ticket.id)) return false;
+  return ticket.status === "done" || ticket.status === "rejected";
+}
+
 function feedbackNode(ticket) {
   const item = document.createElement("article");
-  item.className = `feedback-item ${ticket.status}`;
+  const collapsed = feedbackCollapsed(ticket);
+  item.className = `feedback-item ${ticket.status}${collapsed ? " collapsed" : ""}`;
   const title = document.createElement("h3");
   const chip = document.createElement("span");
   chip.className = `feedback-chip ${ticket.status}`;
   chip.textContent = feedbackStatusLabels[ticket.status] ?? ticket.status;
-  title.append(chip, document.createTextNode(` ${ticket.title}`));
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "text-button feedback-toggle";
+  toggle.textContent = collapsed ? "展开" : "收起";
+  toggle.addEventListener("click", () => {
+    if (state.feedbackExpanded.has(ticket.id)) state.feedbackExpanded.delete(ticket.id);
+    else state.feedbackExpanded.add(ticket.id);
+    const nowCollapsed = feedbackCollapsed(ticket);
+    item.classList.toggle("collapsed", nowCollapsed);
+    toggle.textContent = nowCollapsed ? "展开" : "收起";
+  });
+  title.append(chip, document.createTextNode(` ${ticket.title}`), toggle);
   const meta = document.createElement("p");
   meta.className = "feedback-meta";
   // 两层署名:提交的是 AI(工单只收 AI 提的),但这事最初是谁要的同样要写清。
@@ -1789,32 +1810,46 @@ function feedbackNode(ticket) {
     line.textContent = `${note.by ?? "有人"}：${note.text}`;
     item.append(line);
   }
+  /// 四个状态固定四个位置,当前那个禁用并高亮 —— 原来是把当前状态那颗按钮删掉,剩下的
+  /// 往前挤:点完「已完成」之后同一个位置变成了「已排期」,再点一下(或者手一抖)就改错了。
   const actions = document.createElement("div");
   actions.className = "feedback-actions";
-  for (const [status, label] of Object.entries(feedbackStatusLabels)) {
-    if (status === ticket.status) continue;
+  const label = document.createElement("span");
+  label.className = "feedback-actions-label";
+  label.textContent = "状态";
+  actions.append(label);
+  for (const [status, statusLabel] of Object.entries(feedbackStatusLabels)) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "secondary";
-    button.textContent = `标记为${label}`;
-    button.addEventListener("click", () => void setFeedbackStatus(ticket, status, button));
+    const current = status === ticket.status;
+    button.className = `feedback-status-button${current ? " current" : ""}`;
+    button.textContent = statusLabel;
+    button.disabled = current;
+    if (current) button.setAttribute("aria-current", "true");
+    button.addEventListener("click", () => void setFeedbackStatus(ticket, status));
     actions.append(button);
   }
   item.append(actions);
   return item;
 }
 
-async function setFeedbackStatus(ticket, status, button) {
-  button.disabled = true;
+async function setFeedbackStatus(ticket, status) {
+  const disableAll = () => document.querySelectorAll(".feedback-status-button")
+    .forEach((button) => { button.disabled = true; });
+  disableAll();
   try {
     await accountApi(`/api/feedback/${ticket.id}`, {
       method: "PATCH",
       body: JSON.stringify({ status })
     });
     await loadFeedback();
+    // 改完状态列表会重排(做完的那条折起来),所以紧接着的第二下点击可能落到别的工单的
+    // 按钮上。刚改完的这半秒里所有状态按钮都不接受点击,手一抖也改不动东西。
+    disableAll();
+    setTimeout(() => renderFeedback(), 400);
   } catch (error) {
     toast(error.message);
-    button.disabled = false;
+    renderFeedback();
   }
 }
 

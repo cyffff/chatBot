@@ -621,7 +621,42 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .feedback-item { padding: 14px; border: 1px solid #dce5dd; border-radius: 12px; background: white; }
 .feedback-item.done { background: #f7faf7; }
 .feedback-item.rejected { opacity: .72; }
-.feedback-item h3 { margin: 0 0 4px; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.feedback-item h3 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+  margin: 0 0 4px;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.feedback-toggle { margin-left: auto; padding: 2px 7px; font-size: 11px; }
+/* 折起来的工单只留标题那一行:做完的东西不该继续占着列表。 */
+.feedback-item.collapsed .feedback-body,
+.feedback-item.collapsed .feedback-note { display: none; }
+.feedback-item.collapsed { padding: 10px 14px; }
+.feedback-item.collapsed .feedback-meta { margin: 0; }
+.feedback-item.collapsed .feedback-actions { margin-top: 8px; }
+.feedback-actions-label { color: #8b948c; font-size: 11px; }
+.feedback-status-button {
+  padding: 5px 9px;
+  border: 1px solid #dbe4dc;
+  border-radius: 8px;
+  color: #4f5b53;
+  background: #f4f7f3;
+  font-size: 11px;
+  font-weight: 700;
+}
+.feedback-status-button:hover:not(:disabled) { color: #1f6848; background: #e7f0e8; }
+/* 当前状态那颗留在原位、禁用并高亮:位置不动,连点两下也不会改成别的。 */
+.feedback-status-button.current {
+  color: #1f6848;
+  background: white;
+  border-color: #9cc0a6;
+  cursor: default;
+  opacity: 1;
+}
 .feedback-meta { margin: 0; color: #7b867e; font-size: 11px; }
 .feedback-body {
   margin: 9px 0 0;
@@ -636,7 +671,7 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 }
 .feedback-note { margin: 7px 0 0; color: #7b867e; font-size: 11px; }
 .feedback-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
-.feedback-actions button { padding: 6px 9px; font-size: 11px; }
+.feedback-actions { align-items: center; }
 .feedback-chip {
   padding: 2px 7px;
   border-radius: 6px;
