@@ -390,7 +390,8 @@ export class FileStore {
       row.replyChars += (text ?? "").length;
       row.attachments += attachments.length;
       const elapsed = Date.parse(createdAt ?? new Date().toISOString()) - Date.parse(entry.askedAt);
-      if (Number.isFinite(elapsed) && elapsed >= 0) {
+      // 超过 24 小时的不进平均(问题挂了一夜、或等审批等了很久),否则平均值失去意义。
+      if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 24 * 60 * 60 * 1_000) {
         row.responseMsTotal += elapsed;
         row.responseSamples += 1;
       }

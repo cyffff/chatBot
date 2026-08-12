@@ -63,11 +63,25 @@ for (const groupId of groups) {
   }
   if (!recomputed.size) continue;
 
-  for (const reply of messages) {
-    if (reply.sender?.type !== "ai" || !aiIds.has(reply.sender.id)) continue;
-    if (!reply.replyTo || reply.status === "processing") continue;
+  // 一个问题只结算一次:占位被回写成终态、答案又新发一条带同一个 replyTo 的消息,是常见形态,
+  // 全算进去就会出现「已回答 > 被 @」。取最早那条,和实时路径(pending 结算一次即删)口径一致。
+  const settled = new Set();
+  const terminalReplies = messages
+    .filter((reply) => (
+      reply.sender?.type === "ai"
+      && aiIds.has(reply.sender.id)
+      && reply.replyTo
+      && reply.status !== "processing"
+    ))
+    .sort((left, right) => (
+      Date.parse(left.updatedAt ?? left.createdAt) - Date.parse(right.updatedAt ?? right.createdAt)
+    ));
+  for (const reply of terminalReplies) {
     const asked = questions.get(reply.replyTo);
     if (!asked) continue;
+    const settleKey = `${reply.sender.id}|${reply.replyTo}`;
+    if (settled.has(settleKey)) continue;
+    settled.add(settleKey);
     const key = keyOf(reply.sender.id, asked.day, asked.message.sender?.id ?? "unknown");
     const row = recomputed.get(key);
     if (!row) continue;
@@ -76,7 +90,8 @@ for (const groupId of groups) {
     row.replyChars += (reply.text ?? "").length;
     row.attachments += (reply.attachments ?? []).length;
     const elapsed = Date.parse(reply.updatedAt ?? reply.createdAt) - Date.parse(asked.message.createdAt);
-    if (Number.isFinite(elapsed) && elapsed >= 0) {
+    // 超过 24 小时的不进平均:那种多半是问题挂了一夜或等审批,会把平均值彻底带偏。
+    if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed <= 24 * 60 * 60 * 1_000) {
       row.responseMsTotal += elapsed;
       row.responseSamples += 1;
     }
