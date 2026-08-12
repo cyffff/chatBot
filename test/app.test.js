@@ -258,7 +258,8 @@ test("desktop account AI can join a linked group, answer every member and leave"
   const routed = await json(base, `/api/groups/${created.body.group.id}/messages?routed=1`, {
     headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) }
   });
-  assert.deepEqual(routed.body.messages.map((message) => message.executionScope), ["restricted", "trusted"]);
+  // 开了免审批之后,群里其他人的消息落在只读档:能让这个 AI 干只读的活,改本机仍要主人批。
+  assert.deepEqual(routed.body.messages.map((message) => message.executionScope), ["readonly", "trusted"]);
 
   const sessions = await json(base, "/api/account/sessions", { headers: accountHeaders });
   assert.equal(sessions.body.sessions[0].desktopAis.length, 1);
@@ -908,7 +909,7 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
   );
   assert.deepEqual(
     routed.body.messages.map((message) => [message.text, message.executionScope]),
-    [["owner command", "trusted"], ["guest command", "restricted"]]
+    [["owner command", "trusted"], ["guest command", "readonly"]]
   );
 });
 
@@ -2509,4 +2510,82 @@ test("feedback tickets are only accepted from an AI, and only people can triage 
   const persisted = JSON.parse(await fs.readFile(path.join(dataDir, "feedback.json"), "utf8"));
   assert.equal(persisted.length, 1);
   assert.equal(persisted[0].title, "开群时应当先显示本机记录");
+});
+
+test("trusted execution opens read-only work to the rest of the group, writes still need the owner", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "三档", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ provider: "claude" })
+  });
+  const aiHeaders = { ...owner, "X-Relay-Provider": "claude" };
+  const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "guest@example.com", name: "Guest" })
+  });
+  const guestHeaders = { "X-Relay-Email": "guest@example.com" };
+
+  const scopesFor = async () => {
+    const routed = await json(
+      base,
+      `/api/groups/${groupId}/messages?routed=1&limit=50`,
+      { headers: aiHeaders }
+    );
+    return Object.fromEntries(routed.body.messages.map((message) => [message.text, message.executionScope]));
+  };
+
+  // 自己创建的群里,自己的 AI 默认就是免审批的 —— 先显式关掉,才能验「关着的时候谁都不执行」
+  const aiMemberIdForReset = `ai:owner@example.com:claude`;
+  await json(base, `/api/groups/${groupId}/members/${aiMemberIdForReset}/trusted-execution`, {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ enabled: false })
+  });
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "主人的第一条" })
+  });
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: guestHeaders, body: new URLSearchParams({ text: "客人的第一条" })
+  });
+  assert.deepEqual(await scopesFor(), { "主人的第一条": "restricted", "客人的第一条": "restricted" });
+
+  const aiMemberId = `ai:owner@example.com:claude`;
+  const enabled = await json(base, `/api/groups/${groupId}/members/${aiMemberId}/trusted-execution`, {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ enabled: true })
+  });
+  assert.equal(enabled.response.status, 200);
+  assert.equal(enabled.body.member.trustedExecutionEnabled, true);
+
+  // 开了之后:主人本人 → 全权;群里其他人 → 只读(能干活,不能改本机)
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "主人的第二条" })
+  });
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: guestHeaders, body: new URLSearchParams({ text: "客人的第二条" })
+  });
+  const scopes = await scopesFor();
+  assert.equal(scopes["主人的第二条"], "trusted");
+  assert.equal(scopes["客人的第二条"], "readonly");
+  // 开关之前的那两条也跟着按当前设置解释,不会留在旧档上
+  assert.equal(scopes["客人的第一条"], "readonly");
+  assert.equal(guest.body.member.type, "human");
+
+  // 关掉就回到谁都不执行
+  await json(base, `/api/groups/${groupId}/members/${aiMemberId}/trusted-execution`, {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ enabled: false })
+  });
+  const afterOff = await scopesFor();
+  assert.equal(afterOff["客人的第二条"], "restricted");
+  assert.equal(afterOff["主人的第二条"], "restricted");
 });

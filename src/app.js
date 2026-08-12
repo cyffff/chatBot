@@ -382,9 +382,16 @@ export async function createApp(options = {}) {
         && sender.desktopOwnerAccountId === member.desktopOwnerAccountId
       );
       const approvedOnce = message.approval?.targetMemberId === member.id;
+      const trusted = directlyTrusted || delegatedBySiblingAI || approvedOnce;
+      /// 三档,不是两档。开了免审批之后,群里其他人的消息也能让这个 AI 干活 —— 但只在
+      /// 只读档里:读项目、检索、跑只读命令、走 MCP 都行,写文件/部署/推代码仍然要主人
+      /// 逐条批。免审批没开时,别人的消息还是老样子(什么都不执行)。
+      /// 注意只读档挡的是「改」,不是「读」:给了项目读权限,群成员就能让 AI 把文件内容念
+      /// 出来。这是设备主人开这个开关时选择承担的,提示词里再叮嘱一次别念凭证。
+      const readonly = !trusted && Boolean(member.trustedOwnerMemberId);
       return {
         ...message,
-        executionScope: directlyTrusted || delegatedBySiblingAI || approvedOnce ? "trusted" : "restricted"
+        executionScope: trusted ? "trusted" : readonly ? "readonly" : "restricted"
       };
     });
   }
