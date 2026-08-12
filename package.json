@@ -8,6 +8,7 @@
     "dev": "node --watch src/server.js",
     "test": "node --test",
     "archive": "node src/archive-cli.js",
+    "backfill:ai-work": "node bin/backfill-ai-work.js",
     "hooks:install": "node bin/install-codex-hooks.js",
     "mcp": "node bin/mcp-server.js",
     "relay": "node bin/relay-client.js",
