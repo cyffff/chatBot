@@ -1348,7 +1348,9 @@ export async function createApp(options = {}) {
       const downloadName = req.params.diskName.slice(37);
       // 图片内联显示缩略图;其它一律 attachment 强制下载 —— agent 现在会生成 HTML 之类的
       // 附件,内联渲染等于在本站源里跑它的脚本(存储型 XSS)。nosniff 再堵掉浏览器猜类型。
-      const inlineTypes = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".bmp", ".ico"]);
+      // SVG 不在内联名单里:它是可以带 <script> 的文档,内联就等于在本站源里执行它 ——
+      // 那正是这段代码要堵的洞。缩略图少一种格式,换一个不会被利用的源。
+      const inlineTypes = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico"]);
       const disposition = inlineTypes.has(path.extname(downloadName).toLowerCase()) ? "inline" : "attachment";
       res.set("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
       res.set("X-Content-Type-Options", "nosniff");

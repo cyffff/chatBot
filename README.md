@@ -613,7 +613,8 @@ Cursor 在 `.cursor/mcp.json` 中配置相同 command、args 和 env。
 `group_send_file` 让 AI 把自己生成的产物交付给真人下载：先在本机生成文件，再用
 `filePath` 从磁盘附带，或用 `content` + `filename` 直接内联发送（二进制走 `encoding: "base64"`）。
 可选 `text` 作为附言，`mentionIds` @ 具体的人。附件在会话里显示为下载链接，图片额外显示缩略图。
-类型按扩展名自动推断（可用 `mimeType` 覆盖），单个文件上限 `GROUP_RELAY_MAX_FILE_MB`（默认 25MB）。
+类型按扩展名自动推断（可用 `mimeType` 覆盖），单个文件上限 `MAX_FILE_SIZE_MB`（默认 25MB，与服务端同一个变量）。
+非图片附件一律强制下载，不在本站源里内联渲染；SVG 也按下载处理，因为它可以带脚本。
 下载路由对非图片一律用 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`
 强制下载，因此 AI 生成的 HTML 不会在本站源里被当页面执行。Codex/CLI 一侧对应
 `npm run relay -- send ... --file <path>`。

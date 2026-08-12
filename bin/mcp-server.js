@@ -26,7 +26,9 @@ const MIME_BY_EXT = {
   ".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp"
 };
 
-const maxFileBytes = Number(process.env.GROUP_RELAY_MAX_FILE_MB ?? 25) * 1024 * 1024;
+// 和服务端同一个变量(src/app.js 读的是 MAX_FILE_SIZE_MB)。名字不一致的话,把服务端上限
+// 调小之后这里仍然放行,失败会变成 multer 的报错而不是一句说得清的提示。
+const maxFileBytes = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
 
 const baseUrl = (process.env.GROUP_RELAY_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const groupId = process.env.GROUP_RELAY_GROUP_ID;

@@ -1547,6 +1547,8 @@ test("attachment downloads force non-images to download and keep images inline",
   const form = new FormData();
   form.set("files", new Blob(["<h1>hi</h1>"], { type: "text/html" }), "page.html");
   form.append("files", new Blob(["PNGDATA"], { type: "image/png" }), "shot.png");
+  // SVG 是可以带脚本的文档,不能因为「算图片」就内联
+  form.append("files", new Blob(["<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"], { type: "image/svg+xml" }), "evil.svg");
   const posted = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
     method: "POST",
     headers,
@@ -1562,6 +1564,10 @@ test("attachment downloads force non-images to download and keep images inline",
 
   const png = await fetch(`${base}${byName["shot.png"].url}`, { headers });
   assert.match(png.headers.get("content-disposition"), /^inline;/);
+
+  const svg = await fetch(`${base}${byName["evil.svg"].url}`, { headers });
+  assert.match(svg.headers.get("content-disposition"), /^attachment;/);
+  assert.equal(svg.headers.get("x-content-type-options"), "nosniff");
 });
 
 test("one AI session switches groups and disconnects its previous membership", async (t) => {
