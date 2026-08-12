@@ -38,7 +38,12 @@ const state = {
   taskMessages: new Map(),
   taskRefreshTimer: null,
   profileAvatarDataUrl: null,
-  overviewView: "overview"
+  overviewView: "overview",
+  // @ 我但还没被看到的消息 id。只装 @ 我的,群里其他消息不进这里。
+  unreadMentions: new Set(),
+  audioContext: null,
+  faviconCount: null,
+  faviconImage: null
 };
 
 const accountStorageKey = "relay-account-v1";
@@ -694,6 +699,178 @@ function updateMessageNode(item, message) {
   }
 }
 
+const mentionSoundKey = "relay-mention-sound";
+const mentionPermissionAskedKey = "relay-mention-notification-asked";
+
+function mentionsMe(message) {
+  return Boolean(state.memberId) && Boolean(
+    message.mentions?.some((mention) => mention.id === state.memberId)
+  );
+}
+
+/// 只有 @ 我的消息才提示。群里的普通消息一概不响、不改标题 —— 群一热闹就会变成噪音,
+/// 结果是人把提示整个关掉,那就连真正 @ 到自己的那一条也丢了。
+function noteMentionArrived(message) {
+  if (!mentionsMe(message) || message.sender?.id === state.memberId) return;
+  const item = [...$("#messages").children]
+    .find((candidate) => candidate.dataset.messageId === message.id);
+  // 人正看着这条,就当已经看到了:不必再提示,也不该计数。
+  if (document.visibilityState === "visible" && document.hasFocus() && item && isInMessagesView(item)) {
+    return;
+  }
+  if (state.unreadMentions.has(message.id)) return;
+  state.unreadMentions.add(message.id);
+  refreshDocumentTitle();
+  void playMentionSound();
+  void showMentionNotification(message);
+}
+
+/// 两个清除时机,各自独立:回到这个页面就全清;没回来但那条已经滚进视野的,也算看到了。
+function clearMentions({ onlyVisible = false } = {}) {
+  if (!state.unreadMentions.size) return;
+  if (!onlyVisible) {
+    state.unreadMentions.clear();
+    refreshDocumentTitle();
+    return;
+  }
+  let changed = false;
+  for (const messageId of [...state.unreadMentions]) {
+    const item = [...$("#messages").children]
+      .find((candidate) => candidate.dataset.messageId === messageId);
+    if (!item || isInMessagesView(item)) {
+      state.unreadMentions.delete(messageId);
+      changed = true;
+    }
+  }
+  if (changed) refreshDocumentTitle();
+}
+
+/// 标题原来只归待审批用。两件事都可能同时有,@ 我的更急(有人在等我回话),所以它优先;
+/// 待审批的数量在侧边栏角标上一直看得见,不会因为让位而丢失。
+function refreshDocumentTitle() {
+  const mentions = state.unreadMentions.size;
+  const approvals = state.approvalPendingCount ?? 0;
+  document.title = mentions
+    ? `(${mentions}) @我 · Group Relay`
+    : approvals
+      ? `(${approvals}) 待审批 · Group Relay`
+      : "Group Relay";
+  void paintFavicon(mentions);
+}
+
+function mentionSoundEnabled() {
+  return localStorage.getItem(mentionSoundKey) !== "off";
+}
+
+/// 用 WebAudio 现敲一声,不带音频文件:装不装 PWA、有没有网都一样响,也不用多一个请求。
+/// 浏览器的自动播放策略要求先有过用户手势,没有过就静默失败 —— 标题和角标仍然到位。
+async function playMentionSound() {
+  if (!mentionSoundEnabled()) return;
+  try {
+    const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    state.audioContext = state.audioContext ?? new AudioContextClass();
+    if (state.audioContext.state === "suspended") await state.audioContext.resume();
+    if (state.audioContext.state !== "running") return;
+    const now = state.audioContext.currentTime;
+    const gain = state.audioContext.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+    gain.connect(state.audioContext.destination);
+    for (const [frequency, at] of [[784, 0], [1046, 0.13]]) {
+      const oscillator = state.audioContext.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, now + at);
+      oscillator.connect(gain);
+      oscillator.start(now + at);
+      oscillator.stop(now + at + 0.16);
+    }
+  } catch {
+    // 响不了不是错:提示还有标题、角标和系统通知三层。
+  }
+}
+
+/// favicon 角标:把应用图标画进 canvas,右下角盖一个红点/数字。图标是同源的,不会污染画布。
+async function paintFavicon(count) {
+  try {
+    if (state.faviconCount === count) return;
+    state.faviconCount = count;
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const context = canvas.getContext("2d");
+    state.faviconImage = state.faviconImage ?? await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = "/icon-512.png";
+    });
+    context.drawImage(state.faviconImage, 0, 0, 64, 64);
+    if (count > 0) {
+      context.beginPath();
+      context.arc(45, 45, 18, 0, Math.PI * 2);
+      context.fillStyle = "#d64545";
+      context.fill();
+      context.fillStyle = "white";
+      context.font = "bold 26px -apple-system, Segoe UI, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(count > 9 ? "9+" : String(count), 45, 47);
+    }
+    let link = document.querySelector("link[rel='icon']");
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.append(link);
+    }
+    link.href = canvas.toDataURL("image/png");
+  } catch {
+    // 画不出来就算了,标题那一层已经够用。
+  }
+}
+
+/// 系统通知只在页面不在前台时推,而且权限只问一次:被拒绝之后反复弹权限框比没有通知更烦。
+async function showMentionNotification(message) {
+  try {
+    if (!("Notification" in window)) return;
+    if (document.visibilityState === "visible" && document.hasFocus()) return;
+    if (Notification.permission === "denied") return;
+    if (Notification.permission === "default") {
+      if (localStorage.getItem(mentionPermissionAskedKey) === "yes") return;
+      localStorage.setItem(mentionPermissionAskedKey, "yes");
+      const decision = await Notification.requestPermission();
+      renderMentionSettings();
+      if (decision !== "granted") return;
+    }
+    const notification = new Notification(`${displayName(message.sender)} @ 了你`, {
+      body: (message.text || "（附件）").replace(/\s+/g, " ").slice(0, 120),
+      tag: message.id,
+      icon: "/icon-180.png"
+    });
+    notification.addEventListener("click", () => {
+      window.focus();
+      jumpToMessage(message.id);
+      notification.close();
+    });
+  } catch {
+    // 通知失败同样不影响前三层。
+  }
+}
+
+function renderMentionSettings() {
+  const toggle = $("#mention-sound-toggle");
+  if (!toggle) return;
+  toggle.checked = mentionSoundEnabled();
+  const state_ = "Notification" in window ? Notification.permission : "unsupported";
+  $("#mention-notification-state").textContent = {
+    granted: "系统通知：已允许。页面不在前台时会推一条。",
+    denied: "系统通知：已被浏览器拒绝，只用标题、角标和提示音提醒。",
+    default: "系统通知：第一次被 @ 时会问一次；拒绝了就不再问。",
+    unsupported: "这个浏览器不支持系统通知，用标题、角标和提示音提醒。"
+  }[state_] ?? "";
+}
+
 function updateRenderedMessage(message) {
   const item = [...$("#messages").children]
     .find((candidate) => candidate.dataset.messageId === message.id);
@@ -705,7 +882,11 @@ function updateRenderedMessage(message) {
   const wasProcessing = item.classList.contains("processing");
   updateMessageNode(item, message);
   if (shouldFollow) requestAnimationFrame(scrollMessagesToBottom);
-  if (wasProcessing && message.status !== "processing") announceSettled(item, message);
+  if (wasProcessing && message.status !== "processing") {
+    announceSettled(item, message);
+    // 答案常常是回写进占位气泡的,不是新消息。那也是「@ 我的内容到了」。
+    noteMentionArrived(message);
+  }
 }
 
 function flash(item, className, milliseconds) {
@@ -1018,6 +1199,7 @@ function connectEvents() {
     const message = JSON.parse(event.data);
     renderMessage(message);
     recordMessages([message]);
+    noteMentionArrived(message);
   });
   events.addEventListener("message_updated", (event) => {
     const message = JSON.parse(event.data);
@@ -1071,6 +1253,7 @@ async function pollMessages() {
       if (state.groupId !== requestedGroupId) break;
       messages.forEach(renderMessage);
       recordMessages(messages);
+      messages.forEach((message) => noteMentionArrived(message));
       if (event === "message_updated" && eventPayload) {
         updateRenderedMessage(eventPayload);
         recordMessages([eventPayload]);
@@ -1103,6 +1286,9 @@ function stopChatRealtime() {
   state.memberId = null;
   state.members = [];
   state.rendered.clear();
+  // 换群/离开聊天时未读归零:计数是「这一屏里 @ 我还没看的」,跨群留着只会误报。
+  state.unreadMentions.clear();
+  refreshDocumentTitle();
   $("#chat-ai-panel").classList.add("hidden");
 }
 
@@ -1412,7 +1598,7 @@ function renderApprovals({ announce = false } = {}) {
   badge.textContent = pending.length;
   badge.classList.toggle("hidden", pending.length === 0);
   $("#approval-queue").classList.toggle("hidden", pending.length === 0);
-  document.title = pending.length ? `(${pending.length}) 待审批 · Group Relay` : "Group Relay";
+  refreshDocumentTitle();
   if (announce && pending.length > previousCount) toast(`有 ${pending.length - previousCount} 条新的 AI 审批请求`);
   const list = $("#approval-list");
   list.innerHTML = "";
@@ -1520,7 +1706,10 @@ function setOverviewView(view, { updateHash = true } = {}) {
   });
   content.scrollTop = 0;
   if (updateHash) history.replaceState({}, "", `${location.pathname}${location.search}#${nextView}`);
-  if (nextView === "settings") void loadAISettings();
+  if (nextView === "settings") {
+    void loadAISettings();
+    renderMentionSettings();
+  }
   if (nextView === "feedback") void loadFeedback();
 }
 
@@ -2728,6 +2917,19 @@ async function boot() {
   }
   show("#create-view");
 }
+
+const clearMentionsIfVisible = () => {
+  if (document.visibilityState === "visible") clearMentions();
+};
+window.addEventListener("focus", clearMentionsIfVisible);
+document.addEventListener("visibilitychange", clearMentionsIfVisible);
+$("#messages").addEventListener("scroll", () => clearMentions({ onlyVisible: true }), { passive: true });
+
+$("#mention-sound-toggle").addEventListener("change", (event) => {
+  localStorage.setItem(mentionSoundKey, event.currentTarget.checked ? "on" : "off");
+  // 开关本身就是一次用户手势,顺手试一声,免得「开了却没声」说不清是设置没生效还是被浏览器拦了。
+  if (event.currentTarget.checked) void playMentionSound();
+});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

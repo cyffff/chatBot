@@ -585,6 +585,17 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .ai-key-form > div { display: flex; gap: 7px; }
 .ai-key-form button { flex: 1; padding: 9px; font-size: 10px; }
 .settings-footnote { margin: 16px 0 0; color: #7b877f; font-size: 11px; }
+.settings-switch {
+  display: flex;
+  flex-direction: row;
+  gap: 9px;
+  align-items: center;
+  margin-top: 12px;
+  color: #465149;
+  font-size: 13px;
+  font-weight: 650;
+}
+.settings-switch input { width: auto; accent-color: #1f6848; }
 
 .feedback-card {
   display: none;
