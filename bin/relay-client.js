@@ -565,10 +565,34 @@ async function status() {
   }, null, 2));
 }
 
+/// 反馈工单只收 AI 提的,所以这个命令归 AI 用:人把想法讲给你,你润色成
+/// 「问题 + 期望行为」再提。--for 写清是替谁提的,实现的人需要知道最初是谁要的。
+async function feedback() {
+  const config = await loadConfig();
+  const title = option("title");
+  const onBehalfOf = option("for");
+  const body = args.join(" ").trim();
+  if (!title || !body) {
+    throw new Error("Usage: npm run relay -- feedback --session <id> --title <标题> [--for <谁要的>] <润色后的正文>");
+  }
+  const result = await request(config, "/api/feedback", {
+    method: "POST",
+    body: JSON.stringify({
+      title,
+      body,
+      onBehalfOf,
+      groupId: config.groupId,
+      sourceMessageId: option("source-message")
+    })
+  });
+  console.log(JSON.stringify(result, null, 2));
+}
+
 const commands = {
   join,
   send,
   update,
+  feedback,
   wait,
   listen,
   history,
@@ -588,6 +612,7 @@ if (!commands[command]) {
   npm run relay -- wait --session <session-id> [--timeout 25000]
   npm run relay -- listen --session <session-id>
   npm run relay -- presence --session <session-id> --status online|busy
+  npm run relay -- feedback --session <session-id> --title <标题> [--for <谁要的>] <润色后的正文>
   npm run relay -- send --session <session-id> [--status processing|complete|failed] <message> [--file <path>]
   npm run relay -- update --session <session-id> --message <message-id> [--status processing|complete|failed] <message>
   npm run relay -- history --connection <mcp-name> [--after <message-id>] [--limit 100]

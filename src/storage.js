@@ -75,6 +75,8 @@ export class FileStore {
     this.root = path.resolve(root);
     this.groupsDir = path.join(this.root, "groups");
     this.accountsFile = path.join(this.root, "accounts.json");
+    // 反馈工单是全服务器一份,而且不跟着保留期回收:消息是 30 天中转缓冲,工单是待办清单。
+    this.feedbackFile = path.join(this.root, "feedback.json");
     this.uploadTempDir = path.join(this.root, "tmp", "uploads");
     this.groupsById = new Map();
     this.invitesByToken = new Map();
@@ -83,6 +85,7 @@ export class FileStore {
     this.taskQueues = new Map();
     this.approvalQueues = new Map();
     this.accountQueue = Promise.resolve();
+    this.feedbackQueue = Promise.resolve();
   }
 
   async init() {
@@ -291,6 +294,56 @@ export class FileStore {
       approval.updatedAt = new Date().toISOString();
       approval.resolvedAt = approval.updatedAt;
       return { approval };
+    });
+  }
+
+  async listFeedback() {
+    if (!(await exists(this.feedbackFile))) return [];
+    return readJson(this.feedbackFile);
+  }
+
+  async updateFeedback(update) {
+    const next = this.feedbackQueue.then(async () => {
+      const tickets = await this.listFeedback();
+      const result = await update(tickets);
+      await writeJsonAtomic(this.feedbackFile, tickets);
+      return result;
+    });
+    this.feedbackQueue = next.catch(() => {});
+    return next;
+  }
+
+  /// 只有 AI 能提:人的原话先交给自己的 AI 润色,所以工单里记的是「哪个 AI 提的」和
+  /// 「替谁提的」两层 —— 实现的人需要知道这事最初是谁要的。
+  async createFeedback({ author, onBehalfOf, title, body, groupId, sourceMessageId }) {
+    return this.updateFeedback((tickets) => {
+      const createdAt = new Date().toISOString();
+      const ticket = {
+        id: id(),
+        title,
+        body,
+        author,
+        onBehalfOf: onBehalfOf || null,
+        groupId: groupId || null,
+        sourceMessageId: sourceMessageId || null,
+        status: "open",
+        notes: [],
+        createdAt,
+        updatedAt: createdAt
+      };
+      tickets.push(ticket);
+      return ticket;
+    });
+  }
+
+  async updateFeedbackStatus(ticketId, { status, note, byName }) {
+    return this.updateFeedback((tickets) => {
+      const ticket = tickets.find((candidate) => candidate.id === ticketId);
+      if (!ticket) return null;
+      ticket.status = status;
+      ticket.updatedAt = new Date().toISOString();
+      if (note) ticket.notes.push({ at: ticket.updatedAt, by: byName || null, text: note });
+      return ticket;
     });
   }
 

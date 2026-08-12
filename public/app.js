@@ -1505,11 +1505,12 @@ function overviewViewFromHash() {
   if (["#tasks", "#ai-workboard"].includes(hash)) return "tasks";
   if (["#groups", "#my-groups"].includes(hash)) return "groups";
   if (hash === "#settings") return "settings";
+  if (hash === "#feedback") return "feedback";
   return "overview";
 }
 
 function setOverviewView(view, { updateHash = true } = {}) {
-  const nextView = ["overview", "tasks", "groups", "settings"].includes(view) ? view : "overview";
+  const nextView = ["overview", "tasks", "groups", "settings", "feedback"].includes(view) ? view : "overview";
   state.overviewView = nextView;
   const content = $(".overview-content");
   content.dataset.view = nextView;
@@ -1520,6 +1521,112 @@ function setOverviewView(view, { updateHash = true } = {}) {
   content.scrollTop = 0;
   if (updateHash) history.replaceState({}, "", `${location.pathname}${location.search}#${nextView}`);
   if (nextView === "settings") void loadAISettings();
+  if (nextView === "feedback") void loadFeedback();
+}
+
+const feedbackStatusLabels = { open: "待处理", planned: "已排期", done: "已完成", rejected: "不做" };
+
+async function loadFeedback() {
+  // 账号还没就位时先不问:这一步没有身份头,服务端只会回「unknown account」。
+  // 账号加载完会自己画一次。
+  if (!state.email) return;
+  try {
+    const { tickets, counts } = await accountApi("/api/feedback");
+    state.feedback = tickets;
+    state.feedbackCounts = counts;
+    renderFeedback();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function renderFeedbackBadge(counts = state.feedbackCounts) {
+  const badge = $("#feedback-nav-badge");
+  const open = Number(counts?.open ?? 0);
+  badge.textContent = open;
+  badge.classList.toggle("hidden", open === 0);
+}
+
+function renderFeedback() {
+  const tickets = state.feedback ?? [];
+  const counts = state.feedbackCounts ?? {};
+  renderFeedbackBadge(counts);
+  const summary = $("#feedback-summary");
+  summary.innerHTML = "";
+  const filters = [["all", "全部"], ...Object.entries(feedbackStatusLabels)];
+  for (const [key, label] of filters) {
+    const count = key === "all" ? tickets.length : Number(counts[key] ?? 0);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = state.feedbackFilter === key || (!state.feedbackFilter && key === "all") ? "active" : "";
+    button.textContent = `${label} ${count}`;
+    button.addEventListener("click", () => {
+      state.feedbackFilter = key;
+      renderFeedback();
+    });
+    summary.append(button);
+  }
+  const filter = state.feedbackFilter ?? "all";
+  const shown = filter === "all" ? tickets : tickets.filter((ticket) => ticket.status === filter);
+  const list = $("#feedback-list");
+  list.innerHTML = "";
+  $("#feedback-empty").classList.toggle("hidden", shown.length > 0);
+  for (const ticket of shown) list.append(feedbackNode(ticket));
+}
+
+function feedbackNode(ticket) {
+  const item = document.createElement("article");
+  item.className = `feedback-item ${ticket.status}`;
+  const title = document.createElement("h3");
+  const chip = document.createElement("span");
+  chip.className = `feedback-chip ${ticket.status}`;
+  chip.textContent = feedbackStatusLabels[ticket.status] ?? ticket.status;
+  title.append(chip, document.createTextNode(` ${ticket.title}`));
+  const meta = document.createElement("p");
+  meta.className = "feedback-meta";
+  // 两层署名:提交的是 AI(工单只收 AI 提的),但这事最初是谁要的同样要写清。
+  const author = ticket.author?.ownerName
+    ? `${ticket.author.ownerName}’s ${ticket.author.name}`
+    : ticket.author?.name ?? "AI";
+  const asked = ticket.onBehalfOf ? `，替 ${ticket.onBehalfOf} 提` : "";
+  meta.textContent = `${author} 提交${asked} · ${new Date(ticket.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+  const body = document.createElement("p");
+  body.className = "feedback-body";
+  body.textContent = ticket.body;
+  item.append(title, meta, body);
+  for (const note of ticket.notes ?? []) {
+    const line = document.createElement("p");
+    line.className = "feedback-note";
+    line.textContent = `${note.by ?? "有人"}：${note.text}`;
+    item.append(line);
+  }
+  const actions = document.createElement("div");
+  actions.className = "feedback-actions";
+  for (const [status, label] of Object.entries(feedbackStatusLabels)) {
+    if (status === ticket.status) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = `标记为${label}`;
+    button.addEventListener("click", () => void setFeedbackStatus(ticket, status, button));
+    actions.append(button);
+  }
+  item.append(actions);
+  return item;
+}
+
+async function setFeedbackStatus(ticket, status, button) {
+  button.disabled = true;
+  try {
+    await accountApi(`/api/feedback/${ticket.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status })
+    });
+    await loadFeedback();
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
 }
 
 function renderAISettings(providers) {
@@ -1691,11 +1798,13 @@ function showAccountDashboardShell(view = overviewViewFromHash()) {
 }
 
 async function loadAccountDashboard() {
-  const [{ account }, { sessions }, taskData, approvalData] = await Promise.all([
+  const [{ account }, { sessions }, taskData, approvalData, feedbackData] = await Promise.all([
     accountApi("/api/account"),
     accountApi("/api/account/sessions"),
     accountApi("/api/account/tasks"),
-    accountApi("/api/account/approvals")
+    accountApi("/api/account/approvals"),
+    // 一起要,好让侧边栏的反馈角标不用等人点进去才出现。
+    accountApi("/api/feedback").catch(() => ({ tickets: [], counts: {} }))
   ]);
   state.account = account;
   state.accountSessions = sessions;
@@ -1703,6 +1812,10 @@ async function loadAccountDashboard() {
   state.taskSummary = taskData.summary;
   await resolveTaskMessages();
   state.approvals = approvalData.approvals;
+  state.feedback = feedbackData.tickets ?? [];
+  state.feedbackCounts = feedbackData.counts ?? {};
+  // 角标和列表一起画:进入这个视图时账号还没加载完,那次 loadFeedback 是空手回来的。
+  renderFeedback();
   $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
   renderOverviewHeader(account);
   renderOverviewCalendar();
@@ -2483,6 +2596,27 @@ $("#back-to-groups").addEventListener("click", (event) => {
   stopChatRealtime();
   showAccountDashboardShell("groups");
   void showAccountView();
+});
+
+/// 工单只收 AI 提的,所以这里给人一段可以直接粘给自己 AI 的话 —— 否则「让 AI 润色后
+/// 提交」听着像个规矩,做起来却不知道从哪下手。
+$("#feedback-copy-prompt").addEventListener("click", async () => {
+  const owner = accountOwnerName(state.account) || "我";
+  const prompt = `帮我提一个 Group Relay 反馈工单。我的原话是：
+
+「（把你想说的写在这里）」
+
+请先把它润色成清晰的「问题描述 + 期望行为」，不要照抄我的原话，然后用下面任一方式提交（工单只接受 AI 提交）：
+- MCP 工具 submit_feedback，参数 title / body / onBehalfOf="${owner}"
+- 或命令行：npm run relay -- feedback --session <你的 session> --title "<标题>" --for "${owner}" "<润色后的正文>"
+
+提交完把工单标题回给我。`;
+  try {
+    await navigator.clipboard.writeText(prompt);
+    toast("已复制。粘给你的 AI，把原话填进去就行");
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 $("#chat-ai-settings").addEventListener("click", () => {

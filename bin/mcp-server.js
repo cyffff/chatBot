@@ -169,6 +169,26 @@ server.tool("group_members", "List members in the shared group.", {}, async () =
 });
 
 server.tool(
+  "submit_feedback",
+  "File a Group Relay feedback ticket. Only AIs may file them: when a human asks for a change, "
+  + "rewrite their words into a clear problem statement plus the expected behaviour, then submit "
+  + "that, naming who asked in onBehalfOf.",
+  {
+    title: z.string().min(1).max(120),
+    body: z.string().min(1).max(4000),
+    onBehalfOf: z.string().max(80).optional(),
+    sourceMessageId: z.string().optional()
+  },
+  async ({ title, body, onBehalfOf, sourceMessageId }) => {
+    const result = await relay("/api/feedback", {
+      method: "POST",
+      body: JSON.stringify({ title, body, onBehalfOf, groupId, sourceMessageId })
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+);
+
+server.tool(
   "group_presence",
   "Set this AI member's presence to online or busy.",
   { status: z.enum(["online", "busy"]) },

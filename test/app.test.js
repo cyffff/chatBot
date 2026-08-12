@@ -2347,3 +2347,70 @@ test("an edit that landed while the client was away comes back on the next open"
     false
   );
 });
+
+test("feedback tickets are only accepted from an AI, and only people can triage them", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "反馈", email: "owner@example.com", displayName: "Yunfei" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ provider: "claude" })
+  });
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+
+  // 人自己提要被挡住,并且要被告诉去找自己的 AI —— 一句原话没法直接开工
+  const byHuman = await json(base, "/api/feedback", {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ title: "这里不好用", body: "反正就是不好用" })
+  });
+  assert.equal(byHuman.response.status, 403);
+  assert.match(byHuman.body.error, /AI/);
+
+  const byAi = await json(base, "/api/feedback", {
+    method: "POST",
+    headers: ai,
+    body: JSON.stringify({
+      title: "开群时应当先显示本机记录",
+      body: "现象：打开群组要等两个接口回来才出现内容。\n期望：本机已有副本时先渲染，再用服务端结果对齐。",
+      onBehalfOf: "Zoe",
+      groupId
+    })
+  });
+  assert.equal(byAi.response.status, 201);
+  assert.equal(byAi.body.ticket.status, "open");
+  assert.equal(byAi.body.ticket.author.id, "ai:owner@example.com:claude");
+  assert.equal(byAi.body.ticket.author.ownerName, "Yunfei");
+  assert.equal(byAi.body.ticket.onBehalfOf, "Zoe");
+
+  const listed = await json(base, "/api/feedback", { headers: owner });
+  assert.equal(listed.body.tickets.length, 1);
+  assert.equal(listed.body.counts.open, 1);
+
+  // 定级和关单反过来只有人能做
+  const aiTriage = await json(base, `/api/feedback/${byAi.body.ticket.id}`, {
+    method: "PATCH",
+    headers: ai,
+    body: JSON.stringify({ status: "done" })
+  });
+  assert.equal(aiTriage.response.status, 403);
+
+  const triaged = await json(base, `/api/feedback/${byAi.body.ticket.id}`, {
+    method: "PATCH",
+    headers: owner,
+    body: JSON.stringify({ status: "done", note: "已上线" })
+  });
+  assert.equal(triaged.response.status, 200);
+  assert.equal(triaged.body.ticket.status, "done");
+  assert.deepEqual(triaged.body.ticket.notes.map((note) => [note.by, note.text]), [["Yunfei", "已上线"]]);
+
+  // 工单存在服务器根目录,不在群目录里 —— 它是待办清单,不跟着消息的保留期被回收
+  const persisted = JSON.parse(await fs.readFile(path.join(dataDir, "feedback.json"), "utf8"));
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].title, "开群时应当先显示本机记录");
+});

@@ -84,6 +84,7 @@
               <a href="#groups" data-overview-view="groups">◫ <span>我的群组</span></a>
             </div>
             <div class="overview-sidebar-footer">
+              <a href="#feedback" data-overview-view="feedback">✎ <span>反馈</span><b id="feedback-nav-badge" class="nav-badge hidden">0</b></a>
               <a class="overview-settings-link" href="#settings" data-overview-view="settings">⚙ <span>设置</span></a>
               <div class="sidebar-account-actions">
                 <small id="account-email"></small>
@@ -305,6 +306,20 @@
                 </article>
               </div>
               <p class="settings-footnote">未配置 Key 时仍可使用已登录的本机 CLI 账号。保存新 Key 后，后台 AI 的下一次回复会自动使用它。</p>
+            </section>
+
+            <section id="feedback" class="feedback-card">
+              <div class="settings-heading">
+                <div>
+                  <p class="eyebrow">FEEDBACK</p>
+                  <h2>反馈工单</h2>
+                  <p class="muted compact">只接受 AI 提交的工单。把想法讲给自己的 AI，让它润色成「问题 + 期望行为」后替你提交 —— 一句「这里不好用」没法直接开工。</p>
+                </div>
+                <button id="feedback-copy-prompt" class="secondary" type="button">复制给 AI 的话</button>
+              </div>
+              <div id="feedback-summary" class="feedback-summary"></div>
+              <div id="feedback-list" class="feedback-list"></div>
+              <p id="feedback-empty" class="task-empty hidden">还没有工单。在任意群里 @ 你的 AI，让它替你提第一个。</p>
             </section>
           </div>
         </div>
