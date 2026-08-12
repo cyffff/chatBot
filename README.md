@@ -601,6 +601,7 @@ Cursor 在 `.cursor/mcp.json` 中配置相同 command、args 和 env。
 | 工具 | 用途 |
 | --- | --- |
 | `group_send` | 发送消息或创建处理占位 |
+| `group_send_file` | 生成 md/html/docx/xlsx/pdf/csv/图片等文件并作为可下载附件发给真人 |
 | `group_update` | 原位更新自己的消息 |
 | `group_history` | 读取历史或增量消息 |
 | `group_wait` | 等待最长 30 秒 |
@@ -608,6 +609,14 @@ Cursor 在 `.cursor/mcp.json` 中配置相同 command、args 和 env。
 | `group_presence` | 上报在线或忙碌状态 |
 
 发送和更新必须提供当前 session 的 `expectedGroupId`，服务会拒绝跨群发送。
+
+`group_send_file` 让 AI 把自己生成的产物交付给真人下载：先在本机生成文件，再用
+`filePath` 从磁盘附带，或用 `content` + `filename` 直接内联发送（二进制走 `encoding: "base64"`）。
+可选 `text` 作为附言，`mentionIds` @ 具体的人。附件在会话里显示为下载链接，图片额外显示缩略图。
+类型按扩展名自动推断（可用 `mimeType` 覆盖），单个文件上限 `GROUP_RELAY_MAX_FILE_MB`（默认 25MB）。
+下载路由对非图片一律用 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`
+强制下载，因此 AI 生成的 HTML 不会在本站源里被当页面执行。Codex/CLI 一侧对应
+`npm run relay -- send ... --file <path>`。
 
 ## HTTP API
 

@@ -2,6 +2,31 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+// 附件默认类型表:光靠扩展名给浏览器一个像样的 Content-Type,md/docx/pdf 之类能被正确
+// 识别并下载,认不出的一律 octet-stream(下载路由会强制 attachment,不会当页面渲染)。
+const MIME_BY_EXT = {
+  ".md": "text/markdown", ".markdown": "text/markdown",
+  ".html": "text/html", ".htm": "text/html",
+  ".txt": "text/plain", ".log": "text/plain",
+  ".csv": "text/csv", ".tsv": "text/tab-separated-values",
+  ".json": "application/json", ".xml": "application/xml",
+  ".yaml": "text/yaml", ".yml": "text/yaml",
+  ".pdf": "application/pdf",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".zip": "application/zip", ".gz": "application/gzip",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+  ".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp"
+};
+
+const maxFileBytes = Number(process.env.GROUP_RELAY_MAX_FILE_MB ?? 25) * 1024 * 1024;
 
 const baseUrl = (process.env.GROUP_RELAY_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const groupId = process.env.GROUP_RELAY_GROUP_ID;
@@ -115,6 +140,64 @@ server.tool(
     });
     await reportPresence(status === "processing" ? "busy" : "online");
     return { content: [{ type: "text", text: JSON.stringify({ group, message: result.message }) }] };
+  }
+);
+
+server.tool(
+  "group_send_file",
+  "Deliver a generated file (Markdown, HTML, docx, xlsx, pdf, csv, png, …) to the group so a "
+  + "human can download it. Generate the file on this machine first, then either pass filePath to "
+  + "attach it from disk, or pass inline content plus a filename. Add an optional text caption. The "
+  + "file appears in the conversation as a download link; images also show a thumbnail.",
+  {
+    expectedGroupId: z.string().uuid(),
+    filePath: z.string().min(1).optional().describe("Absolute or relative path to a file on this machine"),
+    content: z.string().optional().describe("Inline file contents; requires filename"),
+    encoding: z.enum(["utf8", "base64"]).default("utf8")
+      .describe("How content is encoded — use base64 for binary files"),
+    filename: z.string().min(1).max(200).optional()
+      .describe("Name shown to the user; required with content, defaults to the basename of filePath"),
+    mimeType: z.string().max(120).optional().describe("Override the auto-detected content type"),
+    text: z.string().max(20_000).optional().describe("Optional message caption sent alongside the file"),
+    status: z.enum(["processing", "complete", "failed"]).default("complete"),
+    mentionIds: z.array(z.string()).max(20).optional()
+  },
+  async ({ expectedGroupId, filePath, content, encoding, filename, mimeType, text, status, mentionIds = [] }) => {
+    const group = await assertExpectedGroup(expectedGroupId);
+    let bytes;
+    let name;
+    if (filePath) {
+      bytes = await fs.readFile(filePath);
+      name = filename || path.basename(filePath);
+    } else if (content != null) {
+      if (!filename) throw new Error("filename is required when sending inline content");
+      bytes = Buffer.from(content, encoding === "base64" ? "base64" : "utf8");
+      name = filename;
+    } else {
+      throw new Error("Provide either filePath or content");
+    }
+    if (!name) throw new Error("Could not determine a filename for the attachment");
+    if (bytes.length === 0) throw new Error("Refusing to send an empty file");
+    if (bytes.length > maxFileBytes) {
+      throw new Error(
+        `File is ${(bytes.length / 1_048_576).toFixed(1)}MB, over the `
+        + `${(maxFileBytes / 1_048_576).toFixed(0)}MB attachment limit`
+      );
+    }
+    const type = mimeType || MIME_BY_EXT[path.extname(name).toLowerCase()] || "application/octet-stream";
+    const form = new FormData();
+    if (text) form.set("text", text);
+    form.set("status", status);
+    form.set("mentions", JSON.stringify(mentionIds));
+    form.set("files", new Blob([bytes], { type }), name);
+    const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
+    await reportPresence(status === "processing" ? "busy" : "online");
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ group, message: result.message, attachments: result.message?.attachments ?? [] })
+      }]
+    };
   }
 );
 

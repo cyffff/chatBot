@@ -1345,7 +1345,13 @@ export async function createApp(options = {}) {
   app.get("/api/groups/:groupId/attachments/:day/:diskName", requireMember, async (req, res, next) => {
     try {
       const file = store.attachmentPath(req.params.groupId, req.params.day, req.params.diskName);
-      res.set("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(req.params.diskName.slice(37))}`);
+      const downloadName = req.params.diskName.slice(37);
+      // 图片内联显示缩略图;其它一律 attachment 强制下载 —— agent 现在会生成 HTML 之类的
+      // 附件,内联渲染等于在本站源里跑它的脚本(存储型 XSS)。nosniff 再堵掉浏览器猜类型。
+      const inlineTypes = new Set([".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".bmp", ".ico"]);
+      const disposition = inlineTypes.has(path.extname(downloadName).toLowerCase()) ? "inline" : "attachment";
+      res.set("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
+      res.set("X-Content-Type-Options", "nosniff");
       res.sendFile(file);
     } catch (error) {
       next(error);

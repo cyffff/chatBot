@@ -1474,6 +1474,96 @@ test("MCP send rejects a mismatched expected group ID", async (t) => {
   assert.equal(history.body.messages.length, 0);
 });
 
+test("group_send_file delivers a generated attachment humans can download", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Deliverables", email: "yunfei@example.com", displayName: "Yunfei" })
+  });
+  const joined = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "yunfei@example.com", name: "Claude", type: "ai", provider: "claude" })
+  });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpServer],
+    env: {
+      ...process.env,
+      GROUP_RELAY_URL: base,
+      GROUP_RELAY_GROUP_ID: created.body.group.id,
+      GROUP_RELAY_EMAIL: joined.body.member.email,
+      GROUP_RELAY_PROVIDER: joined.body.member.provider
+    }
+  });
+  const client = new Client({ name: "group-relay-test", version: "1.0.0" });
+  await client.connect(transport);
+  t.after(() => client.close());
+
+  const report = "# Weekly report\n\nAll green.";
+  const sent = await client.callTool({
+    name: "group_send_file",
+    arguments: {
+      expectedGroupId: created.body.group.id,
+      content: report,
+      filename: "report.md",
+      text: "这是本周报告"
+    }
+  });
+  assert.notEqual(sent.isError, true);
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
+  });
+  assert.equal(history.body.messages.length, 1);
+  const [message] = history.body.messages;
+  assert.equal(message.text, "这是本周报告");
+  assert.equal(message.attachments.length, 1);
+  assert.equal(message.attachments[0].name, "report.md");
+  assert.equal(message.attachments[0].mimeType, "text/markdown");
+
+  const download = await fetch(`${base}${message.attachments[0].url}`, {
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
+  });
+  assert.equal(download.status, 200);
+  assert.match(download.headers.get("content-disposition"), /^attachment;/);
+  assert.equal(download.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(await download.text(), report);
+
+  // 拒绝空内容且缺少来源的调用,避免发出无意义的空附件。
+  const empty = await client.callTool({
+    name: "group_send_file",
+    arguments: { expectedGroupId: created.body.group.id }
+  });
+  assert.equal(empty.isError, true);
+});
+
+test("attachment downloads force non-images to download and keep images inline", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Disposition", email: "owner@example.com", displayName: "Owner" })
+  });
+  const headers = { ...asMember(created.body.member.email, created.body.member.provider) };
+  const form = new FormData();
+  form.set("files", new Blob(["<h1>hi</h1>"], { type: "text/html" }), "page.html");
+  form.append("files", new Blob(["PNGDATA"], { type: "image/png" }), "shot.png");
+  const posted = await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers,
+    body: form
+  });
+  assert.equal(posted.status, 201);
+  const { message } = await posted.json();
+  const byName = Object.fromEntries(message.attachments.map((file) => [file.name, file]));
+
+  const html = await fetch(`${base}${byName["page.html"].url}`, { headers });
+  assert.match(html.headers.get("content-disposition"), /^attachment;/);
+  assert.equal(html.headers.get("x-content-type-options"), "nosniff");
+
+  const png = await fetch(`${base}${byName["shot.png"].url}`, { headers });
+  assert.match(png.headers.get("content-disposition"), /^inline;/);
+});
+
 test("one AI session switches groups and disconnects its previous membership", async (t) => {
   const { base, dataDir } = await fixture(t);
   const first = await json(base, "/api/groups", {
