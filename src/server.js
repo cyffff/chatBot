@@ -56,8 +56,10 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`${signal} received; draining`);
+    // 不主动掐空闲连接:cloudflared 对源站是 keep-alive,强关的那一瞬它可能正往这个 socket
+    // 上写请求 —— 那就是发布窗口里最后残留的那个 502。server.close() 之后 Node 会在每个
+    // 连接自然空闲时给它带上 Connection: close 再收掉,竞态就没有了。
     server.close(() => process.exit(0));
-    server.closeIdleConnections();
     setTimeout(() => {
       server.closeAllConnections();
       process.exit(0);
