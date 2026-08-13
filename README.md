@@ -180,14 +180,22 @@ Cloudflare 作为另一个长期进程运行：
 cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
 ```
 
-更新服务：
+更新服务（零停机，别用 `systemctl restart`）：
 
 ```bash
 cd /absolute/path/to/chatBot
 git pull
 npm ci --omit=dev
-# 然后通过进程管理器重启 group-relay
+sudo systemctl start group-relay-standby   # 同端口的备用实例，靠 SO_REUSEPORT 并存
+bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备用，每步都过健康检查
 ```
+
+直接 `systemctl restart` 会让 :8787 空一两秒，cloudflared 立刻对外回 502，并且把挂着的
+25 秒长轮询全部切断——桥接会把在飞的 AI 任务标成失败。`bin/zero-downtime-restart.sh`
+配合 `deploy/group-relay-standby.service` 可以避免：进程收到 SIGTERM 时先把长轮询按
+「这一轮没有新消息」正常放掉、SSE 正常结束，并且从那一刻起不再让任何请求挂着，然后才停止
+监听。实测发布窗口内外网 168 次请求全部 200，cloudflared 源站错误 0 次。
+
 
 ### 环境变量
 
