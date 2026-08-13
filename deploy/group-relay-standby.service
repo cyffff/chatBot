@@ -8,8 +8,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=cyf1379156282
-WorkingDirectory=/home/cyf1379156282/chatBot
+# 安装时改成实际运行账号(仓库里不写真实用户名/路径)
+User=REPLACE_WITH_SERVICE_USER
+WorkingDirectory=/REPLACE/WITH/CHECKOUT/PATH
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 Environment=PORT=8787

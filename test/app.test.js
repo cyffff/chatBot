@@ -2086,7 +2086,7 @@ test("an old device identity binds an email and takes its groups with it", async
   const claimed = await json(base, "/api/account/claim", {
     method: "POST",
     headers: { "X-Relay-Email": deviceEmail },
-    body: JSON.stringify({ email: "yunfei.cao@astratech.ae" })
+    body: JSON.stringify({ email: "yunfei@example.com" })
   });
   assert.equal(claimed.response.status, 200);
   assert.deepEqual(
@@ -2096,25 +2096,25 @@ test("an old device identity binds an email and takes its groups with it", async
 
   // 群跟着邮箱走了
   const sessions = await json(base, "/api/account/sessions", {
-    headers: { "X-Relay-Email": "yunfei.cao@astratech.ae" }
+    headers: { "X-Relay-Email": "yunfei@example.com" }
   });
   assert.deepEqual(sessions.body.sessions.map((s) => s.group.name), ["设备身份建的群"]);
   assert.deepEqual(
     (await store.listMembers(groupId)).map((member) => member.id).sort(),
-    ["ai:yunfei.cao@astratech.ae:codex", "human:yunfei.cao@astratech.ae"]
+    ["ai:yunfei@example.com:codex", "human:yunfei@example.com"]
   );
 
   // 缓冲区里的发言人和 @ 对象一起改写,否则旧消息的 mention 全部失配
   const [buffered] = await store.readMessages(groupId);
-  assert.equal(buffered.sender.id, "human:yunfei.cao@astratech.ae");
-  assert.deepEqual(buffered.mentions.map((m) => m.id), ["ai:yunfei.cao@astratech.ae:codex"]);
+  assert.equal(buffered.sender.id, "human:yunfei@example.com");
+  assert.deepEqual(buffered.mentions.map((m) => m.id), ["ai:yunfei@example.com:codex"]);
 
   // 群里的人认的是设备身份那个昵称,继承过来(目标账号从没设过昵称时)
-  assert.equal((await store.accountByEmail("yunfei.cao@astratech.ae")).displayName, "yunfei.cao");
+  assert.equal((await store.accountByEmail("yunfei@example.com")).displayName, "yunfei.cao");
 
   // claim 之前已经以成员身份加入过的群,不能在列表里出现两次
   const twice = await json(base, "/api/account/sessions", {
-    headers: { "X-Relay-Email": "yunfei.cao@astratech.ae" }
+    headers: { "X-Relay-Email": "yunfei@example.com" }
   });
   assert.equal(twice.body.sessions.filter((s) => s.group.id === groupId).length, 1);
 
