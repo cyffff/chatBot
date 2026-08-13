@@ -2188,7 +2188,7 @@ test("one invite link serves a browser and an AI differently", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "自主接入", email: "owner@astratech.ae", displayName: "Owner" })
+    body: JSON.stringify({ name: "自主接入", email: "owner@example.com", displayName: "Owner" })
   });
   const token = created.body.group.inviteToken;
   const groupId = created.body.group.id;
@@ -2200,13 +2200,13 @@ test("one invite link serves a browser and an AI differently", async (t) => {
 
   // AI:curl 那种 */*,拿到纯文本接入说明,身份从链接参数填进去
   const asAgent = await fetch(
-    `${base}/join/${token}?owner=${encodeURIComponent("Owner")}&email=${encodeURIComponent("owner@astratech.ae")}`,
+    `${base}/join/${token}?owner=${encodeURIComponent("Owner")}&email=${encodeURIComponent("owner@example.com")}`,
     { headers: { Accept: "*/*" } }
   );
   assert.equal(asAgent.headers.get("content-type")?.includes("text/plain"), true);
   const sheet = await asAgent.text();
   assert.match(sheet, /npm run relay -- join/);
-  assert.match(sheet, /--email "owner@astratech\.ae"/);
+  assert.match(sheet, /--email "owner@example\.com"/);
   assert.match(sheet, /--owner "Owner"/);
   assert.ok(sheet.includes(groupId), "说明里要有群组 id 供 AI 自查");
   assert.match(sheet, /GROUP_RELAY_APPROVAL_REQUIRED/);
@@ -2270,32 +2270,32 @@ test("an invite link's identity params never speak for whoever opens it", async 
   const { base, store } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
-    body: JSON.stringify({ name: "转发的邀请", email: "zoe@astratech.ae", displayName: "Zoe" })
+    body: JSON.stringify({ name: "转发的邀请", email: "zoe@example.com", displayName: "Zoe" })
   });
   const token = created.body.group.inviteToken;
   const groupId = created.body.group.id;
 
   // AI 读的说明里必须有身份,这是参数存在的理由
   const sheet = await (await fetch(
-    `${base}/join/${token}?owner=Zoe&email=zoe%40astratech.ae`, { headers: { Accept: "*/*" } }
+    `${base}/join/${token}?owner=Zoe&email=zoe%40example.com`, { headers: { Accept: "*/*" } }
   )).text();
-  assert.match(sheet, /--email "zoe@astratech\.ae"/);
+  assert.match(sheet, /--email "zoe@example\.com"/);
 
   // 同事收到同一条链接后自己填邮箱加入,必须是独立身份,而不是变成 Zoe
   const joined = await json(base, `/api/invites/${token}/join`, {
     method: "POST",
-    body: JSON.stringify({ email: "yizhen@astratech.ae", name: "Yizhen", type: "human" })
+    body: JSON.stringify({ email: "yizhen@example.com", name: "Yizhen", type: "human" })
   });
   assert.equal(joined.response.status, 201);
-  assert.equal(joined.body.member.id, "human:yizhen@astratech.ae");
+  assert.equal(joined.body.member.id, "human:yizhen@example.com");
 
   const members = await store.listMembers(groupId);
   assert.deepEqual(
     members.map((member) => `${member.name}(${member.id})`).sort(),
-    ["Yizhen(human:yizhen@astratech.ae)", "Zoe(human:zoe@astratech.ae)"]
+    ["Yizhen(human:yizhen@example.com)", "Zoe(human:zoe@example.com)"]
   );
   // Zoe 的昵称不能被后来者改掉
-  assert.equal((await store.accountByEmail("zoe@astratech.ae")).displayName, "Zoe");
+  assert.equal((await store.accountByEmail("zoe@example.com")).displayName, "Zoe");
 });
 
 test("an AI can still fill in its placeholder after the day file was compressed", async (t) => {
@@ -2717,4 +2717,36 @@ test("an AI fetching the invite link gets the onboarding sheet, not the web page
   // 平台自己的需求要走反馈队列,不能让群里的 AI 顺手改掉 —— 免审批之下这条尤其重要
   assert.match(sheet, /不要自己动手实现/);
   assert.match(sheet, /会走反馈队列统一实现/);
+});
+
+// 公开仓库里不该出现真人身份和这台机器的细节。今天两次 git add -A 都差点(有一次真的)把
+// 不该进去的东西带上 main,所以把这条变成会红的测试,而不是一句「以后注意」。
+test("the tracked tree carries no real identities, hosts or credentials", async () => {
+  const { stdout: tracked } = await execFileAsync("git", ["ls-files"], { maxBuffer: 10 * 1024 * 1024 });
+  const files = tracked.split("\n").filter(Boolean);
+  const forbidden = [
+    // 模式用拼接写:上一版直接写成字面量,被我一次整串替换连带改掉,于是它开始举报所有
+    // 正常使用 example.com 的文件。拼起来就不会再被这类批量替换误伤。
+    { pattern: new RegExp(["astratech", "\\.", "ae"].join("")), why: "真实公司域名" },
+    { pattern: /trycloudflare\.com\/[a-zA-Z0-9]/, why: "隧道上的具体路径(无鉴权入口)" },
+    { pattern: /\b35\.211\.6\.86\b/, why: "服务器 IP" },
+    { pattern: /cyf1379156282/, why: "服务器账号名" },
+    { pattern: /\b(gho|ghp|ghs)_[A-Za-z0-9]{20,}/, why: "GitHub token" },
+    { pattern: /sk-ant-[A-Za-z0-9-]{20,}/, why: "Anthropic key" },
+    { pattern: /BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY/, why: "私钥" }
+  ];
+  const offenders = [];
+  for (const file of files) {
+    if (file === "test/app.test.js") continue;   // 这条测试自己写着这些模式
+    let content;
+    try {
+      content = await fs.readFile(file, "utf8");
+    } catch {
+      continue;   // 二进制或已删除
+    }
+    for (const { pattern, why } of forbidden) {
+      if (pattern.test(content)) offenders.push(`${file}: ${why}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
 });
