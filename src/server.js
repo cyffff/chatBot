@@ -44,6 +44,27 @@ server.on("error", (error) => {
   });
 });
 
+/// 收到 SIGTERM 先停止 accept,再把在飞请求放完。这一步是 502 的另一半原因:
+/// 进程原来根本不理 SIGTERM,systemd 等满 90 秒再 SIGKILL,而 SO_REUSEPORT 下被强杀的那个
+/// socket 上已经排队的连接会直接断,对外就是 502。停止 accept 之后内核只把新连接投给还活着
+/// 的那个实例,所以换实例时端口既不空、也不丢连接。
+/// SSE 和 25 秒长轮询不会自己结束,给它们 5 秒然后一起关掉 —— 客户端本来就会重连,
+/// 断线期间错过的编辑由 updatedSince 追赶补齐。
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`${signal} received; draining`);
+    server.close(() => process.exit(0));
+    server.closeIdleConnections();
+    setTimeout(() => {
+      server.closeAllConnections();
+      process.exit(0);
+    }, 5_000).unref();
+  });
+}
+
 const messageDays = Number(process.env.GROUP_RELAY_MESSAGE_RETENTION_DAYS ?? 30);
 const attachmentHours = Number(process.env.GROUP_RELAY_ATTACHMENT_RETENTION_HOURS ?? 720);
 

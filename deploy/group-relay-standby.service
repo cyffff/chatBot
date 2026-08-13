@@ -18,6 +18,8 @@ Environment=MAX_FILE_SIZE_MB=25
 Environment=NODE_OPTIONS=--max-old-space-size=384
 ExecStart=/usr/bin/node src/server.js
 Restart=no
+# 优雅退出只需要几秒;别让 systemd 干等 90 秒再 SIGKILL(强杀会丢在飞连接)。
+TimeoutStopSec=12
 MemoryMax=500M
 StandardOutput=journal
 StandardError=journal
