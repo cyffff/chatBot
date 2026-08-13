@@ -259,7 +259,8 @@ test("desktop account AI can join a linked group, answer every member and leave"
     headers: { ...asMember(attached.body.worker.email, attached.body.worker.provider) }
   });
   // 开了免审批之后,群里其他人的消息落在只读档:能让这个 AI 干只读的活,改本机仍要主人批。
-  assert.deepEqual(routed.body.messages.map((message) => message.executionScope), ["readonly", "trusted"]);
+  // 免审批 = 群内所有人全权:客人的指令也直接执行(设备主人明确要求的行为)。
+  assert.deepEqual(routed.body.messages.map((message) => message.executionScope), ["trusted", "trusted"]);
 
   const sessions = await json(base, "/api/account/sessions", { headers: accountHeaders });
   assert.equal(sessions.body.sessions[0].desktopAis.length, 1);
@@ -909,7 +910,7 @@ test("the group owner can grant trusted execution to a legacy AI", async (t) => 
   );
   assert.deepEqual(
     routed.body.messages.map((message) => [message.text, message.executionScope]),
-    [["owner command", "trusted"], ["guest command", "readonly"]]
+    [["owner command", "trusted"], ["guest command", "trusted"]]
   );
 });
 
@@ -2512,7 +2513,7 @@ test("feedback tickets are only accepted from an AI, and only people can triage 
   assert.equal(persisted[0].title, "开群时应当先显示本机记录");
 });
 
-test("trusted execution opens read-only work to the rest of the group, writes still need the owner", async (t) => {
+test("trusted execution lets the whole group drive the AI, and off means only the owner", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {
     method: "POST",
@@ -2574,9 +2575,14 @@ test("trusted execution opens read-only work to the rest of the group, writes st
   });
   const scopes = await scopesFor();
   assert.equal(scopes["主人的第二条"], "trusted");
-  assert.equal(scopes["客人的第二条"], "readonly");
+  // senderIsOwner 区分「谁发的」:桥接用它决定别人的指令要不要先要求一个具体项目目录
+  const routedAll = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=50`, { headers: aiHeaders });
+  const ownership = Object.fromEntries(routedAll.body.messages.map((m) => [m.text, m.senderIsOwner]));
+  assert.equal(ownership["主人的第二条"], true);
+  assert.equal(ownership["客人的第二条"], false);
+  assert.equal(scopes["客人的第二条"], "trusted");
   // 开关之前的那两条也跟着按当前设置解释,不会留在旧档上
-  assert.equal(scopes["客人的第一条"], "readonly");
+  assert.equal(scopes["客人的第一条"], "trusted");
   assert.equal(guest.body.member.type, "human");
 
   // 关掉就回到谁都不执行
