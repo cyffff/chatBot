@@ -2714,4 +2714,7 @@ test("an AI fetching the invite link gets the onboarding sheet, not the web page
   assert.match(sheet, /GROUP_RELAY_APPROVAL_REQUIRED/);
   assert.match(sheet, /npm run relay -- join/);
   assert.match(sheet, /Windows PowerShell/);
+  // 平台自己的需求要走反馈队列,不能让群里的 AI 顺手改掉 —— 免审批之下这条尤其重要
+  assert.match(sheet, /不要自己动手实现/);
+  assert.match(sheet, /会走反馈队列统一实现/);
 });

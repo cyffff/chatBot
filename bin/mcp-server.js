@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { loadSecurityConfig, assertFilePathSendable } from "./security.js";
 
 // 附件默认类型表:光靠扩展名给浏览器一个像样的 Content-Type,md/docx/pdf 之类能被正确
 // 识别并下载,认不出的一律 octet-stream(下载路由会强制 attachment,不会当页面渲染)。
@@ -29,6 +30,9 @@ const MIME_BY_EXT = {
 // 和服务端同一个变量(src/app.js 读的是 MAX_FILE_SIZE_MB)。名字不一致的话,把服务端上限
 // 调小之后这里仍然放行,失败会变成 multer 的报错而不是一句说得清的提示。
 const maxFileBytes = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
+
+// 本机数据安全策略,进程启动时读一次(三个开关默认关闭,行为与历史一致)。
+const security = loadSecurityConfig();
 
 const baseUrl = (process.env.GROUP_RELAY_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const groupId = process.env.GROUP_RELAY_GROUP_ID;
@@ -169,6 +173,8 @@ server.tool(
     let bytes;
     let name;
     if (filePath) {
+      // 附本机文件前先过数据安全策略:文件下载开关、目录结构开关、目录白名单。
+      await assertFilePathSendable(filePath, security);
       bytes = await fs.readFile(filePath);
       name = filename || path.basename(filePath);
     } else if (content != null) {
