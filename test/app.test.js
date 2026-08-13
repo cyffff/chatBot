@@ -1289,6 +1289,66 @@ exit 1
   assert.equal(history.body.messages.at(-1).status, "complete");
 });
 
+test("the cross-platform worker keeps a Claude session online without any desktop client", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Headless Group", email: "owner@example.com", displayName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "headless-session.json");
+  // claude 走 stdout(没有 -o 文件),这是 codex 之外的另一条取回复路径
+  const fakeClaude = path.join(dataDir, "fake-claude");
+  await fs.writeFile(fakeClaude, `#!/bin/sh
+printf '%s\\n' '命令行 worker 已回复'
+exit 0
+`, { mode: 0o700 });
+  const workerEnv = {
+    ...process.env,
+    GROUP_RELAY_AGENT_CONFIG: configFile,
+    // 别碰真机的注册表
+    GROUP_RELAY_LOCAL_WORKERS: path.join(dataDir, "local-workers.json")
+  };
+
+  const joined = await execFileAsync(process.execPath, [
+    relayClient, "join", created.body.inviteUrl.replace("http://relay.test", base),
+    "--provider", "claude", "--owner", "Yunfei", "--email", "yunfei@example.com", "--name", "Claude"
+  ], { env: workerEnv });
+  const aiMemberId = JSON.parse(joined.stdout).member.id;
+
+  const question = new FormData();
+  question.set("text", "@Claude 没有桌面客户端也该有人应");
+  question.set("mentions", JSON.stringify([aiMemberId]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
+    body: question
+  });
+
+  const ran = await execFileAsync(process.execPath, [
+    relayClient, "worker", "--once", "--agent-bin", fakeClaude
+  ], { env: workerEnv, timeout: 20_000 });
+  assert.equal(JSON.parse(ran.stdout).handled, 1);
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
+  });
+  const reply = history.body.messages.at(-1);
+  assert.equal(reply.text, "命令行 worker 已回复");
+  assert.equal(reply.sender.id, aiMemberId);
+  assert.equal(reply.status, "complete");
+  // 原地回填:占位和最终回复是同一条消息,不是两条
+  assert.equal(reply.replyTo, history.body.messages.at(-2).id);
+  // 原地回填:这条问题只换来一条 AI 消息(占位被改写),不是占位 + 回复两条。
+  // 群里另有一条是 join 时的「已加入群聊」通告,所以按 replyTo 数,不按发送者数。
+  assert.equal(
+    history.body.messages.filter((message) => message.replyTo === reply.replyTo).length,
+    1
+  );
+  // cursor 落盘了,重启之后不会把同一条再跑一遍
+  const saved = JSON.parse(await fs.readFile(configFile, "utf8"));
+  assert.ok(saved.cursor);
+});
+
 test("Codex Mac hooks mark busy, create a placeholder and fill the final reply", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {

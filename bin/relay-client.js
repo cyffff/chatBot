@@ -344,8 +344,25 @@ async function join() {
       placeholder: codexBinding.placeholder
     } : null,
     localWorker,
+    headlessWorker: background ? await headlessHint(config) : null,
     configFile
   }, null, 2));
+}
+
+/// `--background` 只是往本机注册表写一条,真正执行要么靠桌面客户端每十秒读一次那份清单,
+/// 要么靠 `relay worker` 这个常驻进程。检测不到桌面客户端时得说清下一步 —— 否则 AI 以为
+/// 自己已经在线,群里 @ 它却永远没人应。
+async function headlessHint(config) {
+  if (process.platform === "darwin") {
+    const installed = await fs.stat("/Applications/Group Relay.app").then(() => true).catch(() => false);
+    if (installed) return null;
+  }
+  const registry = await fs.readFile(localWorkersFile, "utf8").then(JSON.parse).catch(() => null);
+  const desktopRunning = Object.keys(registry?.workers ?? {}).some((id) => id.startsWith("desktop-"));
+  if (desktopRunning) return null;
+  return "这台机器上没有检测到 Group Relay 桌面客户端,注册表里的条目不会有人执行。"
+    + `请让这个进程常驻:npm run relay -- worker --session ${config.sessionId ?? sessionId}`
+    + "(前台运行即可;要后台可以配 systemd / nohup / Windows 计划任务)。";
 }
 
 async function backgroundWorker() {
@@ -355,7 +372,12 @@ async function backgroundWorker() {
   }
   const disable = flag("disable");
   const result = await updateLocalWorker(config, !disable);
-  console.log(JSON.stringify({ ...result, provider: config.provider, groupId: config.groupId }, null, 2));
+  console.log(JSON.stringify({
+    ...result,
+    provider: config.provider,
+    groupId: config.groupId,
+    headlessWorker: disable ? null : await headlessHint(config)
+  }, null, 2));
 }
 
 async function desktopWorker() {
@@ -380,6 +402,39 @@ async function desktopWorker() {
     desktopWorkerEnabled: enabled,
     member: result.member
   }, null, 2));
+}
+
+/// 跨平台常驻:自己就是那个执行体,不再依赖桌面客户端来拉起 worker。
+/// Linux/服务器/纯命令行 Windows 上「把邀请链接发给自己的 AI」之后,靠这条命令保持在线。
+async function worker() {
+  const config = await loadConfig();
+  const once = flag("once");
+  const model = option("model");
+  const agentBin = option("agent-bin");
+  const logFile = option("log");
+  const { runWorker, fileLogger, stderrLog } = await import("./relay-worker.js");
+  const log = logFile ? await fileLogger(logFile) : stderrLog;
+  // 同一台机器上如果桌面客户端也在跑同一个群的 worker,两边会各回一次(服务端已按「先来先领」
+  // 去重,但白烧一份额度)。提醒一句,并给出关掉那一个的办法。
+  const registry = await fs.readFile(localWorkersFile, "utf8").then(JSON.parse).catch(() => null);
+  const desktopSame = Object.entries(registry?.workers ?? {})
+    .find(([id, entry]) => id.startsWith("desktop-") && entry?.groupId === config.groupId);
+  if (desktopSame) {
+    log(`注意:本机桌面客户端也在跑这个群的 worker(${desktopSame[0]})。`
+      + `要只留命令行这一个,执行 npm run relay -- desktop-worker --session <id> --disable`);
+  }
+  const result = await runWorker({
+    config,
+    configFile,
+    saveConfig,
+    once,
+    model,
+    agentBin,
+    log,
+    // 不在群里了就把本机注册表那条清掉,别让任何人再把它拉起来。
+    onMembershipGone: () => updateLocalWorker(config, false).catch(() => null)
+  });
+  console.log(JSON.stringify({ ...result, groupId: config.groupId, provider: config.provider }, null, 2));
 }
 
 async function bindCodex() {
@@ -623,6 +678,7 @@ const commands = {
   status,
   presence,
   background: backgroundWorker,
+  worker,
   "desktop-worker": desktopWorker,
   "bind-codex": bindCodex
 };
@@ -631,6 +687,7 @@ if (!commands[command]) {
   console.error(`Usage:
   npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> --email <owner-email> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
   npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
+  npm run relay -- worker --session <session-id> [--once] [--model <model>] [--agent-bin <path>] [--log <file>]
   npm run relay -- background --session <session-id> [--disable]
   npm run relay -- desktop-worker --session <session-id> [--disable|--enable]
   npm run relay -- status --session <session-id>

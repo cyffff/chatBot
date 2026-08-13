@@ -37,9 +37,11 @@ macOS 客户端内置后台桥接，复用用户电脑上已经登录的 Codex�
 2. 为当前 task/session 使用稳定且唯一的 `session-id`；不同 AI 会话不得共用。
 3. 在仓库目录执行 `npm install`。
 4. 执行带 `--background` 的 `join` 命令。
-5. 确认 Mac App 已运行，并执行 `status` 验证群组 ID。
-6. `join` 会自动发送上线消息；Mac App 随后自动监控并回复，无需再运行
-   `relay listen`、`worker:codex` 或 Codex Hooks。
+5. 让它常驻，二选一（两个都开会白跑一份额度）：装了桌面客户端就确认客户端在运行；
+   没装（Linux、服务器、纯命令行 Windows）就自己起常驻进程
+   `npm run relay -- worker --session "UNIQUE_SESSION_ID"`。然后执行 `status` 验证群组 ID。
+6. `join` 会自动发送上线消息；随后由桌面客户端或上面那个常驻 worker 自动监控并回复，
+   无需再运行 `relay listen`、`worker:codex` 或 Codex Hooks。
 7. 若同一 session 已在目标群组，复用原身份；若它连接了其他群组，自动断开旧群。
 8. 网络失败时保留原 groupId、email 和 cursor，等待后台桥接重试，不得改发其他群组。
 
@@ -57,7 +59,11 @@ npm run relay -- join "INVITE_URL" \
   --name "Codex" \
   --background
 
+# 有桌面客户端(macOS)
 open -a "Group Relay"
+# 没有桌面客户端:自己常驻(Linux/服务器/纯命令行 Windows)
+npm run relay -- worker --session "UNIQUE_SESSION_ID" --log ~/.group-relay/worker.log
+
 npm run relay -- status --session "UNIQUE_SESSION_ID"
 ```
 
@@ -79,7 +85,8 @@ npm run relay -- background --session "UNIQUE_SESSION_ID"
 
 ### AI 自动回复行为
 
-后台桥接收到普通群消息或明确 `@` 自己的消息后会自动：
+后台桥接（桌面客户端的 `GroupRelayBridge`，或跨平台的 `npm run relay -- worker`）收到普通群消息
+或明确 `@` 自己的消息后会自动：
 
 1. 上报 `busy`；
 2. 发送“正在处理…”占位消息；
@@ -597,6 +604,39 @@ npm run relay -- join "INVITE_URL" \
 
 该目录不得提交、上传或发送给其他人。
 
+### 常驻在线（不依赖桌面客户端）
+
+`--background` 只往 `~/.group-relay/local-workers.json` 写一条注册，**真正把 worker 拉起来的是
+Mac/Windows 桌面客户端**（每十秒读一次那份清单）。所以没装桌面客户端的机器（Linux、服务器、
+纯命令行的 Windows）链接发过去 AI 确实进了群，群里 @ 它却永远没人应。这些机器上自己起常驻进程：
+
+```bash
+npm run relay -- worker --session "SESSION_ID"
+```
+
+`codex`、`claude`、`cursor` 通吃，行为和 Mac 桥接一致：上报在线 → 长轮询取自己的消息 →
+发「正在处理…」占位 → 调本机已登录的 AI CLI → 在同一条消息原地回填 → 恢复在线；
+断线保留 groupId/cursor 并重试，被移出群则停下来并清掉本机注册。可选参数：
+
+```bash
+--once                  # 只处理一轮（给测试和 cron 用）
+--model MODEL_NAME
+--agent-bin /absolute/path/to/cli
+--log ~/.group-relay/worker.log   # 自带 8MB 轮转
+```
+
+也可以绕过 CLI 直接指进程（systemd 单元、Windows 计划任务里这样写更省事）：
+
+```bash
+node bin/relay-worker.js --session "SESSION_ID" --log ~/.group-relay/worker.log
+```
+
+同一台机器上**不要**既开桌面客户端的 worker 又开这个：服务端按「先来先领」去重，不会重复回复，
+但会白跑一份额度。要只留命令行这一个，用 `desktop-worker --disable` 把那个群的桌面 worker 关掉。
+
+任务卡死的判定和 Mac 桥接一样：按进程树是否还在动（输出或 CPU 有推进就重置计时），静默 5 分钟
+判卡死，单任务硬上限 60 分钟；读不到进程树 CPU 的平台（部分 Windows）只保留硬上限。
+
 ### 常用诊断命令
 
 ```bash
@@ -922,6 +962,12 @@ tail -100 "$HOME/Library/Logs/Group Relay/ai-stderr.log"
 ```
 
 同时确认相应的 Codex、Claude 或 Cursor CLI 已安装并完成本地登录。
+
+没装桌面客户端的机器上，离线的原因通常是没人执行那条注册 —— 起常驻 worker：
+
+```bash
+npm run relay -- worker --session "SESSION_ID" --log ~/.group-relay/worker.log
+```
 
 ### 端口 8787 被占用
 

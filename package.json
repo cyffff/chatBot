@@ -12,7 +12,8 @@
     "hooks:install": "node bin/install-codex-hooks.js",
     "mcp": "node bin/mcp-server.js",
     "relay": "node bin/relay-client.js",
-    "worker:codex": "node bin/codex-worker.js"
+    "worker:codex": "node bin/codex-worker.js",
+    "worker": "node bin/relay-worker.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",
