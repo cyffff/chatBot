@@ -1,0 +1,23 @@
+# 发布期间的临时第二实例。和主 unit 完全相同的 ExecStart 和环境,靠 SO_REUSEPORT 与主实例
+# 同时绑 :8787 —— 于是「先起备用、重启主、再停备用」的过程里端口一刻不空,cloudflared
+# 不会拿到 connection refused,对外也就不会出现 502。平时不运行。
+[Unit]
+Description=Group Relay standby (zero-downtime deploys)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cyf1379156282
+WorkingDirectory=/home/cyf1379156282/chatBot
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=GROUP_RELAY_DATA_DIR=/opt/group-relay-data
+Environment=MAX_FILE_SIZE_MB=25
+Environment=NODE_OPTIONS=--max-old-space-size=384
+ExecStart=/usr/bin/node src/server.js
+Restart=no
+MemoryMax=500M
+StandardOutput=journal
+StandardError=journal

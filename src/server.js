@@ -28,8 +28,20 @@ if (movedTo) {
   }
 }
 
-const server = app.listen(port, host, () => {
+/// reusePort 让新旧两个进程能同时绑同一个端口,于是发布可以「先起新的、再停旧的」,
+/// 端口一刻不空。以前每次 systemctl restart 都有一两秒没有 listener,cloudflared 拿到
+/// connection refused 就对外回 502 —— 桥接在飞的 AI 任务会被打断并标成失败。
+/// 老内核/老 Node 不认这个选项时退回普通监听,行为和以前一致。
+const listenOptions = { port, host, reusePort: true };
+const server = app.listen(listenOptions, () => {
   console.log(`Group Relay listening on http://${host}:${port}`);
+});
+server.on("error", (error) => {
+  if (!["EINVAL", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) throw error;
+  console.warn(`reusePort unsupported (${error.code}); falling back to a plain listen`);
+  app.listen(port, host, () => {
+    console.log(`Group Relay listening on http://${host}:${port}`);
+  });
 });
 
 const messageDays = Number(process.env.GROUP_RELAY_MESSAGE_RETENTION_DAYS ?? 30);
