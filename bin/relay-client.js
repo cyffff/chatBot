@@ -358,6 +358,30 @@ async function backgroundWorker() {
   console.log(JSON.stringify({ ...result, provider: config.provider, groupId: config.groupId }, null, 2));
 }
 
+async function desktopWorker() {
+  const config = await loadConfig();
+  if (!config.groupId) throw new Error("This session has no group id; re-run join.");
+  if (!config.email || !config.provider) {
+    throw new Error("This session predates email identity; re-run join to get an owner email.");
+  }
+  const enabled = flag("enable") ? true : !flag("disable");
+  const memberId = `ai:${config.email.toLowerCase()}:${config.provider}`;
+  // 用人的身份发(不带 X-Relay-Provider):这是主人对自己机器上进程的开关。
+  const { provider: _provider, ...asOwner } = config;
+  const result = await request(asOwner, `/api/groups/${config.groupId}/members/${memberId}/desktop-worker`, {
+    method: "POST",
+    body: JSON.stringify({ enabled })
+  });
+  // 关掉之后本机那份清单也顺手清一下,不用等客户端下一次同步。
+  await updateLocalWorker(config, enabled).catch(() => null);
+  console.log(JSON.stringify({
+    groupId: config.groupId,
+    provider: config.provider,
+    desktopWorkerEnabled: enabled,
+    member: result.member
+  }, null, 2));
+}
+
 async function bindCodex() {
   const config = await loadConfig();
   const threadId = option("thread-id", codexThreadId);
@@ -599,6 +623,7 @@ const commands = {
   status,
   presence,
   background: backgroundWorker,
+  "desktop-worker": desktopWorker,
   "bind-codex": bindCodex
 };
 
@@ -607,6 +632,7 @@ if (!commands[command]) {
   npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> --email <owner-email> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
   npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
   npm run relay -- background --session <session-id> [--disable]
+  npm run relay -- desktop-worker --session <session-id> [--disable|--enable]
   npm run relay -- status --session <session-id>
   npm run relay -- history --session <session-id> [--after <message-id>] [--limit 100]
   npm run relay -- wait --session <session-id> [--timeout 25000]

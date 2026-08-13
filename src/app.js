@@ -46,6 +46,7 @@ const presenceSchema = z.object({
   recoverInterrupted: z.boolean().optional().default(false)
 });
 const trustedExecutionSchema = z.object({ enabled: z.boolean() });
+const desktopWorkerSchema = z.object({ enabled: z.boolean() });
 const approvalRequestSchema = z.object({
   sourceMessageId: z.string().uuid(),
   summary: z.string().trim().min(1).max(500)
@@ -139,6 +140,25 @@ export async function createApp(options = {}) {
   app.set("trust proxy", 1);
   const subscribers = new Map();
   const waiters = new Map();
+  /// 同一个 AI 身份可能同时挂着两个 worker(CLI 注册的 claude-main 和桌面 App 自建的
+  /// desktop-claude-<group>),它们各存自己的 cursor,所以同一条消息两边都会看到、都会跑一遍
+  /// AI、都回一次 —— 群里出现两条署名同一个 AI 的回复,还白烧一倍额度。
+  /// 服务端没法区分两个 worker(它们的身份就是同一个 email+provider),但可以只把每条消息
+  /// 交给先来领的那个:领过的记 10 分钟,另一个来问就当没有。
+  const routedClaims = new Map();
+  const claimWindowMs = 10 * 60_000;
+  const claimRoutedMessages = (memberId, messages) => {
+    const now = Date.now();
+    const claims = routedClaims.get(memberId) ?? new Map();
+    for (const [messageId, at] of claims) {
+      if (now - at > claimWindowMs) claims.delete(messageId);
+    }
+    const fresh = messages.filter((message) => !claims.has(message.id));
+    for (const message of fresh) claims.set(message.id, now);
+    if (claims.size) routedClaims.set(memberId, claims);
+    else routedClaims.delete(memberId);
+    return fresh;
+  };
   // 关机期间不再让任何请求挂着:客户端拿到 200 会立刻在同一条 keep-alive 连接上再发一次
   // 长轮询,那条新挂起的请求会在进程退出时被切断,cloudflared 又记一次源站 EOF。
   let shuttingDown = false;
@@ -576,6 +596,8 @@ export async function createApp(options = {}) {
         if (owner.type !== "human") continue;
         for (const member of members) {
           if (member.type !== "ai" || member.email !== req.account.email) continue;
+          // 被关掉的不进清单:客户端看不到就会把已经在跑的那个收掉,也不会再自动拉起来。
+          if (member.desktopWorkerDisabled) continue;
           workers.push({
             workerId: `desktop-${member.provider}-${group.id}`,
             baseUrl: publicBaseUrl(req),
@@ -1119,6 +1141,36 @@ export async function createApp(options = {}) {
     }
   );
 
+  /// 关掉某个群的桌面 worker。和「退出客户端」不一样:只停这一个群的这一个 AI,别的群照跑;
+  /// 也和 `relay background --disable` 不一样:那个只改本机文件,Mac App 下次同步就把它写回来。
+  app.post(
+    "/api/groups/:groupId/members/:memberId/desktop-worker",
+    requireMember,
+    async (req, res, next) => {
+      try {
+        const input = desktopWorkerSchema.parse(req.body);
+        const members = await store.listMembers(req.params.groupId);
+        const target = members.find((member) => member.id === req.params.memberId && member.type === "ai");
+        if (!target) return res.status(404).json({ error: "AI member not found" });
+        // 只有这个 AI 的主人能开关它 —— 群里别人不能替你停掉你机器上的进程。
+        if (target.desktopOwnerMemberId !== req.member.id) {
+          return res.status(403).json({ error: "only the AI owner can switch its desktop worker" });
+        }
+        const member = await store.setDesktopWorker(
+          req.params.groupId,
+          target.email,
+          target.provider,
+          input.enabled
+        );
+        if (!member) return res.status(404).json({ error: "AI member not found" });
+        publish(req.params.groupId, "member_updated", publicMember(member));
+        res.json({ member: publicMember(member) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
   app.delete("/api/groups/:groupId/members/me", requireMember, async (req, res, next) => {
     try {
       if (req.member.type !== "ai") {
@@ -1229,7 +1281,9 @@ export async function createApp(options = {}) {
         limit: req.query.limit
       });
       const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
-      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
+      const routed = isRouted
+        ? claimRoutedMessages(req.member.id, routedMessages(messages, req.member, isRouted, groupMembers))
+        : routedMessages(messages, req.member, isRouted, groupMembers);
       if (isRouted && routed.length) await reportActivity(req, "busy");
       res.json({
         // 补回来的改动排在增量前面(它们本来就更旧),客户端按 id 去重后自己排序。
@@ -1255,7 +1309,9 @@ export async function createApp(options = {}) {
       if (existing.length) {
         const isRouted = req.query.routed === "1";
         const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
-        const routed = routedMessages(existing, req.member, isRouted, groupMembers);
+        const routed = isRouted
+          ? claimRoutedMessages(req.member.id, routedMessages(existing, req.member, isRouted, groupMembers))
+          : routedMessages(existing, req.member, isRouted, groupMembers);
         if (routed.length) await reportActivity(req, "busy");
         return res.json({
           messages: routed,
@@ -1296,7 +1352,9 @@ export async function createApp(options = {}) {
       const messages = update?.event === "message" ? [update.payload] : [];
       const isRouted = req.query.routed === "1";
       const groupMembers = isRouted ? await store.listMembers(req.params.groupId) : [];
-      const routed = routedMessages(messages, req.member, isRouted, groupMembers);
+      const routed = isRouted
+        ? claimRoutedMessages(req.member.id, routedMessages(messages, req.member, isRouted, groupMembers))
+        : routedMessages(messages, req.member, isRouted, groupMembers);
       if (routed.length) await reportActivity(req, "busy");
       res.json({
         messages: routed,
@@ -1335,6 +1393,22 @@ export async function createApp(options = {}) {
       if (mentions.some((member) => !member)) {
         return res.status(400).json({ error: "mentioned member must be in this group" });
       }
+      /// 同一个 AI 身份可能挂着两个 worker(CLI 注册的和桌面 App 自建的),领取窗口过期或旧
+      /// 客户端时两边都可能走到发占位这一步。先查:同一个 AI、同一个 replyTo、还没结束的占位
+      /// 已经存在,就把那一条还给它,别再落盘第二条 —— 否则群里出现两个署名同一个 AI 的气泡。
+      const replyTo = cleanText(req.body.replyTo, 100) || null;
+      if (req.member.type === "ai" && status === "processing" && replyTo) {
+        const recent = await store.readMessages(req.params.groupId, { limit: 40 }).catch(() => []);
+        const existing = recent.find((candidate) => (
+          candidate.sender?.id === req.member.id
+          && candidate.replyTo === replyTo
+          && candidate.status === "processing"
+        ));
+        if (existing) {
+          await discardUploads(req);
+          return res.status(200).json({ message: existing, deduplicated: true });
+        }
+      }
       const message = await store.appendMessage(req.params.groupId, req.member, {
         text,
         attachments,
@@ -1344,7 +1418,7 @@ export async function createApp(options = {}) {
           provider: member.provider,
           ownerName: member.ownerName ?? null
         })),
-        replyTo: cleanText(req.body.replyTo, 100) || null,
+        replyTo,
         status
       });
       // 「我的 AI 替谁干了多少活」的计数。只算 @ 了 AI 的消息 —— 群里的普通消息不计入,

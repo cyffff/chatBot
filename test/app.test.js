@@ -2573,27 +2573,137 @@ test("trusted execution lets the whole group drive the AI, and off means only th
   await fetch(`${base}/api/groups/${groupId}/messages`, {
     method: "POST", headers: guestHeaders, body: new URLSearchParams({ text: "客人的第二条" })
   });
-  const scopes = await scopesFor();
+  // 一次轮询里同时看档位和 senderIsOwner:领过的消息不会再重发,不能轮两次。
+  const routedNow = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=50`, { headers: aiHeaders });
+  const scopes = Object.fromEntries(routedNow.body.messages.map((m) => [m.text, m.executionScope]));
+  const ownership = Object.fromEntries(routedNow.body.messages.map((m) => [m.text, m.senderIsOwner]));
   assert.equal(scopes["主人的第二条"], "trusted");
-  // senderIsOwner 区分「谁发的」:桥接用它决定别人的指令要不要先要求一个具体项目目录
-  const routedAll = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=50`, { headers: aiHeaders });
-  const ownership = Object.fromEntries(routedAll.body.messages.map((m) => [m.text, m.senderIsOwner]));
+  assert.equal(scopes["客人的第二条"], "trusted");
   assert.equal(ownership["主人的第二条"], true);
   assert.equal(ownership["客人的第二条"], false);
-  assert.equal(scopes["客人的第二条"], "trusted");
-  // 开关之前的那两条也跟着按当前设置解释,不会留在旧档上
-  assert.equal(scopes["客人的第一条"], "trusted");
+  // 档位是「投递那一刻按当前设置算」,不写死在消息上 —— 上面开、下面关的两轮就是在验这件事。
+  // 开关之前的那两条这里已经查不到了:它们在第一次轮询时就被领走,不会再重发。
+  assert.equal(scopes["客人的第一条"], undefined);
   assert.equal(guest.body.member.type, "human");
 
-  // 关掉就回到谁都不执行
+  // 关掉就回到谁都不执行。注意要发新消息来看:同一条 routed 消息只交给先来领的那个 worker,
+  // 领过之后不会再重发(这正是重复回复的修法),所以旧消息不能拿来复查档位。
   await json(base, `/api/groups/${groupId}/members/${aiMemberId}/trusted-execution`, {
     method: "POST",
     headers: owner,
     body: JSON.stringify({ enabled: false })
   });
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "关掉之后主人的" })
+  });
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: guestHeaders, body: new URLSearchParams({ text: "关掉之后客人的" })
+  });
   const afterOff = await scopesFor();
-  assert.equal(afterOff["客人的第二条"], "restricted");
-  assert.equal(afterOff["主人的第二条"], "restricted");
+  assert.equal(afterOff["关掉之后主人的"], "restricted");
+  assert.equal(afterOff["关掉之后客人的"], "restricted");
+});
+
+test("a routed message goes to the first worker that asks, and a placeholder is not duplicated", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "两个 worker", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+  const question = (await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: owner,
+    body: new URLSearchParams({ text: "@Claude 一个问题", mentions: JSON.stringify(["ai:owner@example.com:claude"]) })
+  }).then((response) => response.json())).message;
+
+  // 两个 worker 用的是同一个身份(email+provider),服务端分不出它们 —— 但一条消息只该被领一次
+  const first = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=50`, { headers: ai });
+  const second = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=50`, { headers: ai });
+  assert.equal(first.body.messages.some((message) => message.id === question.id), true);
+  assert.equal(second.body.messages.some((message) => message.id === question.id), false);
+
+  // 万一两边都跑到了发占位这一步,也只留一个气泡:第二次拿回的是同一条
+  const placeholderA = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: ai,
+    body: new URLSearchParams({ text: "正在处理…", status: "processing", replyTo: question.id })
+  }).then((response) => response.json());
+  const placeholderB = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: ai,
+    body: new URLSearchParams({ text: "正在处理…", status: "processing", replyTo: question.id })
+  }).then((response) => response.json());
+  assert.equal(placeholderB.message.id, placeholderA.message.id);
+  assert.equal(placeholderB.deduplicated, true);
+  const history = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
+  assert.equal(history.body.messages.filter((message) => message.status === "processing").length, 1);
+});
+
+test("switching off a group's desktop worker survives the next client sync", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "开关", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  const other = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "另一个群", email: "owner@example.com", displayName: "Owner" })
+  });
+  for (const id of [groupId, other.body.group.id]) {
+    await json(base, `/api/account/sessions/${id}/ais`, {
+      method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+    });
+  }
+  const memberId = "ai:owner@example.com:claude";
+  const before = await json(base, "/api/account/desktop-workers", { headers: owner });
+  assert.equal(before.body.workers.length, 2);
+
+  // 群里别人不能替我停掉我机器上的进程
+  await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "guest@example.com", name: "Guest" })
+  });
+  const denied = await json(base, `/api/groups/${groupId}/members/${memberId}/desktop-worker`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "guest@example.com" },
+    body: JSON.stringify({ enabled: false })
+  });
+  assert.equal(denied.response.status, 403);
+
+  const off = await json(base, `/api/groups/${groupId}/members/${memberId}/desktop-worker`, {
+    method: "POST", headers: owner, body: JSON.stringify({ enabled: false })
+  });
+  assert.equal(off.response.status, 200);
+  assert.equal(off.body.member.desktopWorkerDisabled, true);
+
+  // 关掉的只是这一个群:客户端下一次(以及以后每一次)同步都拿不到它,所以不会再被拉起来
+  for (let round = 0; round < 2; round += 1) {
+    const synced = await json(base, "/api/account/desktop-workers", { headers: owner });
+    assert.deepEqual(synced.body.workers.map((worker) => worker.groupId), [other.body.group.id]);
+  }
+  // 关了桌面 worker 不等于把 AI 踢出群 —— 它还在成员里,自己起的命令行 worker 照样能收消息
+  const view = await json(base, `/api/groups/${groupId}`, { headers: owner });
+  assert.equal(view.body.members.some((member) => member.id === memberId), true);
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "还能收到吗" })
+  });
+  const routed = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=10`, {
+    headers: { ...owner, "X-Relay-Provider": "claude" }
+  });
+  assert.equal(routed.body.messages.some((message) => message.text === "还能收到吗"), true);
+
+  const on = await json(base, `/api/groups/${groupId}/members/${memberId}/desktop-worker`, {
+    method: "POST", headers: owner, body: JSON.stringify({ enabled: true })
+  });
+  assert.equal(on.body.member.desktopWorkerDisabled, false);
+  const restored = await json(base, "/api/account/desktop-workers", { headers: owner });
+  assert.equal(restored.body.workers.length, 2);
 });
 
 test("my AI's workload is counted from mentions and survives the message buffer", async (t) => {

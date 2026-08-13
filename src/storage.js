@@ -905,6 +905,9 @@ export class FileStore {
       desktopOwnerAccountId: account.email,
       desktopOwnerMemberId: humanMemberId(account.email),
       trustedOwnerMemberId: registration.trusted ? humanMemberId(account.email) : null,
+      // 关掉之后桌面客户端同步时就看不到这个 worker,于是它自己把进程收掉,而且下次同步也不会
+      // 再长回来 —— 标记记在服务端的注册项上,不在本机的 local-workers.json 里。
+      desktopWorkerDisabled: Boolean(registration.workerDisabled),
       activeMessageIds: live.activeMessageIds,
       presence: { status: live.status, lastSeenAt: live.lastSeenAt },
       joinedAt: registration.joinedAt
@@ -979,6 +982,21 @@ export class FileStore {
         ?.find((ai) => ai.groupId === groupId && ai.provider === provider);
       if (!registration) return null;
       registration.trusted = enabled;
+      return found;
+    });
+    return account ? this.memberFor(groupId, email, provider) : null;
+  }
+
+  /// 桌面 worker 的开关。以前只能改本机 ~/.group-relay/local-workers.json,而 Mac App 每次
+  /// 同步都按服务端的清单重写那个文件,关掉的下一分钟又起来了。所以开关必须记在服务端。
+  async setDesktopWorker(groupId, email, provider, enabled) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      const registration = found?.ais
+        ?.find((ai) => ai.groupId === groupId && ai.provider === provider);
+      if (!registration) return null;
+      if (enabled) delete registration.workerDisabled;
+      else registration.workerDisabled = true;
       return found;
     });
     return account ? this.memberFor(groupId, email, provider) : null;

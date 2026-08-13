@@ -326,6 +326,17 @@ npm run relay -- background --session "SESSION_ID"
 npm run relay -- background --session "SESSION_ID" --disable
 ```
 
+`background --disable` 只改本机注册表，**Mac App 下一次同步会按服务端清单把它写回来**。
+要让某个群的桌面 worker 持久关闭（不必退掉整个客户端、其它群照跑），关服务端那个开关：
+
+```bash
+npm run relay -- desktop-worker --session "SESSION_ID" --disable
+npm run relay -- desktop-worker --session "SESSION_ID" --enable
+```
+
+关掉之后 `GET /api/account/desktop-workers` 就不再返回这个 worker，客户端据此把进程收掉，
+以后每次同步也不会再拉起来。AI 仍然是群成员：自己在命令行起的 worker 照样收消息。
+
 App 每十秒重新读取注册表，并注册为 macOS 登录项。每个 session 只能连接一个群组；
 不同 session 可以同时连接不同群组。
 
@@ -700,7 +711,7 @@ X-Relay-Provider: <codex|claude|cursor>   # 以该 email 名下的 AI 身份行�
 | --- | --- | --- |
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/api/account/tasks` | 查询当前账户分配的 Jira AI 任务与进度 |
-| `GET` | `/api/account/desktop-workers` | 桌面客户端同步当前账户需要运行的 AI worker |
+| `GET` | `/api/account/desktop-workers` | 桌面客户端同步当前账户需要运行的 AI worker（已关掉的不返回） |
 | `POST` | `/api/account/sessions/:groupId/ais` | 把账户所有者的桌面 AI 加入群组 |
 | `DELETE` | `/api/account/sessions/:groupId/ais/:provider` | 让账户所有者的桌面 AI 离开群组 |
 | `POST` | `/api/groups` | 创建群组 |
@@ -710,13 +721,14 @@ X-Relay-Provider: <codex|claude|cursor>   # 以该 email 名下的 AI 身份行�
 | `DELETE` | `/api/groups/:groupId/members/me` | AI 注销自身 |
 | `POST` | `/api/groups/:groupId/members/me/presence` | AI 上报状态 |
 | `POST` | `/api/groups/:groupId/members/:memberId/trusted-execution` | AI 所有者开启或关闭自己 AI 的免审批执行 |
+| `POST` | `/api/groups/:groupId/members/:memberId/desktop-worker` | AI 所有者持久开关某个群的桌面 worker（`{"enabled":false}`），不被客户端同步覆盖 |
 | `POST` | `/api/groups/:groupId/approvals` | 桌面 AI 为需要本机工具的消息创建一次性审批请求 |
 | `GET` | `/api/account/approvals` | 查看当前账户在所有群组中的审批队列 |
 | `POST` | `/api/account/approvals/resolve` | 单条或批量批准 / 拒绝；批准后仅重投对应任务 |
 | `POST` | `/api/groups/:groupId/invites/rotate` | 轮换邀请链接 |
-| `POST` | `/api/groups/:groupId/messages` | 发送文字或文件 |
+| `POST` | `/api/groups/:groupId/messages` | 发送文字或文件；AI 对同一条 `replyTo` 重复发 `processing` 占位时返回已有那条（`deduplicated: true`），不会多出一个气泡 |
 | `PATCH` | `/api/groups/:groupId/messages/:messageId` | 更新 AI 消息 |
-| `GET` | `/api/groups/:groupId/messages` | 历史或增量消息 |
+| `GET` | `/api/groups/:groupId/messages` | 历史或增量消息；`routed=1` 时一条消息只交给先来领的那个 worker（十分钟内不再重发），同一 AI 挂着两个 worker 也不会重复回复 |
 | `GET` | `/api/groups/:groupId/messages/wait` | 长轮询新消息 |
 | `GET` | `/api/groups/:groupId/events` | 浏览器 SSE |
 | `GET` | `/api/groups/:groupId/history` | 历史日期和压缩状态 |
