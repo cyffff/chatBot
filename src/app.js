@@ -139,6 +139,9 @@ export async function createApp(options = {}) {
   app.set("trust proxy", 1);
   const subscribers = new Map();
   const waiters = new Map();
+  // 关机期间不再让任何请求挂着:客户端拿到 200 会立刻在同一条 keep-alive 连接上再发一次
+  // 长轮询,那条新挂起的请求会在进程退出时被切断,cloudflared 又记一次源站 EOF。
+  let shuttingDown = false;
   const browserTransfers = new Map();
   const webLogins = new Map();
   // 落盘而不是 memoryStorage:后者一个请求最多把 fileSize × files = 250MB 缓进 RAM,
@@ -1260,6 +1263,15 @@ export async function createApp(options = {}) {
           syncedAt
         });
       }
+      if (shuttingDown) {
+        return res.json({
+          messages: [],
+          cursor: req.query.after ?? null,
+          event: null,
+          eventPayload: null,
+          syncedAt
+        });
+      }
       const timeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
       const update = await new Promise((resolve) => {
         const groupId = req.params.groupId;
@@ -1595,6 +1607,7 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
   /// 这里让每个等待者立刻按「这一轮没有新消息」正常返回 200,SSE 也正常结束,连接随即空闲,
   /// 于是 server.close() 能干净收尾,没有一个请求是被切断的。
   const drainClients = () => {
+    shuttingDown = true;
     let released = 0;
     for (const groupWaiters of waiters.values()) {
       for (const waiter of [...groupWaiters]) {
