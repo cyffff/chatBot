@@ -669,7 +669,46 @@ function renderMarkdown(target, source) {
   }
 }
 
+/// 自己亲手打的那条靠右,别人的(真人和 AI)靠左。我自己的 AI 也算「别人」:它回答的是
+/// 别人的问题,放到右边会变成「我在回答我自己」,反而更难读。
+function markOwnMessage(item) {
+  item.classList.toggle("own", Boolean(state.memberId) && item.dataset.senderId === state.memberId);
+}
+
+/// memberId 到手(或换了身份)之后重算一遍已经画出来的消息。
+function markOwnMessages() {
+  for (const item of $("#messages").children) markOwnMessage(item);
+}
+
+/// 复制原始 Markdown,而不是框选渲染后的 HTML —— 表格、代码块、多级列表框选粘出去就散了,
+/// 而原文一直在 message.text 里。正文存在 item.dataset 上而不是闭包里:AI 把答案回写进
+/// 同一个气泡时正文会变,闭包里那份就成了「正在处理…」,复制出去是旧内容。
+function copyButtonNode(item) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "copy-message";
+  button.textContent = "复制";
+  button.title = "复制这条消息的原文（Markdown）";
+  button.addEventListener("click", async () => {
+    const text = item.dataset.copyText ?? "";
+    if (!text) return;
+    try {
+      // 不能静默失败:让人以为复制成功、粘出来是旧内容比报错更糟。
+      // 非安全上下文下 navigator.clipboard 根本不存在,也走这条。
+      if (!navigator.clipboard?.writeText) throw new Error("这个浏览器不允许访问剪贴板");
+      await navigator.clipboard.writeText(text);
+      toast("已复制");
+    } catch (error) {
+      toast(`复制失败：${error.message}`);
+    }
+  });
+  return button;
+}
+
 function updateMessageNode(item, message) {
+  // 复制按钮读这里,所以每次内容变化都要跟着更新。
+  item.dataset.copyText = message.text ?? "";
+  item.querySelector(".copy-message")?.classList.toggle("hidden", !message.text);
   let bubble = item.querySelector(".bubble");
   if (message.text) {
     if (!bubble) {
@@ -985,6 +1024,10 @@ function renderMessage(message) {
   const item = document.createElement("li");
   item.className = "message";
   item.dataset.messageId = message.id;
+  // 靠右判断存在节点上,不是渲染那一刻算完就算:本机副本先画、memberId 后到(loadChat 里
+  // 先 paint 再拿 /api/groups),渲染时判断会全部落空。
+  item.dataset.senderId = message.sender?.id ?? "";
+  markOwnMessage(item);
   if (message.mentions?.some((mention) => mention.id === state.memberId)) {
     item.classList.add("mentions-me");
   }
@@ -1003,7 +1046,7 @@ function renderMessage(message) {
   const time = document.createElement("time");
   time.className = "time";
   time.textContent = new Date(message.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
-  head.append(time);
+  head.append(time, copyButtonNode(item));
   item.append(head);
   if (message.replyTo) item.append(replyQuoteNode(message.replyTo));
   updateMessageNode(item, message);
@@ -1128,6 +1171,7 @@ async function loadChat() {
     ({ messages, cursor, syncedAt } = messagePayload);
     state.inviteToken = group.inviteToken;
     state.memberId = groupPayload.currentMemberId;
+    markOwnMessages();
     state.canManageTrustedExecution = groupPayload.canManageTrustedExecution === true;
   } catch (error) {
     // 隧道抖一下不该把人踢回群组列表:本机那份已经在屏上了,轮询会自己接上并补齐。

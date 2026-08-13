@@ -842,6 +842,40 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   width: fit-content; max-width: 100%; padding: 11px 14px; border-radius: 3px 14px 14px 14px;
   background: white; border: 1px solid #e1e6e1; overflow-wrap: anywhere; line-height: 1.55;
 }
+/* 自己发的消息靠右,和 Teams/微信一致。整块右移、气泡贴右、圆角镜像(尾巴换到右上)。
+   底色只比别人的深一点点:聊天记录里自己说过的话通常不是重点,不该用强调色。
+   这几条必须放在 mentions-me / processing / failed 之前 —— 同特异度后写的赢,
+   状态样式要能盖住这里的底色。 */
+.message.own { margin-left: auto; }
+.message.own .message-head { justify-content: flex-end; }
+.message.own .bubble {
+  margin-left: auto;
+  border-radius: 14px 3px 14px 14px;
+  background: #f4f7f3;
+}
+.message.own .reply-quote { margin-left: auto; }
+.message.own .attachments { justify-content: flex-end; }
+.message.own .feedback-actions { justify-content: flex-end; }
+
+/* 复制按钮:hover 时才显眼,但一直在 DOM 里并占位 —— 触屏没有 hover,只靠 hover 就点不到。 */
+.copy-message {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #97a099;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  opacity: .55;
+}
+.message:hover .copy-message, .copy-message:focus-visible { opacity: 1; color: #1f6848; background: #eef3ee; border-color: #dbe4dc; }
+.copy-message:hover { color: #1f6848; background: #e7f0e8; }
+@media (hover: none) {
+  /* 触屏:常驻可见,别指望 hover。 */
+  .copy-message { opacity: 1; color: #6b756d; border-color: #e4ebe4; }
+}
+
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
 .markdown-body p { margin: 0 0 10px; white-space: normal; }
