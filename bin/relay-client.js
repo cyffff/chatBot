@@ -546,6 +546,22 @@ async function update() {
   console.log(JSON.stringify(result, null, 2));
 }
 
+/// 读也要对齐群。写(send/update)一直要求 --expected-group,读却随便读 —— 于是 AI 拿着一个
+/// 绑到 B 群的连接去查历史,再拿 B 群的内容回答 A 群的问题(实测出现过的串群)。
+/// 命名连接下必须显式说明「我以为我在哪个群」;session 模式给了就校验。
+function assertExpectedGroup(config) {
+  const expected = option("expected-group");
+  if (connectionName && !expected) {
+    throw new Error("--expected-group is required when reading through a named connection.");
+  }
+  if (expected && expected !== config.groupId) {
+    throw new Error(
+      `Refusing to read: ${connectionName ? `connection "${connectionName}"` : "this session"} is bound to `
+      + `${config.groupId}, not expected group ${expected}. 不要拿别的群的历史来回答这里的问题。`
+    );
+  }
+}
+
 async function waitOnce(config, timeoutMs) {
   const query = new URLSearchParams({ timeoutMs: String(timeoutMs), limit: "200" });
   if (config.cursor) query.set("after", config.cursor);
@@ -567,6 +583,7 @@ async function waitOnce(config, timeoutMs) {
 
 async function wait() {
   const config = await loadConfig();
+  assertExpectedGroup(config);
   const timeoutMs = Math.min(Math.max(Number(option("timeout", "25000")), 1000), 30000);
   await reportPresence(config, await readPresenceStatus(), { persist: false });
   console.log(JSON.stringify(await waitOnce(config, timeoutMs), null, 2));
@@ -574,6 +591,7 @@ async function wait() {
 
 async function listen() {
   const config = await loadConfig();
+  assertExpectedGroup(config);
   await reportPresence(config, "online");
   const heartbeat = setInterval(async () => {
     try {
@@ -615,6 +633,7 @@ async function presence() {
 
 async function history() {
   const config = await loadConfig();
+  assertExpectedGroup(config);
   const limit = Math.min(Math.max(Number(option("limit", "100")), 1), 500);
   const after = option("after");
   const query = new URLSearchParams({ limit: String(limit), routed: "1" });
@@ -696,14 +715,14 @@ if (!commands[command]) {
   npm run relay -- background --session <session-id> [--disable]
   npm run relay -- desktop-worker --session <session-id> [--disable|--enable]
   npm run relay -- status --session <session-id>
-  npm run relay -- history --session <session-id> [--after <message-id>] [--limit 100]
+  npm run relay -- history --session <session-id> [--after <message-id>] [--limit 100] [--expected-group <group-id>]
   npm run relay -- wait --session <session-id> [--timeout 25000]
   npm run relay -- listen --session <session-id>
   npm run relay -- presence --session <session-id> --status online|busy
   npm run relay -- feedback --session <session-id> --title <标题> [--for <谁要的>] <润色后的正文>
   npm run relay -- send --session <session-id> [--status processing|complete|failed] <message> [--file <path>]
   npm run relay -- update --session <session-id> --message <message-id> [--status processing|complete|failed] <message>
-  npm run relay -- history --connection <mcp-name> [--after <message-id>] [--limit 100]
+  npm run relay -- history --connection <mcp-name> --expected-group <group-id> [--after <message-id>] [--limit 100]
   npm run relay -- send --connection <mcp-name> --expected-group <group-id> [--status processing|complete|failed] <message> [--file <path>]
   npm run relay -- update --connection <mcp-name> --expected-group <group-id> --message <message-id> [--status processing|complete|failed] <message>`);
   process.exit(1);

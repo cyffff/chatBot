@@ -85,12 +85,17 @@ async function groupIdentity() {
   return groupIdentityPromise;
 }
 
+/// 读也要对齐群。写工具一开始就要 expectedGroupId,读工具却直接用连接里写死的那个群 ——
+/// 于是 AI 在 A 群里被 @,顺手 group_history 翻的是这个连接绑的 B 群,拿 B 群的历史回答了
+/// A 群的问题(实测出现过)。读工具现在同样必须显式说明「我以为我在哪个群」。
 async function assertExpectedGroup(expectedGroupId) {
   const group = await groupIdentity();
   if (expectedGroupId !== group.id) {
     throw new Error(
-      `Refusing to send: this MCP session is connected to "${group.name}" (${group.id}), `
-      + `not the expected group ${expectedGroupId}.`
+      `Refusing to act: this MCP connection is bound to "${group.name}" (${group.id}), `
+      + `not the expected group ${expectedGroupId}. `
+      + "Pass expectedGroupId from the message you are answering; if it differs, this connection "
+      + "cannot read or write that group — say so instead of using another group's history."
     );
   }
   return group;
@@ -211,9 +216,16 @@ server.tool(
 
 server.tool(
   "group_history",
-  "Read recent messages from the shared group. Pass after to read only newer messages.",
-  { after: z.string().optional(), limit: z.number().int().min(1).max(500).default(100) },
-  async ({ after, limit }) => {
+  "Read recent messages from the shared group. Pass expectedGroupId (the groupId of the message "
+  + "you are answering) so a wrong-group read fails loudly instead of returning another group's "
+  + "history. Pass after to read only newer messages.",
+  {
+    expectedGroupId: z.string().uuid(),
+    after: z.string().optional(),
+    limit: z.number().int().min(1).max(500).default(100)
+  },
+  async ({ expectedGroupId, after, limit }) => {
+    await assertExpectedGroup(expectedGroupId);
     const query = new URLSearchParams({ limit: String(limit) });
     query.set("routed", "1");
     if (after) query.set("after", after);
@@ -230,9 +242,15 @@ server.tool(
 
 server.tool(
   "group_wait",
-  "Wait up to 30 seconds for another group message. Use the last cursor as after.",
-  { after: z.string().optional(), timeoutMs: z.number().int().min(1000).max(30000).default(25000) },
-  async ({ after, timeoutMs }) => {
+  "Wait up to 30 seconds for another group message. Use the last cursor as after. "
+  + "expectedGroupId must be the groupId you believe you are in.",
+  {
+    expectedGroupId: z.string().uuid(),
+    after: z.string().optional(),
+    timeoutMs: z.number().int().min(1000).max(30000).default(25000)
+  },
+  async ({ expectedGroupId, after, timeoutMs }) => {
+    await assertExpectedGroup(expectedGroupId);
     const query = new URLSearchParams({ timeoutMs: String(timeoutMs), routed: "1" });
     if (after) query.set("after", after);
     const result = await relay(`/api/groups/${groupId}/messages/wait?${query}`);
@@ -246,18 +264,24 @@ server.tool(
   }
 );
 
-server.tool("group_members", "List members in the shared group.", {}, async () => {
-  const result = await relay(`/api/groups/${groupId}`);
-  return {
-    content: [{
-      type: "text",
-      text: JSON.stringify({
-        group: { id: result.group.id, name: result.group.name },
-        members: result.members
-      })
-    }]
-  };
-});
+server.tool(
+  "group_members",
+  "List members in the shared group. expectedGroupId must be the groupId you believe you are in.",
+  { expectedGroupId: z.string().uuid() },
+  async ({ expectedGroupId }) => {
+    await assertExpectedGroup(expectedGroupId);
+    const result = await relay(`/api/groups/${groupId}`);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          group: { id: result.group.id, name: result.group.name },
+          members: result.members
+        })
+      }]
+    };
+  }
+);
 
 server.tool(
   "submit_feedback",

@@ -738,12 +738,22 @@ Cursor 在 `.cursor/mcp.json` 中配置相同 command、args 和 env。
 | `group_send` | 发送消息或创建处理占位 |
 | `group_send_file` | 生成 md/html/docx/xlsx/pdf/csv/图片等文件并作为可下载附件发给真人 |
 | `group_update` | 原位更新自己的消息 |
-| `group_history` | 读取历史或增量消息 |
-| `group_wait` | 等待最长 30 秒 |
-| `group_members` | 查询成员和 AI ID |
+| `group_history` | 读取历史或增量消息（必须传 `expectedGroupId`） |
+| `group_wait` | 等待最长 30 秒（必须传 `expectedGroupId`） |
+| `group_members` | 查询成员和 AI ID（必须传 `expectedGroupId`） |
 | `group_presence` | 上报在线或忙碌状态 |
 
-发送和更新必须提供当前 session 的 `expectedGroupId`，服务会拒绝跨群发送。
+**读和写都必须提供 `expectedGroupId`**，也就是你正在回复的那条消息的 groupId；和这个 MCP 连接
+绑定的群不一致时直接报错，而不是悄悄返回另一个群的内容。
+
+为什么读也要管：一个 AI 手上可能同时挂着多个群的入口（这个 MCP 连接、别的 session 配置）。
+它在 A 群被 `@`，顺手 `group_history` 翻的却是连接绑定的 B 群，然后拿 B 群的历史回答了 A 群的
+问题 —— 实测发生过。现在三处一起堵：
+
+1. 服务端在 `routed=1` 的轮询响应里回 `group: {id, name}`，每条消息本身也带 `groupId`；
+2. 桥接把群名和 groupId 钉在提示词最前面，并给出这个群专用的取历史命令；轮询到的群与自己的
+   配置不一致就停下来，逐条消息的 `groupId` 也再挡一次；
+3. MCP 的读工具和 `relay history/wait/listen --connection` 都要求显式说明「我以为我在哪个群」。
 
 `group_send_file` 让 AI 把自己生成的产物交付给真人下载：先在本机生成文件，再用
 `filePath` 从磁盘附带，或用 `content` + `filename` 直接内联发送（二进制走 `encoding: "base64"`）。

@@ -1207,13 +1207,31 @@ GROUP_RELAY_GROUP_ID = "${created.body.group.id}"
 GROUP_RELAY_EMAIL = "${joined.body.member.email}"
 `);
   const clientEnv = { ...process.env, CODEX_HOME: codexHome };
+  // 读也要对齐群:命名连接下不说明「我以为我在哪个群」就不给读,说错了更不给 ——
+  // 串群就是这么发生的(拿 B 群的历史回答 A 群的问题)。
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      relayClient, "history", "--connection", "group-relay-named"
+    ], { env: clientEnv }),
+    /--expected-group is required/
+  );
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      relayClient, "history", "--connection", "group-relay-named",
+      "--expected-group", "00000000-0000-4000-8000-000000000000"
+    ], { env: clientEnv }),
+    /Refusing to read/
+  );
   const history = await execFileAsync(process.execPath, [
     relayClient,
     "history",
     "--connection",
-    "group-relay-named"
+    "group-relay-named",
+    "--expected-group",
+    created.body.group.id
   ], { env: clientEnv });
   assert.equal(JSON.parse(history.stdout).group.name, "Named Connection");
+  assert.equal(JSON.parse(history.stdout).group.id, created.body.group.id);
 
   await assert.rejects(
     execFileAsync(process.execPath, [
@@ -1347,6 +1365,63 @@ exit 0
   // cursor 落盘了,重启之后不会把同一条再跑一遍
   const saved = JSON.parse(await fs.readFile(configFile, "utf8"));
   assert.ok(saved.cursor);
+});
+
+test("routed polls say which group they are, and a mismatched worker refuses to answer", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "斗兽场", email: "owner@example.com", displayName: "Owner" })
+  });
+  const other = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "renew v4 特征", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "这是斗兽场的问题" })
+  });
+
+  // routed 轮询必须回「这是哪个群」—— 桥接靠它把 groupId 钉进提示词,AI 才有对齐的依据
+  const routed = await json(base, `/api/groups/${groupId}/messages?routed=1&limit=10`, { headers: ai });
+  assert.deepEqual(routed.body.group, { id: groupId, name: "斗兽场" });
+  assert.equal(routed.body.messages.every((message) => message.groupId === groupId), true);
+  // 人的界面不需要这个字段,别白占带宽
+  const humanView = await json(base, `/api/groups/${groupId}/messages?limit=10`, { headers: owner });
+  assert.equal(humanView.body.group, undefined);
+
+  // 接收端:配置指着另一个群时,worker 宁可停下也不能拿这个群的消息去回答
+  const configFile = path.join(dataDir, "crossed-session.json");
+  await fs.writeFile(configFile, JSON.stringify({
+    baseUrl: base,
+    groupId: other.body.group.id,
+    email: "owner@example.com",
+    provider: "claude",
+    memberName: "Claude",
+    ownerName: "Owner",
+    sessionId: "crossed"
+  }));
+  const fakeClaude = path.join(dataDir, "fake-claude-crossed");
+  await fs.writeFile(fakeClaude, "#!/bin/sh\nprintf 'never mind\\n'\n", { mode: 0o700 });
+  const crossed = await execFileAsync(process.execPath, [
+    relayClient, "worker", "--once", "--agent-bin", fakeClaude
+  ], {
+    env: {
+      ...process.env,
+      GROUP_RELAY_AGENT_CONFIG: configFile,
+      GROUP_RELAY_LOCAL_WORKERS: path.join(dataDir, "local-workers.json")
+    },
+    timeout: 20_000
+  });
+  // 它轮的是自己那个群(空的),所以不该回答斗兽场的问题
+  assert.equal(JSON.parse(crossed.stdout).handled, 0);
+  const untouched = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
+  assert.equal(untouched.body.messages.filter((message) => message.sender.type === "ai").length, 0);
 });
 
 test("opencode joins as a fourth provider and answers through the resident worker", async (t) => {
@@ -1585,6 +1660,25 @@ test("MCP send rejects a mismatched expected group ID", async (t) => {
     }
   });
   assert.equal(refused.isError, true);
+
+  /// 读也一样。原来 group_history 直接用连接里绑的群,于是 AI 在 A 群被 @、顺手翻的是 B 群,
+  /// 拿 B 群的历史回答了 A 群的问题(实测出现过的串群)。现在必须显式说明「我以为我在哪个群」。
+  const readOther = await client.callTool({
+    name: "group_history",
+    arguments: { expectedGroupId: "00000000-0000-4000-8000-000000000000", limit: 10 }
+  });
+  assert.equal(readOther.isError, true);
+  assert.match(JSON.stringify(readOther.content), /Refusing to act/);
+  const readBlind = await client.callTool({ name: "group_history", arguments: { limit: 10 } });
+  assert.equal(readBlind.isError, true);
+  const readMembers = await client.callTool({ name: "group_members", arguments: {} });
+  assert.equal(readMembers.isError, true);
+  const readRight = await client.callTool({
+    name: "group_history",
+    arguments: { expectedGroupId: created.body.group.id, limit: 10 }
+  });
+  assert.equal(readRight.isError ?? false, false);
+  assert.equal(JSON.parse(readRight.content[0].text).group.id, created.body.group.id);
 
   const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
     headers: { ...asMember(created.body.member.email, created.body.member.provider) }
