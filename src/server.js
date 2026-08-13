@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
-const { app, store, movedTo, pushEverythingToNewServer } = await createApp();
+const { app, store, movedTo, pushEverythingToNewServer, drainClients } = await createApp();
 
 if (store.migration) {
   const { accounts, groups, legacyTokens, rewrittenRecords } = store.migration;
@@ -55,7 +55,9 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`${signal} received; draining`);
+    // 先把挂着的长轮询和 SSE 正常放掉,再停止 accept:被硬关的挂起请求就是 502 的来源。
+    const released = drainClients?.() ?? 0;
+    console.log(`${signal} received; released ${released} waiting client(s), draining`);
     // 不主动掐空闲连接:cloudflared 对源站是 keep-alive,强关的那一瞬它可能正往这个 socket
     // 上写请求 —— 那就是发布窗口里最后残留的那个 502。server.close() 之后 Node 会在每个
     // 连接自然空闲时给它带上 Connection: close 再收掉,竞态就没有了。

@@ -1589,5 +1589,33 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
     return { movedTo, accounts: payloads.length, migrated, failed };
   }
 
-  return { app, store, sweepExpiredTokens, movedTo, pushEverythingToNewServer };
+  /// 关机前把挂着的客户端请求正常放掉。这是发布窗口里 502 的真正来源:长轮询是 25 秒挂着的
+  /// 请求,进程退出时它们的 socket 被硬关,cloudflared 报 "Unable to reach the origin: EOF"
+  /// 并对外回 502 —— 而它对源站是连接池复用的,同一条连接上并发的其他请求会一起遭殃。
+  /// 这里让每个等待者立刻按「这一轮没有新消息」正常返回 200,SSE 也正常结束,连接随即空闲,
+  /// 于是 server.close() 能干净收尾,没有一个请求是被切断的。
+  const drainClients = () => {
+    let released = 0;
+    for (const groupWaiters of waiters.values()) {
+      for (const waiter of [...groupWaiters]) {
+        waiter.finish(null);
+        released += 1;
+      }
+    }
+    waiters.clear();
+    for (const groupSubscribers of subscribers.values()) {
+      for (const response of [...groupSubscribers]) {
+        try {
+          response.end();
+        } catch {
+          // 已经断开的就算了
+        }
+        released += 1;
+      }
+    }
+    subscribers.clear();
+    return released;
+  };
+
+  return { app, store, sweepExpiredTokens, movedTo, pushEverythingToNewServer, drainClients };
 }
