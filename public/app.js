@@ -1659,9 +1659,15 @@ function renderApprovals({ announce = false } = {}) {
     checkbox.setAttribute("aria-label", `选择 ${approval.summary}`);
     const body = document.createElement("div");
     const title = document.createElement("h3");
-    title.textContent = `${approvalAIName(approval)} 请求执行`;
+    // 「是谁要的」必须写在卡片上:开了免审批的人看到自己的 AI 来请求会以为是 bug ——
+    // 免审批只覆盖自己的指令,这些都是别人让它干的活。
+    const requester = approval.sender?.name;
+    title.textContent = requester
+      ? `${requester} 要 ${approvalAIName(approval)} 执行`
+      : `${approvalAIName(approval)} 请求执行`;
     const meta = document.createElement("p");
-    meta.textContent = `${approval.group.name} · ${new Date(approval.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+    const scope = requester ? "（别人的指令，写操作要你批）" : "";
+    meta.textContent = `${approval.group.name} · ${new Date(approval.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}${scope}`;
     const summary = document.createElement("p");
     summary.className = "approval-source";
     summary.textContent = approval.summary;
