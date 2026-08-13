@@ -209,6 +209,14 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 | `GROUP_RELAY_MESSAGE_RETENTION_DAYS` | `30` | 消息缓冲区保留天数，过期自动清除 |
 | `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS` | `720` | 附件保留小时数，按文件 mtime 判定 |
 | `GROUP_RELAY_MOVED_TO` | 空 | 设为新服务器地址即触发整机搬迁并公告 `movedTo` |
+| `GROUP_RELAY_RESTRICT_DIRS` | 关 | 本机 agent 只能访问 `GROUP_RELAY_ALLOWED_DIRS` 里的目录 |
+| `GROUP_RELAY_ALLOWED_DIRS` | 空 | 允许访问的目录清单，按操作系统的路径分隔符分隔（Mac/Linux `:`，Windows `;`） |
+| `GROUP_RELAY_NO_DIR_LISTING` | 关 | 禁止把目录当文件发出（不提供目录结构） |
+| `GROUP_RELAY_NO_FILE_DOWNLOAD` | 关 | 禁止把本机文件作为附件发出，只允许读取内容供 AI 使用 |
+
+后四个是**客户端侧**（`bin/mcp-server.js`、`bin/codex-worker.js`）的数据安全开关，默认全关、
+行为与历史一致。开启目录白名单后清单为空即拒绝所有本机路径；这些开关只影响本机 agent 能碰
+什么，和服务端存什么无关。
 
 ## 创建群组和邀请成员
 
