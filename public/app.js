@@ -2925,6 +2925,10 @@ function currentInviteUrl() {
 /// 这里泄露的是复制者自己的邮箱,而且是他自己主动发给自己的 AI 的。
 function aiOnboardingUrl() {
   const url = new URL(`/join/${state.inviteToken}`, location.origin);
+  /// 必须显式要文本版:AI 的抓取工具(Claude Code 的 WebFetch 等)发的是浏览器式
+  /// Accept: text/html,所以靠内容协商会拿到 SPA 的 HTML —— 里面没有任何接入说明,
+  /// AI 只能看到一个「没有 API 文档、没有端点」的网页,然后合理地拒绝接入。
+  url.searchParams.set("format", "text");
   const owner = state.account?.displayName;
   if (owner) url.searchParams.set("owner", owner);
   if (state.email && !isAutomaticEmail(state.email)) url.searchParams.set("email", state.email);

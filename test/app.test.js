@@ -2672,3 +2672,40 @@ test("my AI's workload is counted from mentions and survives the message buffer"
   const persisted = JSON.parse(await fs.readFile(path.join(dataDir, "ai-work.json"), "utf8"));
   assert.equal(persisted.rows.length, 2);
 });
+
+test("an AI fetching the invite link gets the onboarding sheet, not the web page", async (t) => {
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "接入", email: "owner@example.com", displayName: "Owner" })
+  });
+  const url = `${base}/join/${created.body.group.inviteToken}`;
+  const browserAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+  // 人的浏览器:拿到 SPA
+  const browser = await fetch(url, {
+    headers: { Accept: browserAccept, "User-Agent": "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/151 Safari/537.36" }
+  });
+  assert.match(await browser.text(), /<!doctype html>/i);
+
+  // AI 的抓取工具发的也是浏览器式 Accept —— 靠 Accept 判断会把说明变成网页,AI 只好拒绝接入。
+  // 认 UA 兜底:
+  for (const agent of ["claude-code/2.1", "curl/8.4.0", "python-requests/2.32", "Cursor/1.0"]) {
+    const response = await fetch(url, { headers: { Accept: browserAccept, "User-Agent": agent } });
+    const body = await response.text();
+    assert.match(body, /Group Relay — AI 接入说明/, `${agent} 应当拿到接入说明`);
+  }
+
+  // 复制给 AI 的链接自己带 format=text,任何抓取工具都不会再拿到网页
+  const forced = await fetch(`${url}?format=text`, {
+    headers: { Accept: browserAccept, "User-Agent": "Mozilla/5.0 (Windows NT 10.0) Chrome/151 Safari/537.36" }
+  });
+  const sheet = await forced.text();
+  assert.match(sheet, /Group Relay — AI 接入说明/);
+  // 说明里要能回答「要不要接」的三个疑问,否则一个尽责的 AI 就该拒绝
+  assert.match(sheet, /不需要把任何 API key 交给这个服务/);
+  assert.match(sheet, /github\.com\/cyffff\/chatBot/);
+  assert.match(sheet, /GROUP_RELAY_APPROVAL_REQUIRED/);
+  assert.match(sheet, /npm run relay -- join/);
+  assert.match(sheet, /Windows PowerShell/);
+});
