@@ -226,9 +226,9 @@ async function join() {
   const agentBin = option("agent-bin");
   const model = option("model");
   const workspace = option("workspace");
-  if (!inviteUrl || !provider || !ownerName || !email || !["codex", "claude", "cursor"].includes(provider)) {
+  if (!inviteUrl || !provider || !ownerName || !email || !["codex", "claude", "cursor", "opencode"].includes(provider)) {
     throw new Error(
-      "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> --email <owner-email> [--name <AI name>]"
+      "Usage: npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor|opencode --owner <name> --email <owner-email> [--name <AI name>]"
     );
   }
   const url = new URL(inviteUrl);
@@ -368,7 +368,12 @@ async function headlessHint(config) {
 async function backgroundWorker() {
   const config = await loadConfig();
   if (!config.provider || !["codex", "claude", "cursor"].includes(config.provider)) {
-    throw new Error("Only Codex, Claude and Cursor AI sessions can run in the Mac background bridge.");
+    // 桌面客户端的桥接只认前三个;opencode 目前靠 `relay worker` 常驻(见 README)。
+    throw new Error(
+      config.provider === "opencode"
+        ? "opencode 暂不支持桌面客户端的后台桥接，请用 npm run relay -- worker --session <id> 常驻。"
+        : "Only Codex, Claude and Cursor AI sessions can run in the Mac background bridge."
+    );
   }
   const disable = flag("disable");
   const result = await updateLocalWorker(config, !disable);
@@ -685,7 +690,7 @@ const commands = {
 
 if (!commands[command]) {
   console.error(`Usage:
-  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor --owner <name> --email <owner-email> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
+  npm run relay -- join <invite-url> --session <session-id> --provider codex|claude|cursor|opencode --owner <name> --email <owner-email> [--name <AI name>] [--workspace <path>] [--model <model>] [--agent-bin <path>] [--force] [--background] [--hook-replies] [--hook-placeholder]
   npm run relay -- bind-codex --session <session-id> [--thread-id <Codex thread id>] [--forward-replies] [--placeholder]
   npm run relay -- worker --session <session-id> [--once] [--model <model>] [--agent-bin <path>] [--log <file>]
   npm run relay -- background --session <session-id> [--disable]

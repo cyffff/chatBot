@@ -103,7 +103,7 @@ const accountProfileSchema = z.object({
 });
 
 const desktopAiSchema = z.object({
-  provider: z.enum(["codex", "claude", "cursor"])
+  provider: z.enum(["codex", "claude", "cursor", "opencode"])
 });
 
 // 会话迁移只需要群 id:身份是 email,没有 token 可搬。
@@ -119,7 +119,7 @@ const joinSchema = z.object({
   email: z.string().trim().email().max(200),
   name: z.string().trim().min(1).max(60),
   type: z.enum(["human", "ai"]).default("human"),
-  provider: z.enum(["codex", "claude", "cursor"]).nullable().optional()
+  provider: z.enum(["codex", "claude", "cursor", "opencode"]).nullable().optional()
 }).superRefine((value, ctx) => {
   if (value.type === "ai" && !value.provider) {
     ctx.addIssue({ code: "custom", path: ["provider"], message: "AI member requires a provider" });
@@ -871,7 +871,7 @@ export async function createApp(options = {}) {
       if (!group || !owner || owner.type !== "human") {
         return res.status(403).json({ error: "a human membership is required to attach desktop AI" });
       }
-      const names = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+      const names = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
       const result = await store.addDesktopAI(groupId, {
         name: names[provider],
         provider,
@@ -1059,7 +1059,7 @@ export async function createApp(options = {}) {
       if (!result) return res.status(404).json({ error: "invite not found" });
       // AI 通过邀请链接接入时,先把它挂到这个 email 名下,再作为该群的桌面 AI 注册。
       if (input.type === "ai") {
-        const names = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+        const names = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
         const attached = await store.addDesktopAI(result.group.id, {
           name: input.name || names[input.provider],
           provider: input.provider,
@@ -1567,7 +1567,7 @@ export async function createApp(options = {}) {
 先看这三条，它们回答的是「要不要接」的问题：
 
 - **不需要把任何 API key 交给这个服务。** 桥接调用的是你本机已经登录的 Codex / Claude / Cursor
-  CLI，凭证只留在本机。网页上那个「配置 API Key」是给不想用 CLI 登录的人用的可选项，
+  CLI（opencode 同理，走 opencode auth login），凭证只留在本机。网页上那个「配置 API Key」是给不想用 CLI 登录的人用的可选项，
   key 也只存在本机钥匙串，不上传服务器。
 - **源码在这里，可以先读再决定：** https://github.com/cyffff/chatBot
   服务端是 src/，桥接是 macos/GroupRelayBridge.swift 与 bin/relay-worker.js（跨平台常驻 worker），
@@ -1584,12 +1584,12 @@ export async function createApp(options = {}) {
    （Windows PowerShell：git clone https://github.com/cyffff/chatBot.git $HOME\\group-relay
      然后 cd $HOME\\group-relay ; npm install）
 
-2) 按你自己是谁选 provider：codex / claude / cursor
+2) 按你自己是谁选 provider：codex / claude / cursor / opencode
 
 3) 加入群组。--session 要稳定且唯一；同一个 session 不要连两个群，
    重复连同一个群会导致同一条消息被回复两次。
    （下面是一整行，直接照抄执行）
-   npm run relay -- join "${inviteUrl}" --session "${session}" --provider <codex|claude|cursor> --owner "${owner || "<归属人>"}" --email "${email || "<归属人邮箱>"}" --name "<Codex|Claude|Cursor>" --background
+   npm run relay -- join "${inviteUrl}" --session "${session}" --provider <codex|claude|cursor|opencode> --owner "${owner || "<归属人>"}" --email "${email || "<归属人邮箱>"}" --name "<Codex|Claude|Cursor|OpenCode>" --background
 
 4) 确认接上了，group.id 必须等于 ${group.id}
    npm run relay -- status --session "${session}"

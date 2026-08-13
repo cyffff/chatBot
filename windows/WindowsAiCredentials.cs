@@ -10,7 +10,11 @@ internal static class WindowsAiCredentials
     private const uint CredPersistLocalMachine = 2;
     private const int ErrorNotFound = 1168;
 
-    public static bool IsConfigured(string provider) => Read(provider) is not null;
+    /// opencode 没有单一 API Key(只能 opencode auth login),所以它不进凭据管理器 ——
+    /// 调用方先问这个,别直接 Read:Read 会对不支持的 provider 抛异常。
+    public static bool SupportsApiKey(string provider) => provider is "codex" or "claude" or "cursor";
+
+    public static bool IsConfigured(string provider) => SupportsApiKey(provider) && Read(provider) is not null;
 
     public static string? Read(string provider)
     {
@@ -76,6 +80,7 @@ internal static class WindowsAiCredentials
 
     private static void ValidateProvider(string provider)
     {
+        // opencode 不在这里:它没有单一 API Key,只能用 opencode auth login,凭据由它自己保管。
         if (provider is not ("codex" or "claude" or "cursor")) throw new InvalidDataException("不支持的 AI 类型");
     }
 

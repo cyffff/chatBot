@@ -1349,6 +1349,62 @@ exit 0
   assert.ok(saved.cursor);
 });
 
+test("opencode joins as a fourth provider and answers through the resident worker", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "OpenCode Group", email: "owner@example.com", displayName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "opencode-session.json");
+  // 非交互模式必须是 `opencode run …`,受限档还要带 --agent plan(内置的只读 agent)
+  const fakeOpencode = path.join(dataDir, "fake-opencode");
+  await fs.writeFile(fakeOpencode, `#!/bin/sh
+if [ "$1" = "run" ]; then
+  printf '%s\\n' "opencode 已回复"
+  exit 0
+fi
+exit 1
+`, { mode: 0o700 });
+  const workerEnv = {
+    ...process.env,
+    GROUP_RELAY_AGENT_CONFIG: configFile,
+    GROUP_RELAY_LOCAL_WORKERS: path.join(dataDir, "local-workers.json")
+  };
+
+  const joined = await execFileAsync(process.execPath, [
+    relayClient, "join", created.body.inviteUrl.replace("http://relay.test", base),
+    "--provider", "opencode", "--owner", "Yunfei", "--email", "yunfei@example.com", "--name", "OpenCode"
+  ], { env: workerEnv });
+  const member = JSON.parse(joined.stdout).member;
+  assert.equal(member.provider, "opencode");
+  assert.equal(member.id, "ai:yunfei@example.com:opencode");
+
+  const question = new FormData();
+  question.set("text", "@OpenCode 在吗");
+  question.set("mentions", JSON.stringify([member.id]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
+    body: question
+  });
+
+  const ran = await execFileAsync(process.execPath, [
+    relayClient, "worker", "--once", "--agent-bin", fakeOpencode
+  ], { env: workerEnv, timeout: 20_000 });
+  assert.equal(JSON.parse(ran.stdout).handled, 1);
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
+  });
+  assert.equal(history.body.messages.at(-1).text, "opencode 已回复");
+  assert.equal(history.body.messages.at(-1).status, "complete");
+  // 桌面客户端的桥接还不认它,这时要给出常驻 worker 的说法,而不是一句「不支持」
+  await assert.rejects(
+    execFileAsync(process.execPath, [relayClient, "background"], { env: workerEnv }),
+    /relay -- worker/
+  );
+});
+
 test("Codex Mac hooks mark busy, create a placeholder and fill the final reply", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {

@@ -487,6 +487,14 @@ private final class RelayWorker {
                 ? ["-p", prompt, "--output-format", "text", "--dangerously-skip-permissions"]
                 : ["-p", prompt, "--output-format", "text", "--permission-mode", "plan"]
             if let model = config.model { arguments += ["--model", model] }
+        case "opencode":
+            /// opencode run 是非交互模式,回复走 stdout。受限档用内置的 plan agent:它把改文件
+            /// 和跑 bash 都设成 ask,而非交互模式下没人能批,于是等价于只读。全权档用默认的
+            /// build agent —— 它没有 -C,靠上面的 currentDirectoryURL 定位项目。
+            arguments = ["run"]
+            if !trustedExecution { arguments += ["--agent", "plan"] }
+            if let model = config.model { arguments += ["--model", model] }
+            arguments.append(prompt)
         case "cursor":
             // cursor 的 --sandbox 只有 enabled/disabled 两档,没有单独的只读值:只读档给它
             // 开着沙箱、并且不给 --force(需要写的动作会被拦),但给 workspace 让它能读项目。
@@ -809,6 +817,8 @@ private final class RelayWorker {
             candidates = ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
         case "cursor":
             candidates = ["\(home)/.local/bin/cursor-agent", "\(home)/.cursor/bin/cursor-agent", "/opt/homebrew/bin/cursor-agent", "/usr/local/bin/cursor-agent"]
+        case "opencode":
+            candidates = ["\(home)/.opencode/bin/opencode", "\(home)/.local/bin/opencode", "/opt/homebrew/bin/opencode", "/usr/local/bin/opencode"]
         default:
             candidates = []
         }

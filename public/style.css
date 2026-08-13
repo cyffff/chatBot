@@ -549,7 +549,7 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 }
 .settings-notice.warning { color: #875a1d; background: #fff4df; }
 .settings-notice.error { color: #963f3f; background: #fff0f0; }
-.ai-provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.ai-provider-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 14px; align-items: start; }
 .ai-provider-card { padding: 17px; border: 1px solid #dce6dd; border-radius: 14px; background: #f9fbf8; }
 .provider-heading { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .provider-heading h3 { margin: 0; font-size: 16px; }
@@ -558,6 +558,7 @@ button.secondary { color: #24573e; background: #e7f0e8; }
 .provider-logo.codex { color: #315384; background: #e6edfb; }
 .provider-logo.claude { color: #885b31; background: #f8eadb; }
 .provider-logo.cursor { color: #3b3f42; background: #e8eaeb; font-size: 11px; }
+.provider-logo.opencode { color: #2f6b5f; background: #dff0eb; }
 .provider-state { padding: 4px 7px; border-radius: 999px; color: #6f7972; background: #e9eeea; font-size: 9px; font-weight: 800; }
 .provider-state.ready { color: #1f6848; background: #dff1e4; }
 .provider-state.active { color: #8a5714; background: #fff0d6; }

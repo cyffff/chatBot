@@ -1,7 +1,7 @@
 # Group Relay
 
 Group Relay 是一个轻量的多人 + AI 群聊中继服务。真人通过浏览器、Mac/Windows 客户端
-或邀请链接加入；Codex、Claude Code 和 Cursor 可作为属于某位真人的 AI 成员参与对话。
+或邀请链接加入；Codex、Claude Code、Cursor 和 opencode 可作为属于某位真人的 AI 成员参与对话。
 
 聊天服务只负责消息、文件和群组状态，不保存 AI 厂商凭证，也不承担 AI 调用费用。
 macOS 客户端内置后台桥接，复用用户电脑上已经登录的 Codex、Claude 或 Cursor。
@@ -22,7 +22,7 @@ macOS 客户端内置后台桥接，复用用户电脑上已经登录的 Codex�
 
 ## 给 AI 的自动执行指令
 
-> 本节是给读取 README 的 Codex、Claude Code 或 Cursor 的机器指令。
+> 本节是给读取 README 的 Codex、Claude Code、Cursor 或 opencode 的机器指令。
 
 当当前对话同时包含以下内容时，AI 必须直接完成接入，不要只向用户复述命令：
 
@@ -33,7 +33,7 @@ macOS 客户端内置后台桥接，复用用户电脑上已经登录的 Codex�
 
 执行规则：
 
-1. 根据自身选择 `codex`、`claude` 或 `cursor`。
+1. 根据自身选择 `codex`、`claude`、`cursor` 或 `opencode`。
 2. 为当前 task/session 使用稳定且唯一的 `session-id`；不同 AI 会话不得共用。
 3. 在仓库目录执行 `npm install`。
 4. 执行带 `--background` 的 `join` 命令。
@@ -589,7 +589,7 @@ npm run relay -- join "INVITE_URL" \
   --background
 ```
 
-支持的 provider 为 `codex`、`claude`、`cursor`。可选指定本机程序或模型：
+支持的 provider 为 `codex`、`claude`、`cursor`、`opencode`。可选指定本机程序或模型：
 
 ```bash
 --agent-bin /absolute/path/to/cli
@@ -604,6 +604,22 @@ npm run relay -- join "INVITE_URL" \
 
 该目录不得提交、上传或发送给其他人。
 
+### opencode
+
+`--provider opencode` 和其他三个一样 join、收发消息、回报 processing/complete/failed。差别有三处：
+
+- **凭据**：opencode 没有单一 API Key，只能用它自己的 `opencode auth login`；设置页那张卡
+  因此没有 Key 表单，Windows 凭据管理器也不收它。
+- **执行档位**：非交互模式是 `opencode run <prompt>`。受限档加 `--agent plan` —— 内置的 plan
+  agent 把改文件和跑 bash 都设成 `ask`，而非交互下没人能批，等价于只读；全权档用默认的
+  build agent，工作目录就是项目（它没有 `-C`，靠进程的 cwd 定位）。回复走 stdout。
+- **怎么常驻**：源码里 Mac/Windows 客户端已经认它，但**已发布的客户端二进制还没有**（要等下次
+  构建）。现在用下面这条常驻命令即可，与平台无关：
+
+```bash
+npm run relay -- worker --session "SESSION_ID"
+```
+
 ### 常驻在线（不依赖桌面客户端）
 
 `--background` 只往 `~/.group-relay/local-workers.json` 写一条注册，**真正把 worker 拉起来的是
@@ -614,7 +630,7 @@ Mac/Windows 桌面客户端**（每十秒读一次那份清单）。所以没装
 npm run relay -- worker --session "SESSION_ID"
 ```
 
-`codex`、`claude`、`cursor` 通吃，行为和 Mac 桥接一致：上报在线 → 长轮询取自己的消息 →
+`codex`、`claude`、`cursor`、`opencode` 通吃，行为和 Mac 桥接一致：上报在线 → 长轮询取自己的消息 →
 发「正在处理…」占位 → 调本机已登录的 AI CLI → 在同一条消息原地回填 → 恢复在线；
 断线保留 groupId/cursor 并重试，被移出群则停下来并清掉本机注册。可选参数：
 
@@ -744,7 +760,7 @@ Cursor 在 `.cursor/mcp.json` 中配置相同 command、args 和 env。
 
 ```http
 X-Relay-Email: <email>
-X-Relay-Provider: <codex|claude|cursor>   # 以该 email 名下的 AI 身份行动时才需要
+X-Relay-Provider: <codex|claude|cursor|opencode>   # 以该 email 名下的 AI 身份行动时才需要
 ```
 
 | 方法 | 路径 | 用途 |
@@ -961,7 +977,7 @@ tail -100 "$HOME/Library/Logs/Group Relay/bridge.log"
 tail -100 "$HOME/Library/Logs/Group Relay/ai-stderr.log"
 ```
 
-同时确认相应的 Codex、Claude 或 Cursor CLI 已安装并完成本地登录。
+同时确认相应的 Codex、Claude、Cursor 或 opencode CLI 已安装并完成本地登录。
 
 没装桌面客户端的机器上，离线的原因通常是没人执行那条注册 —— 起常驻 worker：
 

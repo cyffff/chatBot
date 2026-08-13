@@ -50,7 +50,7 @@ const state = {
 
 const accountStorageKey = "relay-account-v1";
 const serverStorageKey = "relay-server-url";
-const aiProviderLabels = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+const aiProviderLabels = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
 const nativeRequests = new Map();
 let nativeRequestSequence = 0;
 const views = ["#identity-view", "#create-view", "#join-view", "#invalid-view", "#account-view", "#transfer-view", "#chat-view"];
@@ -1401,8 +1401,8 @@ function renderAccountSessions(sessions) {
     aiLabel.textContent = "我的桌面 AI";
     aiControls.append(aiLabel);
     const attachedProviders = new Set((session.desktopAis ?? []).map((member) => member.provider));
-    for (const provider of ["codex", "claude", "cursor"]) {
-      const labels = { codex: "Codex", claude: "Claude", cursor: "Cursor" };
+    for (const provider of ["codex", "claude", "cursor", "opencode"]) {
+      const labels = aiProviderLabels;
       const attached = attachedProviders.has(provider);
       const toggle = document.createElement("button");
       toggle.type = "button";
@@ -1994,24 +1994,44 @@ async function setFeedbackStatus(ticket, status) {
 
 function renderAISettings(providers) {
   state.aiProviderStatus = providers;
-  for (const provider of ["codex", "claude", "cursor"]) {
+  // opencode 那张卡没有 API Key 表单:它只支持自己的 CLI 登录,所以下面每个查询都要容错。
+  for (const provider of ["codex", "claude", "cursor", "opencode"]) {
     const card = document.querySelector(`[data-ai-provider="${provider}"]`);
+    if (!card) continue;
     const status = providers.find((item) => item.provider === provider) ?? {};
     const workerCount = Number(status.workerCount || 0);
     const keyConfigured = status.keyConfigured === true;
     const cliAvailable = status.cliAvailable === true;
-    card.querySelector("[data-key-state]").textContent = keyConfigured ? "已配置（内容已隐藏）" : "未配置";
-    card.querySelector("[data-mode-state]").textContent = keyConfigured
-      ? "API Key（优先）"
-      : cliAvailable ? "本机 CLI 登录账号" : "尚不可用";
+    const keyState = card.querySelector("[data-key-state]");
+    // 没有 Key 表单的 provider(opencode)不该显示「未配置」—— 它根本没有可配置的 Key。
+    if (keyState) {
+      keyState.textContent = card.querySelector(".ai-key-form")
+        ? (keyConfigured ? "已配置（内容已隐藏）" : "未配置")
+        : "不适用";
+    }
+    const modeState = card.querySelector("[data-mode-state]");
+    if (modeState) {
+      modeState.textContent = keyConfigured
+        ? "API Key（优先）"
+        : cliAvailable ? "本机 CLI 登录账号" : "尚不可用";
+    }
+    if (!card.querySelector(".ai-key-form")) {
+      const badgeless = card.querySelector("[data-key-storage]");
+      if (badgeless) badgeless.textContent = "opencode 自己的登录";
+    }
     const cliState = card.querySelector("[data-cli-state]");
-    cliState.textContent = cliAvailable ? "已安装" : "未找到";
-    cliState.title = status.cliPath || "";
-    card.querySelector("[data-key-storage]").textContent = keyConfigured
-      ? (status.credentialStore || "本机安全凭据")
-      : "未保存";
-    card.querySelector("[data-worker-count]").textContent = `${workerCount} 个`;
-    card.querySelector(".toggle-ai-key").textContent = keyConfigured ? "更换 API Key" : "配置 API Key";
+    if (cliState) {
+      cliState.textContent = cliAvailable ? "已安装" : "未找到";
+      cliState.title = status.cliPath || "";
+    }
+    const keyStorage = card.querySelector("[data-key-storage]");
+    if (keyStorage && card.querySelector(".ai-key-form")) {
+      keyStorage.textContent = keyConfigured ? (status.credentialStore || "本机安全凭据") : "未保存";
+    }
+    const workerState = card.querySelector("[data-worker-count]");
+    if (workerState) workerState.textContent = `${workerCount} 个`;
+    const keyToggle = card.querySelector(".toggle-ai-key");
+    if (keyToggle) keyToggle.textContent = keyConfigured ? "更换 API Key" : "配置 API Key";
     const help = card.querySelector("[data-provider-help]");
     const badge = card.querySelector(".provider-state");
     badge.classList.remove("ready", "active", "missing");
@@ -2024,14 +2044,19 @@ function renderAISettings(providers) {
     } else if (cliAvailable) {
       badge.textContent = "CLI 可用";
       badge.classList.add("active");
-      help.textContent = "尚未配置 API Key；后台将使用本机 CLI 的登录账号。也可以在下方保存 Key。";
+      help.textContent = card.querySelector(".ai-key-form")
+        ? "尚未配置 API Key；后台将使用本机 CLI 的登录账号。也可以在下方保存 Key。"
+        : "使用本机 CLI 的登录账号（opencode auth login），它没有可配置的 API Key。";
     } else {
       badge.textContent = "未就绪";
       badge.classList.add("missing");
-      help.textContent = `没有配置 API Key，也没有找到 ${aiProviderLabels[provider]} CLI。请保存 Key，或先安装并登录 CLI。`;
+      help.textContent = card.querySelector(".ai-key-form")
+        ? `没有配置 API Key，也没有找到 ${aiProviderLabels[provider]} CLI。请保存 Key，或先安装并登录 CLI。`
+        : `没有找到 ${aiProviderLabels[provider]} CLI。它只支持自己的 CLI 登录：装好后执行 opencode auth login。`;
       help.classList.add("missing");
     }
-    card.querySelector(".remove-ai-key").disabled = !keyConfigured;
+    const removeKey = card.querySelector(".remove-ai-key");
+    if (removeKey) removeKey.disabled = !keyConfigured;
   }
 }
 
@@ -2078,7 +2103,7 @@ function renderChatAIControls(session, providers) {
       : "可把你的 AI 加入这个群组；已登录的桌面客户端会自动启动后台连接。"
     : "当前没有可运行的本机 AI。请先在“接入设置”中配置并安装对应 CLI。";
 
-  for (const provider of ["codex", "claude", "cursor"]) {
+  for (const provider of ["codex", "claude", "cursor", "opencode"]) {
     const label = aiProviderLabels[provider];
     const status = providers.find((item) => item.provider === provider) ?? {};
     const attached = attachedProviders.has(provider);

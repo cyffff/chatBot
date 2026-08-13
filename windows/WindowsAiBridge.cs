@@ -237,7 +237,7 @@ internal sealed class WindowsAiBridgeManager : IDisposable
     private static void Validate(DesktopAiWorkerConfig config)
     {
         ValidateWorkerId(config.WorkerId);
-        if (!new[] { "codex", "claude", "cursor" }.Contains(config.Provider))
+        if (!new[] { "codex", "claude", "cursor", "opencode" }.Contains(config.Provider))
             throw new InvalidDataException("不支持的 AI provider");
         if (!Uri.TryCreate(config.BaseUrl, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https"))
             throw new InvalidDataException("Group Relay 地址无效");
@@ -598,6 +598,16 @@ internal sealed class WindowsAiWorker
                 else { start.ArgumentList.Add("--permission-mode"); start.ArgumentList.Add("plan"); }
                 if (config.Model is not null) { start.ArgumentList.Add("--model"); start.ArgumentList.Add(config.Model); }
             }
+            else if (config.Provider == "opencode")
+            {
+                // opencode run 是非交互模式,回复走 stdout。受限档用内置的 plan agent:它把改文件
+                // 和跑 bash 都设成 ask,非交互下没人能批,于是等价于只读。全权档用默认的 build
+                // agent —— 它没有 -C,靠上面的 WorkingDirectory 定位项目。
+                start.ArgumentList.Add("run");
+                if (!trusted) { start.ArgumentList.Add("--agent"); start.ArgumentList.Add("plan"); }
+                if (config.Model is not null) { start.ArgumentList.Add("--model"); start.ArgumentList.Add(config.Model); }
+                start.ArgumentList.Add(prompt);
+            }
             else
             {
                 start.ArgumentList.Add("--trust");
@@ -615,7 +625,9 @@ internal sealed class WindowsAiWorker
                 if (config.Model is not null) { start.ArgumentList.Add("--model"); start.ArgumentList.Add(config.Model); }
                 start.ArgumentList.Add(prompt);
             }
-            var apiKey = WindowsAiCredentials.Read(config.Provider);
+            var apiKey = WindowsAiCredentials.SupportsApiKey(config.Provider)
+                ? WindowsAiCredentials.Read(config.Provider)
+                : null;
             if (!string.IsNullOrWhiteSpace(apiKey))
             {
                 var variable = config.Provider switch
@@ -794,6 +806,7 @@ internal sealed class WindowsAiWorker
             "codex" => new[] { "codex.exe" },
             "claude" => new[] { "claude.exe" },
             "cursor" => new[] { "cursor-agent.exe" },
+            "opencode" => new[] { "opencode.exe", "opencode.cmd" },
             _ => []
         };
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);

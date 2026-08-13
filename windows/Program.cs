@@ -194,14 +194,16 @@ internal sealed class RelayForm : Form
 
     private object AiSettingsPayload()
     {
-        var providers = new[] { "codex", "claude", "cursor" }.Select(provider =>
+        var providers = new[] { "codex", "claude", "cursor", "opencode" }.Select(provider =>
         {
             var cliPath = FindCliPath(provider);
             return new
             {
                 provider,
                 keyConfigured = WindowsAiCredentials.IsConfigured(provider),
-                credentialStore = "Windows Credential Manager",
+                credentialStore = WindowsAiCredentials.SupportsApiKey(provider)
+                    ? "Windows Credential Manager"
+                    : "opencode 自己的登录",
                 cliAvailable = cliPath is not null,
                 cliPath = cliPath ?? "",
                 workerCount = aiBridge.ConfiguredCount(provider)
@@ -217,6 +219,7 @@ internal sealed class RelayForm : Form
             "codex" => new[] { "codex.exe" },
             "claude" => new[] { "claude.exe" },
             "cursor" => new[] { "cursor-agent.exe" },
+            "opencode" => new[] { "opencode.exe", "opencode.cmd" },
             _ => Array.Empty<string>()
         };
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);

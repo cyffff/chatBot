@@ -305,7 +305,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     }
 
     private func validateProvider(_ provider: String) throws {
-        guard ["codex", "claude", "cursor"].contains(provider) else {
+        guard ["codex", "claude", "cursor", "opencode"].contains(provider) else {
             throw NSError(domain: "GroupRelay", code: 20, userInfo: [NSLocalizedDescriptionKey: "不支持的 AI 类型"])
         }
     }
@@ -378,7 +378,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     private func aiSettingsPayload() -> [String: Any] {
         let registry = jsonObject(at: workerRegistryURL)
         let workers = registry?["workers"] as? [String: Any] ?? [:]
-        let providers = ["codex", "claude", "cursor"].map { provider -> [String: Any] in
+        let providers = ["codex", "claude", "cursor", "opencode"].map { provider -> [String: Any] in
             let count = workers.values.filter { value in
                 (value as? [String: Any])?["provider"] as? String == provider
             }.count
@@ -409,6 +409,9 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         case "cursor":
             names = ["cursor-agent"]
             preferred = ["\(home)/.local/bin/cursor-agent", "\(home)/.cursor/bin/cursor-agent"]
+        case "opencode":
+            names = ["opencode"]
+            preferred = ["\(home)/.opencode/bin/opencode", "\(home)/.local/bin/opencode"]
         default:
             return nil
         }
@@ -446,7 +449,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             let workerId = incoming["workerId"] as? String,
             workerId.range(of: #"^[a-z0-9-]{1,160}$"#, options: .regularExpression) != nil,
             let provider = incoming["provider"] as? String,
-            ["codex", "claude", "cursor"].contains(provider),
+            ["codex", "claude", "cursor", "opencode"].contains(provider),
             let baseUrl = incoming["baseUrl"] as? String,
             let relayURL = URL(string: baseUrl),
             relayURL.host == serverURL.host,
@@ -725,7 +728,7 @@ final class LocalAIBridgeManager {
                 let workerId = incoming["workerId"] as? String,
                 workerId.range(of: #"^[a-z0-9-]{1,160}$"#, options: .regularExpression) != nil,
                 let provider = incoming["provider"] as? String,
-                ["codex", "claude", "cursor"].contains(provider),
+                ["codex", "claude", "cursor", "opencode"].contains(provider),
                 let rawBaseURL = incoming["baseUrl"] as? String,
                 URL(string: rawBaseURL)?.host == serverURL.host,
                 let groupId = incoming["groupId"] as? String,

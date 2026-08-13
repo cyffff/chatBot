@@ -203,7 +203,7 @@ async function findExecutable(provider, override = null) {
     if (resolved) return resolved;
     throw new Error(`指定的 ${provider} CLI 不可执行：${override}`);
   }
-  const names = { codex: ["codex"], claude: ["claude"], cursor: ["cursor-agent"] }[provider];
+  const names = { codex: ["codex"], claude: ["claude"], cursor: ["cursor-agent"], opencode: ["opencode"] }[provider];
   if (!names) throw new Error(`Unsupported provider ${provider}`);
   const extensions = isWindows
     ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
@@ -237,6 +237,14 @@ async function findExecutable(provider, override = null) {
       "/opt/homebrew/bin/cursor-agent",
       "/usr/local/bin/cursor-agent",
       path.join(home, "AppData/Local/Programs/cursor-agent/cursor-agent.exe")
+    ],
+    opencode: [
+      path.join(home, ".opencode/bin/opencode"),
+      path.join(home, ".local/bin/opencode"),
+      "/opt/homebrew/bin/opencode",
+      "/usr/local/bin/opencode",
+      path.join(home, "AppData/Local/Programs/opencode/opencode.exe"),
+      path.join(home, "AppData/Roaming/npm/opencode.cmd")
     ]
   }[provider];
   for (const candidate of candidates) {
@@ -302,6 +310,16 @@ function agentArguments({ provider, prompt, trustedExecution, workspace, tempora
       ? ["-p", prompt, "--output-format", "text", "--dangerously-skip-permissions"]
       : ["-p", prompt, "--output-format", "text", "--permission-mode", "plan"];
     if (model) args.push("--model", model);
+    return { args, outputFile };
+  }
+  if (provider === "opencode") {
+    /// opencode 的 run 是非交互模式,回复直接走 stdout。受限档用内置的 plan agent:
+    /// 它把改文件和跑 bash 都设成 ask,而非交互模式下没人能批 —— 于是等价于只读。
+    /// 全权档用默认的 build agent,工作目录就是项目(它没有 -C,靠 cwd 定位项目)。
+    const args = ["run"];
+    if (!trustedExecution) args.push("--agent", "plan");
+    if (model) args.push("--model", model);
+    args.push(prompt);
     return { args, outputFile };
   }
   if (provider === "cursor") {
@@ -511,8 +529,8 @@ export async function runWorker({
   shouldContinue = () => true
 }) {
   let config = initialConfig;
-  if (!["codex", "claude", "cursor"].includes(config.provider)) {
-    throw new Error(`Unsupported provider ${config.provider}; expected codex, claude or cursor.`);
+  if (!["codex", "claude", "cursor", "opencode"].includes(config.provider)) {
+    throw new Error(`Unsupported provider ${config.provider}; expected codex, claude, cursor or opencode.`);
   }
   const persist = async () => {
     if (saveConfig) await saveConfig(config);

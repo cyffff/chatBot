@@ -612,7 +612,7 @@ export class FileStore {
     if (!result) return null;
 
     const renames = new Map([[humanMemberId(from), humanMemberId(to)]]);
-    for (const provider of ["codex", "claude", "cursor"]) {
+    for (const provider of ["codex", "claude", "cursor", "opencode"]) {
       renames.set(aiMemberId(from, provider), aiMemberId(to, provider));
     }
     for (const groupId of touchedGroups) {
