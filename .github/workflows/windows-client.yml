@@ -19,14 +19,19 @@ jobs:
 
       - name: Publish self-contained Windows x64 client
         shell: pwsh
+        env:
+          GROUP_RELAY_DEFAULT_URL: ${{ vars.GROUP_RELAY_DEFAULT_URL }}
         run: |
           dotnet restore windows/GroupRelay.Windows.csproj
+          # 默认服务器地址在构建时注入(仓库里不烧地址,临时隧道会过期)。
+          # 仓库变量 GROUP_RELAY_DEFAULT_URL 有值就带上,没有就出一个首启会问地址的产物。
           dotnet publish windows/GroupRelay.Windows.csproj `
             --configuration Release `
             --runtime win-x64 `
             --self-contained true `
             --output windows/publish `
-            -p:PublishReadyToRun=true
+            -p:PublishReadyToRun=true `
+            -p:GroupRelayDefaultUrl="${env:GROUP_RELAY_DEFAULT_URL}"
 
       - name: Install Inno Setup
         shell: pwsh

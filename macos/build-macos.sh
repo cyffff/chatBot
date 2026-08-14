@@ -33,6 +33,17 @@ xcrun swiftc \
 
 cp "$PROJECT_DIR/macos/Info.plist" "$CONTENTS/Info.plist"
 
+# 仓库里的 DefaultRelayURL 是空的:烧一个会过期的临时隧道地址进安装包,只会让别人编译出来
+# 默认连不上(这正是反馈里那条工单)。要给自己团队打包就在构建时传入口地址:
+#   GROUP_RELAY_DEFAULT_URL=https://chat.example.com ./macos/build-macos.sh
+# 不传就留空,客户端首启会直接问用户要地址。
+if [ -n "${GROUP_RELAY_DEFAULT_URL:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Set :DefaultRelayURL $GROUP_RELAY_DEFAULT_URL" "$CONTENTS/Info.plist"
+  echo "Bundled default server: $GROUP_RELAY_DEFAULT_URL"
+else
+  echo "No GROUP_RELAY_DEFAULT_URL set; the client will ask for the server address on first launch."
+fi
+
 SOURCE_ICON="$PROJECT_DIR/public/icon-512.png"
 sips -z 16 16 "$SOURCE_ICON" --out "$ICONSET/icon_16x16.png" >/dev/null
 sips -z 32 32 "$SOURCE_ICON" --out "$ICONSET/icon_16x16@2x.png" >/dev/null

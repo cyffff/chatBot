@@ -12,6 +12,9 @@ private extension Notification.Name {
 final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     private let webView: WKWebView
     private var serverURL: URL
+    /// 编译产物里不再烧死一个会过期的临时隧道地址(源码里那个早就失效了,别人从源码编译出来
+    /// 默认就连不上)。没有可用地址时不静默连 127.0.0.1,而是首启直接问。
+    private var needsServerSetup = false
 
     init() {
         let configuration = WKWebViewConfiguration()
@@ -19,7 +22,8 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
 
         webView = WKWebView(frame: .zero, configuration: configuration)
-        serverURL = RelayWindowController.savedServerURL()
+        let saved = RelayWindowController.savedServerURL()
+        serverURL = saved ?? URL(string: "http://127.0.0.1:8787")!
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 820),
@@ -40,6 +44,7 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         window.isReleasedWhenClosed = false
 
         super.init(window: window)
+        needsServerSetup = saved == nil
         window.delegate = self
         webView.navigationDelegate = self
         configuration.userContentController.add(self, name: "relayNative")
@@ -53,18 +58,35 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     func start() {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        // 没有配过地址就先问,不要打开一个必然连不上的空窗口。
+        if needsServerSetup {
+            needsServerSetup = false
+            showServerSettings(firstRun: true)
+            return
+        }
         loadClient()
     }
 
-    private static func savedServerURL() -> URL {
-        let defaults = UserDefaults.standard
-        let configured = defaults.string(forKey: serverPreferenceKey)
-        let bundled = Bundle.main.object(forInfoDictionaryKey: "DefaultRelayURL") as? String
-        let value = configured ?? bundled ?? "http://127.0.0.1:8787"
-        return normalizedServerURL(value) ?? URL(string: "http://127.0.0.1:8787")!
+    /// 打包时可以用 GROUP_RELAY_DEFAULT_URL 把自己团队的入口写进 Info.plist(见 build-macos.sh);
+    /// 仓库里留空,这样任何人从源码编译出来都不会拿到一个别人的、还会过期的地址。
+    static func bundledServerURL() -> URL? {
+        let bundled = (Bundle.main.object(forInfoDictionaryKey: "DefaultRelayURL") as? String) ?? ""
+        return bundled.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : normalizedServerURL(bundled)
     }
 
-    private static func normalizedServerURL(_ rawValue: String) -> URL? {
+    private static func savedServerURL() -> URL? {
+        if let configured = UserDefaults.standard.string(forKey: serverPreferenceKey),
+           let url = normalizedServerURL(configured) {
+            return url
+        }
+        return bundledServerURL()
+    }
+
+    /// 同事手上通常只有一条群邀请链接,那就让他直接贴:遇到 /join、/group、/app 这类客户端
+    /// 路由时只取根地址。真正架在子路径下的部署(反向代理)保持原样,不动它的前缀。
+    private static let clientRoutePrefixes = ["/join", "/group", "/app", "/transfer", "/web-login"]
+
+    static func normalizedServerURL(_ rawValue: String) -> URL? {
         var value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         while value.hasSuffix("/") { value.removeLast() }
         guard
@@ -73,6 +95,14 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
             url.host != nil
         else {
             return nil
+        }
+        let path = url.path
+        if clientRoutePrefixes.contains(where: { path == $0 || path.hasPrefix("\($0)/") }) {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.path = ""
+            components?.query = nil
+            components?.fragment = nil
+            return components?.url ?? url
         }
         return url
     }
@@ -122,21 +152,36 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
     }
 
     @objc func showServerSettings() {
+        showServerSettings(firstRun: false)
+    }
+
+    func showServerSettings(firstRun: Bool) {
         let alert = NSAlert()
-        alert.messageText = "Group Relay 服务器"
-        alert.informativeText = "输入 Group Relay 的固定 HTTPS 地址。临时 trycloudflare 地址变化后需要在这里更新。"
-        alert.addButton(withTitle: "保存并重新连接")
+        alert.messageText = firstRun ? "先填 Group Relay 服务器地址" : "Group Relay 服务器"
+        alert.informativeText = firstRun
+            ? "这个客户端没有内置服务器地址(临时隧道地址会过期,烧进安装包只会让人连不上)。"
+                + "把你们在用的入口贴进来 —— 直接粘群邀请链接也行,会自动取出服务器地址;"
+                + "本机调试可填 http://127.0.0.1:8787。"
+            : "输入 Group Relay 的服务器地址。临时 trycloudflare 地址变化后需要在这里更新。"
+        alert.addButton(withTitle: firstRun ? "连接" : "保存并重新连接")
         alert.addButton(withTitle: "取消")
 
         let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 430, height: 24))
-        input.stringValue = serverURL.absoluteString
-        input.placeholderString = "https://chat.example.com"
+        input.stringValue = firstRun ? "" : serverURL.absoluteString
+        input.placeholderString = "https://chat.example.com 或直接粘邀请链接"
         alert.accessoryView = input
         alert.window.initialFirstResponder = input
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            // 首启时取消等于没地址可连,别留一个空窗口装作连上了。
+            if firstRun {
+                showError("还没有服务器地址", detail: "随时可以从菜单「Group Relay → 服务器设置」再填。")
+            }
+            return
+        }
         guard let url = RelayWindowController.normalizedServerURL(input.stringValue) else {
             showError("服务器地址无效", detail: "请输入以 http:// 或 https:// 开头的完整地址。")
+            showServerSettings(firstRun: firstRun)
             return
         }
         serverURL = url
@@ -602,10 +647,21 @@ final class RelayWindowController: NSWindowController, NSWindowDelegate, WKNavig
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        showError(
-            "无法连接 Group Relay",
-            detail: "\(error.localizedDescription)\n\n可在“Group Relay → 服务器设置”中修改地址。"
-        )
+        // 连不上最常见的原因就是地址过期(临时隧道会变),所以把改地址做成这里的第一个按钮,
+        // 而不是让人自己去菜单里找。
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "连不上 Group Relay"
+        alert.informativeText = "当前地址：\(serverURL.absoluteString)\n\(error.localizedDescription)\n\n"
+            + "如果这是一个临时隧道地址，它很可能已经过期，向群主要一个新的。"
+        alert.addButton(withTitle: "修改地址…")
+        alert.addButton(withTitle: "重试")
+        alert.addButton(withTitle: "关闭")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: showServerSettings(firstRun: false)
+        case .alertSecondButtonReturn: loadClient()
+        default: break
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -940,7 +996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bridgeStatusItem = appMenu.addItem(withTitle: bridgeManager.statusText, action: #selector(refreshBridges), keyEquivalent: "")
         bridgeStatusItem?.target = self
         appMenu.addItem(.separator())
-        let settings = appMenu.addItem(withTitle: "服务器设置…", action: #selector(RelayWindowController.showServerSettings), keyEquivalent: ",")
+        let settings = appMenu.addItem(withTitle: "服务器设置…", action: #selector(RelayWindowController.showServerSettings as (RelayWindowController) -> () -> Void), keyEquivalent: ",")
         settings.target = relayWindow
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 Group Relay", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

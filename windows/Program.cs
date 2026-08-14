@@ -1,10 +1,21 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
 
 namespace GroupRelay.Windows;
+
+/// 打包时注入的默认服务器地址:`dotnet publish -p:GroupRelayDefaultUrl=https://chat.example.com`。
+/// 仓库里不设值,所以从源码编译出来的产物不会带着别人的、还会过期的临时隧道地址。
+internal static class BuildDefaults
+{
+    public static string? ServerUrl => typeof(BuildDefaults).Assembly
+        .GetCustomAttributes<AssemblyMetadataAttribute>()
+        .FirstOrDefault(attribute => attribute.Key == "GroupRelayDefaultUrl")?
+        .Value;
+}
 
 internal static class Program
 {
@@ -18,7 +29,10 @@ internal static class Program
 
 internal sealed class RelayForm : Form
 {
-    private const string DefaultServerUrl = "https://ferry-cams-mention-montreal.trycloudflare.com";
+    /// 编译产物里不烧死地址:临时隧道会过期,别人编译出来默认就连不上(反馈工单 e03fe6ed)。
+    /// 要给自己团队打包,构建时传 GROUP_RELAY_DEFAULT_URL;不传则首启直接问用户。
+    private static readonly string? DefaultServerUrl =
+        string.IsNullOrWhiteSpace(BuildDefaults.ServerUrl) ? null : BuildDefaults.ServerUrl;
     private readonly WebView2 webView = new() { Dock = DockStyle.Fill };
     private readonly WindowsAiBridgeManager aiBridge = new();
     private readonly NotifyIcon trayIcon = new();
@@ -27,7 +41,7 @@ internal sealed class RelayForm : Form
 
     public RelayForm()
     {
-        serverUrl = SettingsStore.LoadServerUrl() ?? DefaultServerUrl;
+        serverUrl = SettingsStore.LoadServerUrl() ?? DefaultServerUrl ?? "";
         Text = "Group Relay";
         Width = 1180;
         Height = 820;
@@ -94,6 +108,11 @@ internal sealed class RelayForm : Form
                 eventArgs.Handled = true;
                 OpenExternal(eventArgs.Uri);
             };
+            webView.CoreWebView2.NavigationCompleted += (_, eventArgs) =>
+            {
+                if (eventArgs.IsSuccess) return;
+                BeginInvoke(new Action(() => HandleNavigationFailed(eventArgs.WebErrorStatus)));
+            };
             webView.CoreWebView2.ProcessFailed += (_, eventArgs) =>
             {
                 BeginInvoke((Action)(() => MessageBox.Show(
@@ -104,7 +123,14 @@ internal sealed class RelayForm : Form
                     MessageBoxIcon.Warning
                 )));
             };
-            NavigateToClient();
+            if (string.IsNullOrWhiteSpace(serverUrl))
+            {
+                ShowServerSettings(firstRun: true);
+            }
+            else
+            {
+                NavigateToClient();
+            }
         }
         catch (Exception error)
         {
@@ -120,7 +146,26 @@ internal sealed class RelayForm : Form
 
     private void NavigateToClient()
     {
+        if (string.IsNullOrWhiteSpace(serverUrl))
+        {
+            ShowServerSettings(firstRun: true);
+            return;
+        }
         webView.Source = new Uri($"{serverUrl.TrimEnd('/')}/app");
+    }
+
+    /// 连不上最常见的原因就是地址过期(临时隧道会变)。别静默停在白页,直接问要不要改地址。
+    private void HandleNavigationFailed(CoreWebView2WebErrorStatus status)
+    {
+        var answer = MessageBox.Show(
+            this,
+            $"连不上 Group Relay。\n当前地址：{serverUrl}\n原因：{status}\n\n"
+            + "如果这是一个临时隧道地址，它很可能已经过期，向群主要一个新的。要现在修改吗？",
+            "Group Relay",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning
+        );
+        if (answer == DialogResult.Yes) ShowServerSettings(firstRun: false);
     }
 
     private void HandleWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs eventArgs)
@@ -345,10 +390,25 @@ internal sealed class RelayForm : Form
         return candidates.FirstOrDefault(File.Exists);
     }
 
-    private void ShowServerSettings()
+    private void ShowServerSettings() => ShowServerSettings(firstRun: false);
+
+    private void ShowServerSettings(bool firstRun)
     {
-        using var dialog = new ServerDialog(serverUrl);
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        using var dialog = new ServerDialog(firstRun ? "" : serverUrl, firstRun);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            if (firstRun)
+            {
+                MessageBox.Show(
+                    this,
+                    "还没有服务器地址，暂时连不上。随时可以从菜单「服务器设置…」再填。",
+                    "Group Relay",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information
+                );
+            }
+            return;
+        }
         if (!TryNormalizeServerUrl(dialog.ServerUrl, out var normalized))
         {
             MessageBox.Show(
@@ -358,6 +418,7 @@ internal sealed class RelayForm : Form
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning
             );
+            ShowServerSettings(firstRun);
             return;
         }
         serverUrl = normalized;
@@ -365,12 +426,25 @@ internal sealed class RelayForm : Form
         NavigateToClient();
     }
 
+    /// 同事手上通常只有一条群邀请链接,那就让他直接贴:遇到 /join、/group、/app 这类客户端
+    /// 路由时只取根地址。真正架在子路径下的部署(反向代理)保持原样,不动它的前缀。
+    private static readonly string[] ClientRoutePrefixes = ["/join", "/group", "/app", "/transfer", "/web-login"];
+
     private static bool TryNormalizeServerUrl(string value, out string normalized)
     {
         normalized = value.Trim().TrimEnd('/');
-        return Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
-            && uri.Scheme is "http" or "https"
-            && !string.IsNullOrWhiteSpace(uri.Host);
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https")
+            || string.IsNullOrWhiteSpace(uri.Host))
+        {
+            return false;
+        }
+        var path = uri.AbsolutePath.TrimEnd('/');
+        if (ClientRoutePrefixes.Any(prefix => path == prefix || path.StartsWith($"{prefix}/", StringComparison.Ordinal)))
+        {
+            normalized = uri.GetLeftPart(UriPartial.Authority);
+        }
+        return true;
     }
 }
 
@@ -379,7 +453,7 @@ internal sealed class ServerDialog : Form
     private readonly TextBox input = new() { Dock = DockStyle.Top };
     public string ServerUrl => input.Text;
 
-    public ServerDialog(string currentUrl)
+    public ServerDialog(string currentUrl, bool firstRun = false)
     {
         Text = "Group Relay 服务器";
         Width = 520;
@@ -391,9 +465,12 @@ internal sealed class ServerDialog : Form
 
         var description = new Label
         {
-            Text = "输入 Group Relay 的固定 HTTP/HTTPS 服务根地址：",
+            Text = firstRun
+                ? "这个客户端没有内置服务器地址（临时隧道地址会过期，烧进安装包只会让人连不上）。\n"
+                    + "贴上你们在用的入口 —— 直接粘群邀请链接也行，会自动取出服务器地址："
+                : "输入 Group Relay 的 HTTP/HTTPS 服务根地址：",
             Dock = DockStyle.Top,
-            Height = 34
+            Height = firstRun ? 48 : 34
         };
         input.Text = currentUrl;
 

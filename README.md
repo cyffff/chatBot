@@ -542,6 +542,19 @@ npm run relay -- join "INVITE_URL" \
 ./macos/build-macos.sh
 ```
 
+**默认服务器地址**：仓库里是**空的**，编译产物不带任何内置地址 —— 以前这里烧着一个
+`trycloudflare` 临时隧道地址，会过期，别人从源码编译出来默认就连不上。现在：
+
+- 不传地址构建 → 客户端首次启动直接问用户要地址（**可以直接粘群邀请链接**，会自动取出
+  服务器根地址），填完才加载；
+- 给自己团队打包时把入口烧进去：
+
+```bash
+GROUP_RELAY_DEFAULT_URL=https://chat.example.com ./macos/build-macos.sh
+```
+
+连不上时不再停在白窗口：弹窗会显示当前地址和失败原因，并直接给「修改地址…／重试」两个按钮。
+
 产物：
 
 ```text
@@ -570,6 +583,16 @@ Mac 一样支持本地 AI 后台桥接。以后桌面功能默认同时维护 Wi
 %LOCALAPPDATA%\GroupRelay\desktop-sessions\
 %LOCALAPPDATA%\GroupRelay\Logs\bridge.log
 ```
+
+Windows 端的默认服务器地址同样不烧进产物。CI 会读取仓库变量 `GROUP_RELAY_DEFAULT_URL`；
+本地构建自己传：
+
+```bash
+dotnet publish windows/GroupRelay.Windows.csproj -p:GroupRelayDefaultUrl=https://chat.example.com
+```
+
+没有地址时首启会弹出输入框（同样可以直接粘邀请链接），导航失败会明确提示「地址可能已过期，
+要现在修改吗」。
 
 Windows 端请先确保 `codex.exe`、`claude.exe`、`cursor-agent.exe` 已安装且在 `PATH` 或各自
 默认用户目录中。可以使用 CLI 登录，也可以在左侧“设置”中配置三种 AI 的 Key；Key 保存到
