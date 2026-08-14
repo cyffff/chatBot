@@ -425,6 +425,18 @@ function killTree(child) {
   try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* 已经退了 */ } }
 }
 
+/// CLI 非零退出时不能只报一句「exited with status 1」—— 那在群里没法行动。它们的真实原因
+/// 常常打在 stdout(claude 的「OAuth session expired」就是),所以两股输出都要带上;
+/// 登录过期这一类还要直接说清该在哪台机器上做什么。
+function agentFailure(provider, code, stdout, stderr) {
+  const detail = [stdout, stderr].map((part) => String(part ?? "").trim()).filter(Boolean).join("\n").slice(-600);
+  const authExpired = /oauth|authenticat|not logged in|log ?in|unauthorized|invalid api key|credentials/i.test(detail);
+  const hint = authExpired
+    ? `本机 ${provider} CLI 的登录已失效，请到运行 worker 的那台机器上重新登录（例如直接跑一次 ${provider} 并完成 /login），然后重试。`
+    : "";
+  return new Error([`${provider} exited with status ${code}`, detail, hint].filter(Boolean).join("\n"));
+}
+
 async function askLocalAI({ config, configFile, message, trustedExecution, senderIsOwner, model, agentBin, log }) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-worker-"));
   try {
@@ -519,9 +531,11 @@ async function askLocalAI({ config, configFile, message, trustedExecution, sende
       if (!partial) throw new Error(`${reason}；未拿到任何输出，请重试或拆分任务`);
       return `⚠️ ${reason}。以下是中断前已产出的内容，可能不完整：\n\n${partial}`.slice(0, 20_000);
     }
-    if (code !== 0) throw new Error(`${config.provider} exited with status ${code}`);
+    if (code !== 0) throw agentFailure(config.provider, code, raw, stderr);
     const reply = extractReply(config.provider, raw);
-    if (!reply) throw new Error("AI returned an empty reply");
+    if (!reply) {
+      throw new Error(["AI returned an empty reply", String(stderr ?? "").trim().slice(-600)].filter(Boolean).join("\n"));
+    }
     return reply.slice(0, 20_000);
   } finally {
     await fs.rm(temporary, { recursive: true, force: true }).catch(() => {});

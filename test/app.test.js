@@ -1424,6 +1424,55 @@ test("routed polls say which group they are, and a mismatched worker refuses to 
   assert.equal(untouched.body.messages.filter((message) => message.sender.type === "ai").length, 0);
 });
 
+test("a failed CLI reports why, not just an exit code", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "失败原因", email: "owner@example.com", displayName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "failing-session.json");
+  /// 真实事故:claude CLI 的登录过期,它把「Failed to authenticate: OAuth session expired」
+  /// 打在 **stdout** 然后 exit 1,而桥接只报了「claude exited with status 1」——
+  /// 群里看到的是一句没法行动的话。失败消息必须带上 CLI 自己说的原因。
+  const failing = path.join(dataDir, "fake-claude-expired");
+  await fs.writeFile(failing, `#!/bin/sh
+printf '%s\\n' 'Failed to authenticate: OAuth session expired and could not be refreshed'
+exit 1
+`, { mode: 0o700 });
+  const workerEnv = {
+    ...process.env,
+    GROUP_RELAY_AGENT_CONFIG: configFile,
+    GROUP_RELAY_LOCAL_WORKERS: path.join(dataDir, "local-workers.json")
+  };
+  const joined = await execFileAsync(process.execPath, [
+    relayClient, "join", created.body.inviteUrl.replace("http://relay.test", base),
+    "--provider", "claude", "--owner", "Yunfei", "--email", "yunfei@example.com", "--name", "Claude"
+  ], { env: workerEnv });
+  const aiMemberId = JSON.parse(joined.stdout).member.id;
+  const question = new FormData();
+  question.set("text", "@Claude 查一下");
+  question.set("mentions", JSON.stringify([aiMemberId]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) },
+    body: question
+  });
+
+  await execFileAsync(process.execPath, [
+    relayClient, "worker", "--once", "--agent-bin", failing
+  ], { env: workerEnv, timeout: 20_000 });
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { ...asMember(created.body.member.email, created.body.member.provider) }
+  });
+  const failure = history.body.messages.at(-1);
+  assert.equal(failure.status, "failed");
+  assert.match(failure.text, /exited with status 1/);
+  assert.match(failure.text, /OAuth session expired/);
+  // 登录失效要说清该在哪台机器上做什么,否则群里的人只能干等
+  assert.match(failure.text, /登录已失效/);
+});
+
 test("opencode joins as a fourth provider and answers through the resident worker", async (t) => {
   const { base, dataDir } = await fixture(t);
   const created = await json(base, "/api/groups", {

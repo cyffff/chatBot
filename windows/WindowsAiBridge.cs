@@ -788,7 +788,25 @@ internal sealed class WindowsAiWorker
                 var salvaged = $"⚠️ {reason}。以下是中断前已产出的内容，可能不完整：\n\n{partial}";
                 return salvaged.Length > 20_000 ? salvaged[..20_000] : salvaged;
             }
-            if (process.ExitCode != 0) throw new InvalidOperationException($"{config.Provider} 退出码 {process.ExitCode}");
+            if (process.ExitCode != 0)
+            {
+                // 只报退出码在群里没法行动。真实原因常常打在 stdout(claude 的
+                // 「OAuth session expired」就是),两股输出都带上,登录失效再补一句该做什么。
+                var detail = string.Join("\n", new[] { stdout, stderr }
+                        .Select(part => (part ?? string.Empty).Trim())
+                        .Where(part => part.Length > 0));
+                if (detail.Length > 600) detail = detail[^600..];
+                var lowered = detail.ToLowerInvariant();
+                var authExpired = new[] { "oauth", "authenticat", "not logged in", "unauthorized", "invalid api key", "credentials" }
+                    .Any(marker => lowered.Contains(marker));
+                var hint = authExpired
+                    ? $"\n本机 {config.Provider} CLI 的登录已失效：在这台机器上重新登录后再试。"
+                    : string.Empty;
+                throw new InvalidOperationException(
+                    $"{config.Provider} 退出码 {process.ExitCode}"
+                    + (detail.Length > 0 ? $"\n{detail}" : string.Empty) + hint
+                );
+            }
             var raw = outputFile is not null ? await File.ReadAllTextAsync(outputFile, taskCancellation) : stdout;
             if (config.Provider == "cursor")
             {

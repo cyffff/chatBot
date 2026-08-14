@@ -633,6 +633,20 @@ private final class RelayWorker {
         process.waitUntilExit()
         _ = outputFinished.wait(timeout: .now() + 5)
         let stdoutData = capturedOutput.read()
+        /// stdout 也要留档:CLI 的失败原因(登录过期之类)偏偏打在 stdout,只收 stderr 的话事后
+        /// 翻日志什么都看不到 —— 实测 ai-stderr.log 从 8-12 起一直是空的。只在失败时写,别把
+        /// 正常回复也灌进日志。
+        if process.terminationStatus != 0 {
+            let out = (String(data: stdoutData, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !out.isEmpty {
+                appendText(
+                    "\n=== \(ISO8601DateFormatter().string(from: Date())) \(config.provider) exit \(process.terminationStatus) stdout ===\n\(out)\n",
+                    to: FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Logs/Group Relay/ai-stderr.log")
+                )
+            }
+        }
         if idleTimedOut || hardCapped {
             let reason = idleTimedOut
                 ? "AI 已静默 \(Int(aiIdleTimeout / 60)) 分钟（无输出、进程零 CPU），判定卡死并停止"
@@ -644,7 +658,27 @@ private final class RelayWorker {
             return String((notice + partial).prefix(20_000))
         }
         guard process.terminationStatus == 0 else {
-            throw BridgeError.message("\(config.provider) exited with status \(process.terminationStatus)")
+            /// 只报「exited with status 1」在群里没法行动。真实原因常常打在 stdout ——
+            /// claude 的「Failed to authenticate: OAuth session expired」就是这样,以前被整段丢掉。
+            let out = String(data: stdoutData, encoding: .utf8) ?? ""
+            let errText = (try? String(contentsOf: errorLog, encoding: .utf8)) ?? ""
+            let detail = String(
+                [out, errText]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n")
+                    .suffix(600)
+            )
+            let lowered = detail.lowercased()
+            let authExpired = ["oauth", "authenticat", "not logged in", "unauthorized", "invalid api key", "credentials"]
+                .contains { lowered.contains($0) }
+            let hint = authExpired
+                ? "\n本机 \(config.provider) CLI 的登录已失效:在这台机器上跑一次 \(config.provider) 重新登录(/login)后再试。"
+                : ""
+            throw BridgeError.message(
+                "\(config.provider) exited with status \(process.terminationStatus)"
+                + (detail.isEmpty ? "" : "\n\(detail)") + hint
+            )
         }
         let raw: String
         if let outputFile {
@@ -659,7 +693,11 @@ private final class RelayWorker {
             return result.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         let reply = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if reply.isEmpty { throw BridgeError.message("AI returned an empty reply") }
+        if reply.isEmpty {
+            let errText = ((try? String(contentsOf: errorLog, encoding: .utf8)) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw BridgeError.message("AI returned an empty reply" + (errText.isEmpty ? "" : "\n\(String(errText.suffix(600)))"))
+        }
         return String(reply.prefix(20_000))
     }
 
@@ -714,6 +752,17 @@ private final class RelayWorker {
         let rotated = url.appendingPathExtension("1")
         try? FileManager.default.removeItem(at: rotated)
         try? FileManager.default.moveItem(at: url, to: rotated)
+    }
+
+    private func appendText(_ text: String, to destination: URL) {
+        rotateIfLarge(destination)
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            FileManager.default.createFile(atPath: destination.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: destination) else { return }
+        defer { try? handle.close() }
+        guard (try? handle.seekToEnd()) != nil else { return }
+        try? handle.write(contentsOf: Data(text.utf8))
     }
 
     private func appendErrorLog(from source: URL, to destination: URL) {
