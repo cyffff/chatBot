@@ -729,6 +729,8 @@ header {
 header h1 { font-size: 24px; }
 .header-actions { display: flex; align-items: center; gap: 12px; }
 .status { color: #69756d; font-size: 13px; }
+/* 窄屏专用控件:桌面端一律不出现(抽屉那套只在 ≤720px 生效)。 */
+.header-more, .aside-sheet-head, .aside-sheet-only, .aside-backdrop { display: none; }
 .status.online { color: #1f6848; }
 .chat-layout {
   display: grid;
@@ -1020,11 +1022,94 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 @media (max-width: 720px) {
   main { padding: 0; min-height: 100dvh; }
   .chat { height: 100dvh; border: 0; border-radius: 0; }
-  header { height: auto; min-height: 80px; padding: 14px 16px; }
-  .status { display: none; }
-  .header-link { display: none; }
-  .chat-layout { grid-template-columns: 1fr; height: calc(100% - 80px); }
-  aside { display: none; }
+  /* 手机上的头部是一行:[←] [群名] [状态] [⋯]。以前为了腾横向空间把 .header-link 一起
+     关掉了,结果进了聊天就出不去 —— 返回入口必须常驻,次要操作让位。 */
+  header {
+    height: auto;
+    min-height: 60px;
+    padding: max(8px, env(safe-area-inset-top)) 12px 8px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+  }
+  header > div:first-child { min-width: 0; order: 2; }
+  header .eyebrow { display: none; }
+  header h1 {
+    font-size: 17px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  /* .header-actions 变成透明容器,里面的按钮直接参与头部这一行的排序 */
+  .header-actions { display: contents; }
+  .header-link {
+    order: 1;
+    min-width: 40px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: #eef4ef;
+    color: #1f6848;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .header-link-label { display: none; }
+  /* 连接状态不再整个藏掉:正常时不占地方,异常时必须看得见,否则「没人回我」和
+     「我掉线了」在手机上分不清。 */
+  .status {
+    order: 3;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: #fdeeda;
+    color: #8a5a1c;
+    font-size: 11px;
+    font-weight: 750;
+    white-space: nowrap;
+  }
+  .status.online { display: none; }
+  #invite-button { display: none; }
+  .header-more {
+    order: 4;
+    min-width: 40px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: #eef4ef;
+    color: #1f6848;
+    font-size: 18px;
+    line-height: 1;
+    display: block;
+  }
+  .chat-layout { grid-template-columns: 1fr; height: calc(100% - 60px); }
+  /* 成员列表和「我的 AI」原来在手机上整块消失且没有入口。改成底部抽屉,由 ⋯ 唤出。 */
+  aside {
+    display: block;
+    position: fixed;
+    z-index: 30;
+    inset: auto 0 0;
+    max-height: 72dvh;
+    border: 0;
+    border-radius: 18px 18px 0 0;
+    padding: 14px 16px max(16px, env(safe-area-inset-bottom));
+    box-shadow: 0 -14px 40px rgb(23 33 27 / 18%);
+    transform: translateY(101%);
+    transition: transform .22s ease;
+  }
+  .chat.aside-open aside { transform: translateY(0); }
+  .aside-sheet-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .aside-sheet-only { display: block; width: 100%; margin-top: 14px; }
+  .aside-backdrop {
+    display: block;
+    position: fixed;
+    z-index: 29;
+    inset: 0;
+    background: rgb(23 33 27 / 32%);
+  }
+  .aside-backdrop.hidden { display: none; }
   #messages { padding: 18px 16px; }
   #message-form { padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
   .auth-card { min-height: 100vh; border: 0; border-radius: 0; padding: 36px 24px; }

@@ -368,12 +368,18 @@
           </div>
           <div class="header-actions">
             <span id="connection" class="status">连接中</span>
-            <button id="back-to-groups" class="header-link" type="button">← 返回我的群组</button>
+            <button id="back-to-groups" class="header-link" type="button" aria-label="返回我的群组"><span aria-hidden="true">←</span><span class="header-link-label"> 返回我的群组</span></button>
             <button id="invite-button" class="secondary">复制邀请链接</button>
+            <button id="chat-more" class="header-more" type="button" aria-label="群成员与更多操作" aria-expanded="false">⋯</button>
           </div>
         </header>
         <div class="chat-layout">
+          <div id="aside-backdrop" class="aside-backdrop hidden"></div>
           <aside>
+            <div class="aside-sheet-head">
+              <strong>群信息</strong>
+              <button id="aside-close" class="text-button" type="button" aria-label="关闭">收起</button>
+            </div>
             <h2>成员</h2>
             <ul id="member-list"></ul>
             <section id="chat-ai-panel" class="chat-ai-panel hidden">
@@ -381,6 +387,7 @@
               <p id="chat-ai-help">正在读取本机 AI 配置…</p>
               <div id="chat-ai-actions" class="chat-ai-actions"></div>
             </section>
+            <button id="invite-button-mobile" class="secondary aside-sheet-only" type="button">复制邀请链接</button>
             <p class="storage-note">聊天按天保存在项目文件中，旧记录自动压缩。</p>
           </aside>
           <div class="conversation">

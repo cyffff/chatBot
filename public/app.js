@@ -2965,13 +2965,38 @@ function aiOnboardingUrl() {
   return url.toString();
 }
 
-$("#invite-button").addEventListener("click", async () => {
+const copyInviteLink = async () => {
   try {
     await navigator.clipboard.writeText(currentInviteUrl());
     toast("邀请链接已复制，直接发给要进群的人");
   } catch (error) {
     toast(error.message);
   }
+};
+// 窄屏那份在抽屉里(头部只放得下返回和 ⋯),两个按钮同一个动作。
+$("#invite-button").addEventListener("click", copyInviteLink);
+$("#invite-button-mobile").addEventListener("click", () => {
+  closeChatAside();
+  void copyInviteLink();
+});
+
+/// 手机上成员列表和「我的 AI」在抽屉里,由头部的 ⋯ 唤出。桌面端这几个控件是隐藏的,
+/// 这里的开合对它无害 —— 类名只有窄屏的样式在用。
+function closeChatAside() {
+  $("#chat-view").classList.remove("aside-open");
+  $("#aside-backdrop").classList.add("hidden");
+  $("#chat-more").setAttribute("aria-expanded", "false");
+}
+
+$("#chat-more").addEventListener("click", () => {
+  const open = $("#chat-view").classList.toggle("aside-open");
+  $("#aside-backdrop").classList.toggle("hidden", !open);
+  $("#chat-more").setAttribute("aria-expanded", String(open));
+});
+$("#aside-close").addEventListener("click", closeChatAside);
+$("#aside-backdrop").addEventListener("click", closeChatAside);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeChatAside();
 });
 
 $("#chat-ai-invite").addEventListener("click", async () => {
@@ -2985,6 +3010,7 @@ $("#chat-ai-invite").addEventListener("click", async () => {
 
 $("#back-to-groups").addEventListener("click", (event) => {
   event.preventDefault();
+  closeChatAside();
   history.replaceState({}, "", "/app#groups");
   stopChatRealtime();
   showAccountDashboardShell("groups");
