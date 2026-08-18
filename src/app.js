@@ -130,6 +130,17 @@ export async function createApp(options = {}) {
   const dataDir = options.dataDir ?? process.env.GROUP_RELAY_DATA_DIR ?? "./data";
   const configuredPublicBaseUrl = options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL;
   const presenceTimeoutMs = Number(options.presenceTimeoutMs ?? 90_000);
+  /// 提问不能石沉大海。三个阈值都从「提问那一刻」算起(不看 updatedAt,否则下面的提醒
+  /// 自己会把计时器一次次推后,永远不到期):没人接单 → 兜底一条;接了但迟迟不回 → 提醒一次
+  /// 「仍在进行」;再久 → 判定执行端已经没了,把占位改成失败并让提问的人重发。
+  const unansweredMinutes = Number(options.unansweredMinutes ?? process.env.GROUP_RELAY_UNANSWERED_MINUTES ?? 10);
+  const stallMinutes = Number(options.stallMinutes ?? process.env.GROUP_RELAY_STALL_MINUTES ?? 20);
+  const giveUpMinutes = Number(options.giveUpMinutes ?? process.env.GROUP_RELAY_GIVE_UP_MINUTES ?? 45);
+  /// 上限:太老的提问不再补。否则第一次上线时,历史上所有没回过的 @ 会被一次性补满各个群 ——
+  /// 那些人早就不在等这条气泡了,补上去只是噪音。
+  const watchdogMaxAgeMinutes = Number(
+    options.watchdogMaxAgeMinutes ?? process.env.GROUP_RELAY_WATCHDOG_MAX_AGE_MINUTES ?? 24 * 60
+  );
   const movedTo = (options.movedTo ?? process.env.GROUP_RELAY_MOVED_TO ?? "").trim() || null;
   const expiredTokenGraceMs = Number(options.expiredTokenGraceMs ?? 10 * 60_000);
   const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB ?? 25) * 1024 * 1024;
@@ -1731,5 +1742,85 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
     return released;
   };
 
-  return { app, store, sweepExpiredTokens, movedTo, pushEverythingToNewServer, drainClients };
+  /// 兜底看守:@ 了某个 AI 却什么都没回来时,由服务端替它说话。
+  /// 起因是真实事故 —— 有人在群里连问两条,三天里既没有回复、也没有「正在处理」或失败提示,
+  /// 从群成员的视角完全分不清是 AI 在跑、任务丢了、还是整套 relay 挂了。执行端可能已经退出、
+  /// 机器休眠、CLI 登录过期,那种状态下它自己不可能再来回写,所以只能由服务端兜底。
+  /// 只管**显式 @ 了 AI**的消息:群里的普通消息也会路由给 AI,但那些不是「点名要个答复」,
+  /// 拿它们兜底会把群刷成噪音。
+  const nudgedPlaceholders = new Set();
+  const sweepUnanswered = async (now = Date.now()) => {
+    const summary = { prompted: 0, nudged: 0, gaveUp: 0 };
+    for (const groupId of [...store.groupsById.keys()]) {
+      const [messages, members] = await Promise.all([
+        store.readMessages(groupId, { limit: 200 }).catch(() => []),
+        store.listMembers(groupId).catch(() => [])
+      ]);
+      if (!messages.length) continue;
+      const repliesTo = new Map();
+      for (const message of messages) {
+        if (!message.replyTo) continue;
+        if (!repliesTo.has(message.replyTo)) repliesTo.set(message.replyTo, []);
+        repliesTo.get(message.replyTo).push(message);
+      }
+      const minutesSince = (iso) => (now - Date.parse(iso ?? "")) / 60_000;
+
+      for (const question of messages) {
+        if (question.sender?.type === "ai") continue;
+        for (const mention of question.mentions ?? []) {
+          const ai = members.find((member) => member.id === mention.id && member.type === "ai");
+          if (!ai) continue;
+          const answers = (repliesTo.get(question.id) ?? []).filter((reply) => reply.sender?.id === ai.id);
+          const age = minutesSince(question.createdAt);
+          if (age > watchdogMaxAgeMinutes) continue;
+          if (!answers.length) {
+            // 连占位都没有:没人接单。
+            if (age < unansweredMinutes) continue;
+            const owner = ai.ownerName ?? "它的主人";
+            await store.appendMessage(groupId, ai, {
+              text: `没有接到这条任务(已过 ${Math.round(age)} 分钟)。多半是执行端没在运行:`
+                + `客户端已退出、机器休眠,或本机 CLI 的登录/额度失效。`
+                + `请重发一次,或让 ${owner} 检查那台机器。`,
+              attachments: [],
+              mentions: [],
+              replyTo: question.id,
+              status: "failed"
+            }).then((message) => publish(groupId, "message", message)).catch(() => {});
+            summary.prompted += 1;
+            continue;
+          }
+          // 有占位但一直没结束:先提醒一次,再久就判定执行端没了。
+          const pending = answers.find((reply) => reply.status === "processing");
+          if (!pending) continue;
+          if (age >= giveUpMinutes) {
+            const updated = await store.updateMessage(groupId, pending.id, ai.id, {
+              text: `${pending.text}\n\n⚠️ 已过 ${Math.round(age)} 分钟仍未回写结果，`
+                + "执行端可能已经退出。请重发一次这条提问。",
+              status: "failed"
+            }).catch(() => null);
+            if (updated?.message) {
+              publish(groupId, "message", updated.message);
+              await store.setMessageActivity(groupId, ai.id, pending.id, false).catch(() => {});
+              summary.gaveUp += 1;
+            }
+            continue;
+          }
+          if (age >= stallMinutes && !nudgedPlaceholders.has(pending.id)) {
+            nudgedPlaceholders.add(pending.id);
+            const updated = await store.updateMessage(groupId, pending.id, ai.id, {
+              text: `${pending.text}\n\n（仍在进行，已 ${Math.round(age)} 分钟）`,
+              status: "processing"
+            }).catch(() => null);
+            if (updated?.message) {
+              publish(groupId, "message", updated.message);
+              summary.nudged += 1;
+            }
+          }
+        }
+      }
+    }
+    return summary;
+  };
+
+  return { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer, drainClients };
 }

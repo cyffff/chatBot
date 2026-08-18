@@ -216,6 +216,9 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 | `GROUP_RELAY_MESSAGE_RETENTION_DAYS` | `30` | 消息缓冲区保留天数，过期自动清除 |
 | `GROUP_RELAY_ATTACHMENT_RETENTION_HOURS` | `720` | 附件保留小时数，按文件 mtime 判定 |
 | `GROUP_RELAY_MOVED_TO` | 空 | 设为新服务器地址即触发整机搬迁并公告 `movedTo` |
+| `GROUP_RELAY_UNANSWERED_MINUTES` | `10` | `@` 了 AI 但连占位都没有,过这么久就由服务端兜底回一条 |
+| `GROUP_RELAY_STALL_MINUTES` | `20` | 占位一直是「处理中」,过这么久提醒一次「仍在进行」 |
+| `GROUP_RELAY_GIVE_UP_MINUTES` | `45` | 再久就判定执行端已退出,把占位改成失败并让提问者重发 |
 | `GROUP_RELAY_RESTRICT_DIRS` | 关 | 本机 agent 只能访问 `GROUP_RELAY_ALLOWED_DIRS` 里的目录 |
 | `GROUP_RELAY_ALLOWED_DIRS` | 空 | 允许访问的目录清单，按操作系统的路径分隔符分隔（Mac/Linux `:`，Windows `;`） |
 | `GROUP_RELAY_NO_DIR_LISTING` | 关 | 禁止把目录当文件发出（不提供目录结构） |
@@ -709,6 +712,26 @@ npm run relay -- presence --session "SESSION_ID" --status online
 | 离线 | 超过 90 秒没有心跳、App 已退出或本地 AI 不可用 |
 
 长任务处理期间后台桥接每 45 秒续报 `busy`。
+
+**状态按「群 + AI」独立**。一个 AI 进 N 个群就是 N 个独立 worker，各自只对自己那个群收发；
+所以某个群在忙不会让它在别的群显示忙碌，某个群的 worker 没起来也只有那个群显示离线。
+（早期版本的 presence 只按成员 id 存，一个群在跑，四个群一起显示忙碌，而且「正在处理哪几条
+消息」也跟着串群。）
+
+### 提问不会石沉大海
+
+`@` 了某个 AI 却什么都没回来时，由**服务端**兜底 —— 执行端可能已经退出、机器休眠、CLI 登录
+过期或额度用尽，那种状态下它自己不可能再回来给群里一个交代：
+
+| 时间（从提问算起） | 服务端动作 |
+| --- | --- |
+| 10 分钟仍无任何占位 | 替这个 AI 回一条失败消息：没接到任务，多半是执行端没在跑，请重发或让主人检查那台机器 |
+| 20 分钟占位还是「处理中」 | 在同一条气泡上提醒一次「仍在进行，已 N 分钟」（只提醒一次，不改状态） |
+| 45 分钟仍未回写 | 判定执行端已退出，把那条占位改成失败并让提问者重发 |
+
+三个阈值分别由 `GROUP_RELAY_UNANSWERED_MINUTES` / `_STALL_MINUTES` / `_GIVE_UP_MINUTES` 调整，
+计时都从**提问那一刻**算起。只管显式 `@` 了 AI 的消息 —— 群里的普通消息也会路由给 AI，
+但那些不是「点名要个答复」，拿它们兜底会把群刷成噪音。
 
 ## 可选：MCP 工具
 

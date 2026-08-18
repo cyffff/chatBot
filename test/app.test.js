@@ -59,7 +59,7 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
-  const { app, store, sweepExpiredTokens, movedTo, pushEverythingToNewServer } = await createApp({
+  const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
     ...options
@@ -69,7 +69,7 @@ async function fixture(t, options = {}) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, store, dataDir, sweepExpiredTokens, movedTo, pushEverythingToNewServer };
+  return { base, store, dataDir, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer };
 }
 
 async function json(base, url, options = {}) {
@@ -1365,6 +1365,150 @@ exit 0
   // cursor 落盘了,重启之后不会把同一条再跑一遍
   const saved = JSON.parse(await fs.readFile(configFile, "utf8"));
   assert.ok(saved.cursor);
+});
+
+test("an @-mention never goes silent: no pickup, stalled, and given up", async (t) => {
+  /// 真实事故:有人在群里连问两条,三天里既没有回复、也没有「正在处理」或失败提示 ——
+  /// 从群成员的视角完全分不清是 AI 在跑、任务丢了、还是整套 relay 挂了。执行端那时可能
+  /// 已经退出/休眠/登录过期,它自己回不来,所以只能由服务端兜底。
+  const { base, sweepUnanswered } = await fixture(t, {
+    unansweredMinutes: 10,
+    stallMinutes: 20,
+    giveUpMinutes: 45
+  });
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "不许石沉大海", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const aiId = "ai:owner@example.com:claude";
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+  const ask = async (text) => (await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: owner,
+    body: new URLSearchParams({ text, mentions: JSON.stringify([aiId]) })
+  }).then((response) => response.json())).message;
+  const historyFor = async (questionId) => {
+    const history = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
+    return history.body.messages.filter((message) => message.replyTo === questionId);
+  };
+  const minutesAgo = (minutes) => Date.now() + minutes * 60_000;
+
+  // 1) 没人接单:过了阈值要替 AI 说一句「没接到,请重发」,并说清多半是执行端没在跑
+  const dropped = await ask("@Claude 这条没人接");
+  assert.deepEqual(await sweepUnanswered(minutesAgo(5)), { prompted: 0, nudged: 0, gaveUp: 0 });
+  assert.equal((await historyFor(dropped.id)).length, 0);
+  assert.deepEqual(await sweepUnanswered(minutesAgo(11)), { prompted: 1, nudged: 0, gaveUp: 0 });
+  const fallback = (await historyFor(dropped.id))[0];
+  assert.equal(fallback.sender.id, aiId);
+  assert.equal(fallback.status, "failed");
+  assert.match(fallback.text, /没有接到这条任务/);
+  assert.match(fallback.text, /请重发/);
+  // 兜底只发一次:它自己就是一条回复,下一轮不会再补
+  assert.deepEqual(await sweepUnanswered(minutesAgo(30)), { prompted: 0, nudged: 0, gaveUp: 0 });
+  assert.equal((await historyFor(dropped.id)).length, 1);
+
+  // 2) 接了单但迟迟不回:提醒一次「仍在进行」,不改状态,也不重复提醒
+  const slow = await ask("@Claude 这条很慢");
+  const placeholder = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "正在处理…", status: "processing", replyTo: slow.id })
+  }).then((response) => response.json());
+  assert.deepEqual(await sweepUnanswered(minutesAgo(11)), { prompted: 0, nudged: 0, gaveUp: 0 });
+  assert.deepEqual(await sweepUnanswered(minutesAgo(21)), { prompted: 0, nudged: 1, gaveUp: 0 });
+  let pending = (await historyFor(slow.id))[0];
+  assert.equal(pending.status, "processing");
+  assert.match(pending.text, /仍在进行/);
+  assert.deepEqual(await sweepUnanswered(minutesAgo(25)), { prompted: 0, nudged: 0, gaveUp: 0 });
+
+  // 3) 再久就认定执行端没了:占位改成失败,并让提问的人重发
+  assert.deepEqual(await sweepUnanswered(minutesAgo(46)), { prompted: 0, nudged: 0, gaveUp: 1 });
+  pending = (await historyFor(slow.id))[0];
+  assert.equal(pending.status, "failed");
+  assert.match(pending.text, /请重发/);
+  assert.equal(placeholder.message.id, pending.id, "同一条气泡原地改写,不新增噪音");
+  // 收尾之后这个 AI 在本群不再算忙
+  const view = await json(base, `/api/groups/${groupId}`, { headers: owner });
+  assert.equal(view.body.members.find((member) => member.id === aiId).presence.status, "online");
+  assert.deepEqual(await sweepUnanswered(minutesAgo(60)), { prompted: 0, nudged: 0, gaveUp: 0 });
+
+  // 正常答完的提问不会被兜底打扰
+  const answered = await ask("@Claude 这条正常");
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "答完了", status: "complete", replyTo: answered.id })
+  });
+  assert.deepEqual(await sweepUnanswered(minutesAgo(120)), { prompted: 0, nudged: 0, gaveUp: 0 });
+
+  // 太老的提问不再补:第一次上线时不该把历史上所有没回过的 @ 一次性补满各个群
+  const stale = await ask("@Claude 三天前的老问题");
+  assert.deepEqual(await sweepUnanswered(minutesAgo(3 * 24 * 60)), { prompted: 0, nudged: 0, gaveUp: 0 });
+  assert.equal((await historyFor(stale.id)).length, 0);
+});
+
+test("one AI in several groups keeps a separate presence per group", async (t) => {
+  const { base } = await fixture(t);
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  const groups = [];
+  for (const name of ["A 群", "B 群"]) {
+    const created = await json(base, "/api/groups", {
+      method: "POST",
+      body: JSON.stringify({ name, email: "owner@example.com", displayName: "Owner" })
+    });
+    await json(base, `/api/account/sessions/${created.body.group.id}/ais`, {
+      method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+    });
+    groups.push(created.body.group.id);
+  }
+  const [a, b] = groups;
+  const memberId = "ai:owner@example.com:claude";
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+  const presenceIn = async (groupId) => {
+    const view = await json(base, `/api/groups/${groupId}`, { headers: owner });
+    return view.body.members.find((member) => member.id === memberId);
+  };
+
+  /// 一个 AI 进 N 个群 = N 个独立 worker。以前 presence 只按 memberId 存,任意一个群里在跑,
+  /// 四个群一起显示「忙碌」;同一条记录里的 activeMessageIds 也串群,别的群的成员列表里会
+  /// 出现指向本群消息的 id。
+  const question = await fetch(`${base}/api/groups/${a}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "A 群的问题" })
+  }).then((response) => response.json());
+  await fetch(`${base}/api/groups/${a}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "正在处理…", status: "processing", replyTo: question.message.id })
+  });
+
+  const inA = await presenceIn(a);
+  const inB = await presenceIn(b);
+  assert.equal(inA.presence.status, "busy");
+  assert.equal(inB.presence.status, "online");
+  assert.deepEqual(inA.activeMessageIds ?? [], []);
+  assert.equal(inA.presence.lastSeenAt === inB.presence.lastSeenAt, false);
+
+  // 反过来也一样:B 群报忙,A 群把自己那条任务收尾之后就回到 online,不被 B 拖住。
+  await json(base, `/api/groups/${b}/members/me/presence`, {
+    method: "POST", headers: ai, body: JSON.stringify({ status: "busy" })
+  });
+  const placeholderId = (await json(base, `/api/groups/${a}/messages`, { headers: owner }))
+    .body.messages.at(-1).id;
+  await json(base, `/api/groups/${a}/messages/${placeholderId}`, {
+    method: "PATCH",
+    headers: ai,
+    body: JSON.stringify({ text: "答完了", status: "complete", expectedGroupId: a })
+  });
+  await json(base, `/api/groups/${a}/members/me/presence`, {
+    method: "POST", headers: ai, body: JSON.stringify({ status: "online" })
+  });
+  assert.equal((await presenceIn(b)).presence.status, "busy");
+  assert.equal((await presenceIn(a)).presence.status, "online");
 });
 
 test("routed polls say which group they are, and a mismatched worker refuses to answer", async (t) => {

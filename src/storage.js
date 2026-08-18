@@ -869,11 +869,17 @@ export class FileStore {
   /// presence 和 activeMessageIds 只活在内存里:心跳 45 秒一次、超时 90 秒,本来就是
   /// 易失状态。放进 accounts.json 的话每次心跳都要整文件重写,9 个 worker 会把这台
   /// 1G 的机器写穿。服务重启后 worker 会在一轮心跳内自己报回来。
-  livePresence(memberId) {
-    let live = this.presenceByMember.get(memberId);
+  /// 键必须带 groupId。原来只用 memberId,而 memberId 是确定性的 ai:<email>:<provider> ——
+  /// 一个 AI 进 N 个群就是 N 个独立 worker 共用同一条 presence:任意一个群里在跑,四个群
+  /// 一起显示「忙碌」;同一条记录里的 activeMessageIds 也跟着串群,CN 群的成员列表里会出现
+  /// 指向别的群消息的 id(那些 id 对这个群毫无意义,而且泄露了「它此刻在别处忙」)。
+  /// 上报接口的路径里本来就有 groupId,只是以前没拿来分桶。
+  livePresence(groupId, memberId) {
+    const key = `${groupId}:${memberId}`;
+    let live = this.presenceByMember.get(key);
     if (!live) {
       live = { status: "online", lastSeenAt: new Date().toISOString(), activeMessageIds: [] };
-      this.presenceByMember.set(memberId, live);
+      this.presenceByMember.set(key, live);
     }
     return live;
   }
@@ -892,7 +898,8 @@ export class FileStore {
 
   aiMember(account, registration) {
     const memberId = aiMemberId(account.email, registration.provider);
-    const live = this.livePresence(memberId);
+    // 每个群一份:同一个 AI 在别的群忙,不该让这个群看到「忙碌」。
+    const live = this.livePresence(registration.groupId, memberId);
     return {
       id: memberId,
       name: registration.name,
@@ -1005,7 +1012,7 @@ export class FileStore {
   async updatePresence(groupId, memberId, status) {
     const member = await this.memberById(groupId, memberId);
     if (!member || member.type !== "ai") return null;
-    const live = this.livePresence(memberId);
+    const live = this.livePresence(groupId, memberId);
     live.status = status === "online" && live.activeMessageIds.length ? "busy" : status;
     live.lastSeenAt = new Date().toISOString();
     return { status: live.status, lastSeenAt: live.lastSeenAt };
@@ -1014,7 +1021,7 @@ export class FileStore {
   async setMessageActivity(groupId, memberId, messageId, processing) {
     const member = await this.memberById(groupId, memberId);
     if (!member || member.type !== "ai") return null;
-    const live = this.livePresence(memberId);
+    const live = this.livePresence(groupId, memberId);
     const active = new Set(live.activeMessageIds);
     if (processing) active.add(messageId);
     else active.delete(messageId);

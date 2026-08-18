@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
-const { app, store, movedTo, pushEverythingToNewServer, drainClients } = await createApp();
+const { app, store, movedTo, pushEverythingToNewServer, drainClients, sweepUnanswered } = await createApp();
 
 if (store.migration) {
   const { accounts, groups, legacyTokens, rewrittenRecords } = store.migration;
@@ -95,8 +95,21 @@ const maintain = async () => {
 await maintain();
 const maintenanceTimer = setInterval(maintain, 60 * 60 * 1000);
 
+/// 每分钟看一遍「有没有提问石沉大海」。这一步必须在服务端:执行端退出、机器休眠、CLI 登录
+/// 过期时,它自己不可能再回来给群里一个交代。一分钟一次,阈值是分钟级,足够及时也不吵。
+const watchdogTimer = setInterval(() => {
+  sweepUnanswered().then((summary) => {
+    const acted = Object.entries(summary).filter(([, count]) => count > 0);
+    if (acted.length) {
+      console.log(`Unanswered sweep: ${acted.map(([key, count]) => `${count} ${key}`).join(", ")}`);
+    }
+  }).catch((error) => console.error("Unanswered sweep failed", error));
+}, 60_000);
+watchdogTimer.unref();
+
 function shutdown() {
   clearInterval(maintenanceTimer);
+  clearInterval(watchdogTimer);
   server.close(() => process.exit(0));
 }
 
