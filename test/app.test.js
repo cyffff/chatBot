@@ -1446,6 +1446,17 @@ test("an @-mention never goes silent: no pickup, stalled, and given up", async (
   });
   assert.deepEqual(await sweepUnanswered(minutesAgo(120)), { prompted: 0, nudged: 0, gaveUp: 0 });
 
+  // AI 在那之后说过话(哪怕没带 replyTo,MCP 的 group_send 就常常不带)就不该兜底 ——
+  // 上线第一分钟就因此误判过一条:某人一句空 @,AI 之后说了七八次话,还是被判「没接到任务」。
+  const bare = await ask("@Claude");
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "在的,你要问什么?" })
+  });
+  assert.deepEqual(await sweepUnanswered(minutesAgo(30)), { prompted: 0, nudged: 0, gaveUp: 0 });
+  assert.equal((await historyFor(bare.id)).length, 0);
+
   // 太老的提问不再补:第一次上线时不该把历史上所有没回过的 @ 一次性补满各个群
   const stale = await ask("@Claude 三天前的老问题");
   assert.deepEqual(await sweepUnanswered(minutesAgo(3 * 24 * 60)), { prompted: 0, nudged: 0, gaveUp: 0 });

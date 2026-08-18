@@ -1776,6 +1776,16 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
           if (!answers.length) {
             // 连占位都没有:没人接单。
             if (age < unansweredMinutes) continue;
+            /// 但「没有 replyTo 指回这条」不等于没答。AI 通过 MCP 的 group_send 回话时常常
+            /// 不带 replyTo,只在正文里 @ 回去 —— 上线第一分钟就因此误判了一条:某人一句空
+            /// @,那个 AI 之后在群里说了七八次话,看守还是判它「没接到任务」,而且发进了别人的群。
+            /// 所以再加一条:提问之后这个 AI 在本群说过任何话,就说明它活着、也在参与,不兜底。
+            /// 看守要抓的是**彻底沉默**,不是强制回复格式。
+            const spokeSince = messages.some((message) => (
+              message.sender?.id === ai.id
+              && Date.parse(message.createdAt) > Date.parse(question.createdAt)
+            ));
+            if (spokeSince) continue;
             const owner = ai.ownerName ?? "它的主人";
             await store.appendMessage(groupId, ai, {
               text: `没有接到这条任务(已过 ${Math.round(age)} 分钟)。多半是执行端没在运行:`
