@@ -41,6 +41,20 @@ const dictionaries = {
   }
 };
 
+/// 会被**存进消息的 i18n 字段**的那几条 —— 客户端要按读者的语言重渲染它们,所以
+/// public/i18n.js 里必须有同样的 key。test/i18n.test.js 逐条对账:少一条,英文读者就会
+/// 悄悄看到中文(t() 回落到 key 本身),而这正是这套机制要解决的问题。
+export const systemMessageKeys = {
+  unanswered:
+    "没有接到这条任务（已过 {0} 分钟）。多半是执行端没在运行：客户端已退出、机器休眠，"
+    + "或本机 CLI 的登录/额度失效。请重发一次，或让 {1} 检查那台机器。",
+  gaveUp: "{0}\n\n⚠️ 已过 {1} 分钟仍未回写结果，执行端可能已经退出。请重发一次这条提问。",
+  stillWorking: "{0}\n\n（仍在进行，已 {1} 分钟）",
+  approved: "【已批准执行】{0}",
+  interrupted: "任务因客户端重启或连接中断而停止，请重新发送任务。",
+  joined: "{0} 已加入群聊，正在监听消息。"
+};
+
 export const supportedLocales = ["zh", "en"];
 
 export function normalizeLocale(value) {

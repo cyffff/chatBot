@@ -112,21 +112,29 @@ async function reportPresence(status = presenceStatus) {
 
 server.tool(
   "group_send",
-  "Send a text message to the shared group conversation. Optionally mention AI members by ID.",
+  "Send a text message to the shared group conversation. Optionally mention AI members by ID, "
+  + "and optionally give the same answer in several languages so each reader picks one.",
   {
     text: z.string().min(1).max(20_000),
     expectedGroupId: z.string().uuid(),
     status: z.enum(["processing", "complete", "failed"]).default("complete"),
     replyTo: z.string().optional(),
-    mentionIds: z.array(z.string()).max(20).optional()
+    mentionIds: z.array(z.string()).max(20).optional(),
+    bodies: z.object({
+      zh: z.string().min(1).max(20_000).optional(),
+      en: z.string().min(1).max(20_000).optional()
+    }).optional().describe("Optional per-language bodies of the same answer, e.g. {\"zh\":\"…\",\"en\":\"…\"}. You write both versions yourself — you already know these terms, and nothing leaves this system. Readers switch with a button; text stays the default for older clients."),
+    shared: z.string().max(20_000).optional().describe("Optional block shared by every language version (tables, SQL, numbers, ids). Put language-neutral data here instead of repeating it in each body — repeating a 20-row table risks the two versions disagreeing.")
   },
-  async ({ text, expectedGroupId, status, replyTo, mentionIds = [] }) => {
+  async ({ text, expectedGroupId, status, replyTo, mentionIds = [], bodies, shared }) => {
     const group = await assertExpectedGroup(expectedGroupId);
     const form = new FormData();
     form.set("text", text);
     form.set("status", status);
     if (replyTo) form.set("replyTo", replyTo);
     form.set("mentions", JSON.stringify(mentionIds));
+    if (bodies) form.set("bodies", JSON.stringify(bodies));
+    if (shared) form.set("shared", shared);
     const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
     await reportPresence(status === "processing" ? "busy" : "online");
     return { content: [{ type: "text", text: JSON.stringify({ group, message: result.message }) }] };
@@ -140,14 +148,19 @@ server.tool(
     messageId: z.string().uuid(),
     text: z.string().min(1).max(20_000),
     status: z.enum(["processing", "complete", "failed"]).default("complete"),
-    expectedGroupId: z.string().uuid()
+    expectedGroupId: z.string().uuid(),
+    bodies: z.object({
+      zh: z.string().min(1).max(20_000).optional(),
+      en: z.string().min(1).max(20_000).optional()
+    }).optional().describe("Optional per-language bodies of the same answer, e.g. {\"zh\":\"…\",\"en\":\"…\"}. You write both versions yourself — you already know these terms, and nothing leaves this system. Readers switch with a button; text stays the default for older clients."),
+    shared: z.string().max(20_000).optional().describe("Optional block shared by every language version (tables, SQL, numbers, ids). Put language-neutral data here instead of repeating it in each body — repeating a 20-row table risks the two versions disagreeing.")
   },
-  async ({ messageId, text, status, expectedGroupId }) => {
+  async ({ messageId, text, status, expectedGroupId, bodies, shared }) => {
     const group = await assertExpectedGroup(expectedGroupId);
     const result = await relay(`/api/groups/${groupId}/messages/${messageId}`, {
       method: "PATCH",
       retryNetwork: true,
-      body: JSON.stringify({ text, status, expectedGroupId })
+      body: JSON.stringify({ text, status, expectedGroupId, bodies, shared })
     });
     await reportPresence(status === "processing" ? "busy" : "online");
     return { content: [{ type: "text", text: JSON.stringify({ group, message: result.message }) }] };
@@ -171,9 +184,14 @@ server.tool(
     mimeType: z.string().max(120).optional().describe("Override the auto-detected content type"),
     text: z.string().max(20_000).optional().describe("Optional message caption sent alongside the file"),
     status: z.enum(["processing", "complete", "failed"]).default("complete"),
-    mentionIds: z.array(z.string()).max(20).optional()
+    mentionIds: z.array(z.string()).max(20).optional(),
+    bodies: z.object({
+      zh: z.string().min(1).max(20_000).optional(),
+      en: z.string().min(1).max(20_000).optional()
+    }).optional().describe("Optional per-language bodies of the same answer, e.g. {\"zh\":\"…\",\"en\":\"…\"}. You write both versions yourself — you already know these terms, and nothing leaves this system. Readers switch with a button; text stays the default for older clients."),
+    shared: z.string().max(20_000).optional().describe("Optional block shared by every language version (tables, SQL, numbers, ids). Put language-neutral data here instead of repeating it in each body — repeating a 20-row table risks the two versions disagreeing.")
   },
-  async ({ expectedGroupId, filePath, content, encoding, filename, mimeType, text, status, mentionIds = [] }) => {
+  async ({ expectedGroupId, filePath, content, encoding, filename, mimeType, text, status, mentionIds = [], bodies, shared }) => {
     const group = await assertExpectedGroup(expectedGroupId);
     let bytes;
     let name;
@@ -202,6 +220,8 @@ server.tool(
     if (text) form.set("text", text);
     form.set("status", status);
     form.set("mentions", JSON.stringify(mentionIds));
+    if (bodies) form.set("bodies", JSON.stringify(bodies));
+    if (shared) form.set("shared", shared);
     form.set("files", new Blob([bytes], { type }), name);
     const result = await relay(`/api/groups/${groupId}/messages`, { method: "POST", body: form });
     await reportPresence(status === "processing" ? "busy" : "online");

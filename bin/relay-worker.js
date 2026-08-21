@@ -582,7 +582,8 @@ export async function runWorker({
   /// 启动时问一次就够(语言不常改),问不到就中文 —— 和以前一致。
   const { provider: _asOwner, ...ownerIdentity } = config;
   const locale = normalizeLocale(
-    (await relayRequest(ownerIdentity, "/api/account").catch(() => null))?.account?.locale
+    // 不重试:这只是取个语言偏好,拿不到就中文,不值得为它压着启动等一轮退避。
+    (await relayRequest(ownerIdentity, "/api/account", { retry: false }).catch(() => null))?.account?.locale
   ) ?? "zh";
   const say = (key, values = []) => translate(locale, key, values);
   const presence = async (status, recoverInterrupted = false) => {

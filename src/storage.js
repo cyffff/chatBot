@@ -1060,8 +1060,15 @@ export class FileStore {
     );
   }
 
+  /// i18n / bodies / shared 是「一条消息可以有多个语言版本」的存储面:
+  ///   i18n  = {key, values} —— 服务端产出的系统消息存模板和参数,客户端用自己的语言重渲染,
+  ///           这样中文同事和英文同事看同一条消息各自看到自己的语言(存死一种语言做不到);
+  ///   bodies= {zh, en}      —— 写答案的那个 AI 自己给出的双语正文,读者点按钮就地切换;
+  ///   shared                —— 两版共用的部分(表格、SQL、数字),别让模型把数据重打一遍。
+  /// 三个都是可选的,老消息和老客户端只看 text,不需要迁移。
   async appendMessage(groupId, member, {
-    text, attachments, replyTo, mentions = [], status = "complete", approval = null
+    text, attachments, replyTo, mentions = [], status = "complete", approval = null,
+    i18n = null, bodies = null, shared = null
   }) {
     const createdAt = new Date().toISOString();
     const message = {
@@ -1075,6 +1082,9 @@ export class FileStore {
         ownerName: member.ownerName ?? null
       },
       text: text || "",
+      ...(i18n ? { i18n } : {}),
+      ...(bodies ? { bodies } : {}),
+      ...(shared ? { shared } : {}),
       attachments,
       mentions,
       replyTo: replyTo || null,
@@ -1101,7 +1111,7 @@ export class FileStore {
     await fs.rename(temp, file);
   }
 
-  async updateMessage(groupId, messageId, memberId, { text, status }) {
+  async updateMessage(groupId, messageId, memberId, { text, status, i18n, bodies, shared }) {
     const previous = this.writeQueues.get(groupId) ?? Promise.resolve();
     const next = previous.then(async () => {
       const files = (await this.messageFiles(groupId)).reverse();
@@ -1111,6 +1121,19 @@ export class FileStore {
         if (!message) continue;
         if (message.sender?.id !== memberId) return { forbidden: true };
         if (typeof text === "string") message.text = text;
+        // 原地回填时也要能带上/清掉多语言版本 —— 占位是中文、答案是双语的情况就靠这里。
+        if (i18n !== undefined) {
+          if (i18n) message.i18n = i18n;
+          else delete message.i18n;
+        }
+        if (bodies !== undefined) {
+          if (bodies) message.bodies = bodies;
+          else delete message.bodies;
+        }
+        if (shared !== undefined) {
+          if (shared) message.shared = shared;
+          else delete message.shared;
+        }
         message.status = status;
         message.updatedAt = new Date().toISOString();
         await this.writeMessageFile(file, messages);
@@ -1122,7 +1145,7 @@ export class FileStore {
     return next;
   }
 
-  async failProcessingMessages(groupId, memberId, text) {
+  async failProcessingMessages(groupId, memberId, text, i18n = null) {
     const previous = this.writeQueues.get(groupId) ?? Promise.resolve();
     const next = previous.then(async () => {
       const updated = [];
@@ -1134,6 +1157,8 @@ export class FileStore {
         for (const message of messages) {
           if (message.sender?.id !== memberId || message.status !== "processing") continue;
           message.text = text;
+          // 这条也是有限模板,存一份 key + 参数让读者按自己的语言看。
+          if (i18n) message.i18n = i18n;
           message.status = "failed";
           message.updatedAt = new Date().toISOString();
           updated.push(message);

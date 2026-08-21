@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { FileStore } from "./storage.js";
-import { localeFromAcceptLanguage, normalizeLocale, translate } from "./i18n.js";
+import { localeFromAcceptLanguage, normalizeLocale, systemMessageKeys, translate } from "./i18n.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(here, "../public");
@@ -68,10 +68,33 @@ const approvalBatchSchema = z.object({
   approvalIds: z.array(z.string().uuid()).min(1).max(100),
   action: z.enum(["approve", "reject"])
 });
+/// 一条消息可以带多个语言版本。写答案的那个 AI 本来就懂这些术语(EID、通过率、表名),
+/// 它自己给出中英两版比任何通用机器翻译都准,而且内容一步都不离开这套系统 ——
+/// 所以平台只负责存和切换,不接任何第三方翻译服务。
+/// shared 是两版共用的部分:表格、SQL、数字这些语言中立的东西不该让模型重打一遍
+/// (重复输出还有风险 —— 某个数字漂了很难发现)。
+const messageBodiesSchema = z.object({
+  zh: z.string().trim().min(1).max(20_000).optional(),
+  en: z.string().trim().min(1).max(20_000).optional()
+}).strict().refine(
+  (value) => Object.keys(value).length > 0,
+  { message: "bodies must contain at least one language" }
+);
+
+/// 服务端产出的系统消息存「模板 + 参数」,客户端用自己的语言重渲染。key 就是中文原文,
+/// 和 src/i18n.js / public/i18n.js 用的是同一张表。
+const messageI18nSchema = z.object({
+  key: z.string().min(1).max(1_000),
+  values: z.array(z.union([z.string().max(20_000), z.number()])).max(10).default([])
+}).strict();
+
 const messageUpdateSchema = z.object({
   text: z.string().trim().min(1).max(20_000),
   status: z.enum(["processing", "complete", "failed"]),
-  expectedGroupId: z.string().uuid().optional()
+  expectedGroupId: z.string().uuid().optional(),
+  bodies: messageBodiesSchema.nullable().optional(),
+  shared: z.string().trim().max(20_000).nullable().optional(),
+  i18n: messageI18nSchema.nullable().optional()
 });
 
 const createGroupSchema = z.object({
@@ -839,11 +862,8 @@ export async function createApp(options = {}) {
               // AI 自己写的 summary —— 派下去的活还能描述清楚,只是少了原始附件。
               const source = await sourceMessageFor(group.id, approval.sourceMessageId);
               const redelivery = await store.appendMessage(group.id, owner, {
-                text: translate(
-                  await requestLocale(req),
-                  "【已批准执行】{0}",
-                  [source?.text || approval.summary]
-                ),
+                text: translate(await requestLocale(req), systemMessageKeys.approved, [source?.text || approval.summary]),
+                i18n: { key: systemMessageKeys.approved, values: [source?.text || approval.summary] },
                 attachments: source?.attachments ?? [],
                 mentions: [{
                   id: target.id,
@@ -1235,10 +1255,12 @@ export async function createApp(options = {}) {
       }
       const { status, recoverInterrupted } = presenceSchema.parse(req.body);
       if (status === "online" && recoverInterrupted) {
+        const interruptedKey = systemMessageKeys.interrupted;
         const interrupted = await store.failProcessingMessages(
           req.params.groupId,
           req.member.id,
-          translate(await requestLocale(req), "任务因客户端重启或连接中断而停止，请重新发送任务。")
+          translate(await requestLocale(req), interruptedKey),
+          { key: interruptedKey, values: [] }
         );
         for (const message of interrupted) {
           await store.setMessageActivity(req.params.groupId, req.member.id, message.id, false);
@@ -1440,6 +1462,17 @@ export async function createApp(options = {}) {
       } catch {
         return res.status(400).json({ error: "mentions must be a JSON array" });
       }
+      /// 多语言正文走 multipart 时是 JSON 字符串(和 mentions 一样)。解不动或不合规就
+      /// 直接拒绝,别把半截结构存进消息里 —— 客户端拿它当渲染依据。
+      let bodies = null;
+      let i18n = null;
+      try {
+        if (req.body.bodies) bodies = messageBodiesSchema.parse(JSON.parse(req.body.bodies));
+        if (req.body.i18n) i18n = messageI18nSchema.parse(JSON.parse(req.body.i18n));
+      } catch (error) {
+        return res.status(400).json({ error: `invalid bodies or i18n: ${error.message}` });
+      }
+      const shared = cleanText(req.body.shared, 20_000) || null;
       if (!Array.isArray(mentionIds) || mentionIds.length > 20 || mentionIds.some((id) => typeof id !== "string")) {
         return res.status(400).json({ error: "invalid mentions" });
       }
@@ -1467,6 +1500,9 @@ export async function createApp(options = {}) {
       }
       const message = await store.appendMessage(req.params.groupId, req.member, {
         text,
+        bodies,
+        shared,
+        i18n,
         attachments,
         mentions: mentions.map((member) => ({
           id: member.id,
@@ -1827,13 +1863,13 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
             /// 检查那台机器的人。拿不到偏好就中文(和以前一致)。
             const locale = await localeForEmail(ai.email) ?? "zh";
             const owner = ai.ownerName ?? translate(locale, "它的主人");
+            /// 除了渲染好的 text,再存一份「模板 + 参数」。客户端拿自己的 locale 用同一张字典
+            /// 重渲染,于是同一条系统消息中文同事看中文、英文同事看英文 —— 存死一种语言做不到
+            /// 这件事,而这几条都是有限模板,不是自由文本,所以能做到精确而不是机器翻译。
+            const unansweredKey = systemMessageKeys.unanswered;
             await store.appendMessage(groupId, ai, {
-              text: translate(
-                locale,
-                "没有接到这条任务（已过 {0} 分钟）。多半是执行端没在运行：客户端已退出、机器休眠，"
-                + "或本机 CLI 的登录/额度失效。请重发一次，或让 {1} 检查那台机器。",
-                [Math.round(age), owner]
-              ),
+              text: translate(locale, unansweredKey, [Math.round(age), owner]),
+              i18n: { key: unansweredKey, values: [Math.round(age), owner] },
               attachments: [],
               mentions: [],
               replyTo: question.id,
@@ -1847,12 +1883,10 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
           if (!pending) continue;
           if (age >= giveUpMinutes) {
             const locale = await localeForEmail(ai.email) ?? "zh";
+            const gaveUpKey = systemMessageKeys.gaveUp;
             const updated = await store.updateMessage(groupId, pending.id, ai.id, {
-              text: translate(
-                locale,
-                "{0}\n\n⚠️ 已过 {1} 分钟仍未回写结果，执行端可能已经退出。请重发一次这条提问。",
-                [pending.text, Math.round(age)]
-              ),
+              text: translate(locale, gaveUpKey, [pending.text, Math.round(age)]),
+              i18n: { key: gaveUpKey, values: [pending.text, Math.round(age)] },
               status: "failed"
             }).catch(() => null);
             if (updated?.message) {
@@ -1865,8 +1899,10 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
           if (age >= stallMinutes && !nudgedPlaceholders.has(pending.id)) {
             nudgedPlaceholders.add(pending.id);
             const locale = await localeForEmail(ai.email) ?? "zh";
+            const nudgeKey = systemMessageKeys.stillWorking;
             const updated = await store.updateMessage(groupId, pending.id, ai.id, {
-              text: translate(locale, "{0}\n\n（仍在进行，已 {1} 分钟）", [pending.text, Math.round(age)]),
+              text: translate(locale, nudgeKey, [pending.text, Math.round(age)]),
+              i18n: { key: nudgeKey, values: [pending.text, Math.round(age)] },
               status: "processing"
             }).catch(() => null);
             if (updated?.message) {

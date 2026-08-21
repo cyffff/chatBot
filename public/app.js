@@ -715,18 +715,78 @@ function copyButtonNode(item) {
   return button;
 }
 
+/// 一条消息可以有多个语言版本,**显示哪一版由读者决定**,不是写的人定死:
+///   - i18n {key, values}:服务端产出的系统消息。用读者的语言 + 前端这张同款字典重渲染,
+///     所以中文同事和英文同事看同一条看守提示各看各的语言 —— 这是精确渲染,不是机器翻译;
+///   - bodies {zh, en}:写答案的那个 AI 自己给的双语正文(它本来就懂这些术语),
+///     shared 是两版共用的数据部分(表格、SQL、数字),不让模型把数据重打一遍;
+///   - 两个都没有:老消息、老客户端,照旧显示 text。
+/// 群内容一步都不离开这套系统:没有任何第三方翻译服务参与。
+const bodyLocaleKey = "relay-body-locale";
+const messageBodyChoice = new Map();
+
+function bodyLocales(message) {
+  return message.bodies ? Object.keys(message.bodies).filter((key) => message.bodies[key]) : [];
+}
+
+function defaultBodyLocale(message) {
+  const available = bodyLocales(message);
+  if (!available.length) return null;
+  const remembered = localStorage.getItem(bodyLocaleKey);
+  for (const candidate of [messageBodyChoice.get(message.id), remembered, getLocale()]) {
+    if (candidate && available.includes(candidate)) return candidate;
+  }
+  return available[0];
+}
+
+function messageBody(message) {
+  if (message.i18n?.key) return t(message.i18n.key, message.i18n.values ?? []);
+  const chosen = defaultBodyLocale(message);
+  if (!chosen) return message.text ?? "";
+  const body = message.bodies[chosen] ?? message.text ?? "";
+  return message.shared ? `${body}\n\n${message.shared}` : body;
+}
+
+/// 就地切换中文 ⇄ English:不新增消息、不改聊天记录,只换这一个气泡显示哪一版。
+/// 只有一个版本时按钮不出现。
+function bodyToggleNode(item, message) {
+  const available = bodyLocales(message);
+  if (available.length < 2) return null;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "toggle-message-language";
+  const paint = () => {
+    const current = defaultBodyLocale(message);
+    const next = available[(available.indexOf(current) + 1) % available.length];
+    button.textContent = next === "en" ? "EN" : "中";
+    button.title = t("看这条的另一个语言版本");
+    button.dataset.next = next;
+  };
+  button.addEventListener("click", () => {
+    messageBodyChoice.set(message.id, button.dataset.next);
+    // 记住偏好:同一个话题下后面的双语消息默认也按这个语言显示。
+    localStorage.setItem(bodyLocaleKey, button.dataset.next);
+    updateMessageNode(item, message);
+    paint();
+  });
+  paint();
+  return button;
+}
+
 function updateMessageNode(item, message) {
-  // 复制按钮读这里,所以每次内容变化都要跟着更新。
-  item.dataset.copyText = message.text ?? "";
-  item.querySelector(".copy-message")?.classList.toggle("hidden", !message.text);
+  // 复制按钮读这里,所以每次内容变化都要跟着更新;而且要跟**当前显示的那一版**走 ——
+  // 读者看的是英文、复制出来是中文是最糟的。
+  const shown = messageBody(message);
+  item.dataset.copyText = shown;
+  item.querySelector(".copy-message")?.classList.toggle("hidden", !shown);
   let bubble = item.querySelector(".bubble");
-  if (message.text) {
+  if (shown) {
     if (!bubble) {
       bubble = document.createElement("div");
       bubble.className = "bubble";
       item.append(bubble);
     }
-    renderMarkdown(bubble, message.text);
+    renderMarkdown(bubble, shown);
   } else {
     bubble?.remove();
   }
@@ -1057,6 +1117,8 @@ function renderMessage(message) {
   time.className = "time";
   time.textContent = new Date(message.createdAt).toLocaleString(dateLocale(), { dateStyle: "short", timeStyle: "short" });
   head.append(time, copyButtonNode(item));
+  const languageToggle = bodyToggleNode(item, message);
+  if (languageToggle) head.append(languageToggle);
   item.append(head);
   if (message.replyTo) item.append(replyQuoteNode(message.replyTo));
   updateMessageNode(item, message);

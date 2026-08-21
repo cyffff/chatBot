@@ -66,3 +66,19 @@ test("server strings translate, and unknown keys stay readable", () => {
   assert.match(translate("en", "目标服务器无法访问：{0}", ["timeout"]), /^Target server unreachable: timeout$/);
   assert.equal(translate("en", "没翻过的字符串"), "没翻过的字符串");
 });
+
+test("system messages the server stores can be re-rendered by the client", async () => {
+  /// 消息里存的是 {key, values},客户端要用**前端这张字典**按读者的语言重渲染。
+  /// 少一条 key 就会静默回落到中文原文 —— 英文读者根本不知道自己看的是没翻的那一版,
+  /// 而这正是这套机制要解决的问题。所以逐条对账。
+  const { systemMessageKeys } = await import("../src/i18n.js");
+  const missing = Object.entries(systemMessageKeys)
+    .filter(([, key]) => !translations.en[key])
+    .map(([name]) => name);
+  assert.deepEqual(missing, [], `前端字典缺这几条系统消息: ${missing.join(", ")}`);
+  applyLocale("en", { persistLocally: false });
+  assert.match(t(systemMessageKeys.unanswered, [12, "Demo"]), /^Nobody picked this up \(12 min ago\)/);
+  assert.match(t(systemMessageKeys.joined, ["Zoe’s Claude"]), /^Zoe’s Claude joined the group/);
+  applyLocale("zh", { persistLocally: false });
+  assert.match(t(systemMessageKeys.unanswered, [12, "Demo"]), /^没有接到这条任务（已过 12 分钟）/);
+});

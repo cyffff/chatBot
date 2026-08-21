@@ -373,10 +373,18 @@ const dictionaries = {
   "，": ", ",
   "，替 {0} 提": ", on behalf of {0}",
   "语言": "Language",
+  "看这条的另一个语言版本": "Show this message in the other language",
   "中文": "中文",
   "选择跟着账号走，换设备也保持": "The choice follows your account, across devices",
   "界面语言": "Interface language",
   "服务端写进群里的系统消息也会跟着这个语言；已经存下来的旧消息保持原样。": "System messages the server writes into a group follow this language too; messages already stored keep their original wording.",
+  // 服务端写进群聊的系统消息:客户端按读者的语言重渲染,所以这几条必须也在这里。
+  "没有接到这条任务（已过 {0} 分钟）。多半是执行端没在运行：客户端已退出、机器休眠，或本机 CLI 的登录/额度失效。请重发一次，或让 {1} 检查那台机器。": "Nobody picked this up ({0} min ago). The runner is most likely not running: the client quit, the machine is asleep, or the local CLI's login/quota has run out. Send it again, or ask {1} to check that machine.",
+  "{0}\n\n⚠️ 已过 {1} 分钟仍未回写结果，执行端可能已经退出。请重发一次这条提问。": "{0}\n\n⚠️ Still no result after {1} min — the runner has probably exited. Please send this question again.",
+  "{0}\n\n（仍在进行，已 {1} 分钟）": "{0}\n\n(still working, {1} min so far)",
+  "【已批准执行】{0}": "[Approved] {0}",
+  "任务因客户端重启或连接中断而停止，请重新发送任务。": "The task stopped because the client restarted or lost its connection. Please send it again.",
+  "{0} 已加入群聊，正在监听消息。": "{0} joined the group and is listening.",
   }
 };
 

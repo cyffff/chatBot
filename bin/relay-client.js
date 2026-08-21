@@ -2,7 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { normalizeLocale, translate } from "../src/i18n.js";
+import { normalizeLocale, systemMessageKeys, translate } from "../src/i18n.js";
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -335,7 +335,9 @@ async function join() {
   ) ?? "zh";
   const online = await sendText(
     config,
-    translate(locale, "{0} 已加入群聊，正在监听消息。", [`${ownerName}’s ${name}`])
+    translate(locale, systemMessageKeys.joined, [`${ownerName}’s ${name}`]),
+    [],
+    { i18n: { key: systemMessageKeys.joined, values: [`${ownerName}’s ${name}`] } }
   );
   await reportPresence(config, "online");
   console.log(JSON.stringify({
@@ -477,12 +479,23 @@ async function bindCodex() {
   }, null, 2));
 }
 
-async function sendText(config, text, files = [], { status = "complete", replyTo } = {}) {
+async function sendText(
+  config,
+  text,
+  files = [],
+  { status = "complete", replyTo, mentionIds = [], bodies = null, shared = null, i18n = null } = {}
+) {
   if (!text && files.length === 0) throw new Error("A message or file is required");
   const form = new FormData();
   if (text) form.set("text", text);
   form.set("status", status);
   if (replyTo) form.set("replyTo", replyTo);
+  if (mentionIds.length) form.set("mentions", JSON.stringify(mentionIds));
+  // 同一条回答的多个语言版本 + 两版共用的数据部分,读者点按钮切换。
+  if (bodies) form.set("bodies", JSON.stringify(bodies));
+  if (shared) form.set("shared", shared);
+  // 有限模板(比如上线播报)存一份 key + 参数,让读者按自己的语言看。
+  if (i18n) form.set("i18n", JSON.stringify(i18n));
   for (const file of files) {
     const buffer = await fs.readFile(file);
     form.append("files", new Blob([buffer]), path.basename(file));
@@ -516,8 +529,27 @@ async function send() {
     files.push(path.resolve(args[index + 1]));
     args.splice(index, 2);
   }
+  // @ 谁:以前 send 根本不支持,只能靠正文里写个名字 —— 那样对方不会收到提示。
+  const mentionIds = [];
+  while (args.includes("--mention")) {
+    const index = args.indexOf("--mention");
+    mentionIds.push(args[index + 1]);
+    args.splice(index, 2);
+  }
+  const bodyZh = option("body-zh");
+  const bodyEn = option("body-en");
+  const shared = option("shared");
+  const bodies = bodyZh || bodyEn
+    ? { ...(bodyZh ? { zh: bodyZh } : {}), ...(bodyEn ? { en: bodyEn } : {}) }
+    : null;
   const text = args.join(" ").trim();
-  const result = await sendText(config, text, files, { status, replyTo });
+  const result = await sendText(config, text, files, {
+    status,
+    replyTo,
+    mentionIds,
+    bodies,
+    shared
+  });
   await reportPresence(config, status === "processing" ? "busy" : "online", {
     persist: !connectionName
   });
@@ -729,7 +761,7 @@ if (!commands[command]) {
   npm run relay -- listen --session <session-id>
   npm run relay -- presence --session <session-id> --status online|busy
   npm run relay -- feedback --session <session-id> --title <标题> [--for <谁要的>] <润色后的正文>
-  npm run relay -- send --session <session-id> [--status processing|complete|failed] <message> [--file <path>]
+  npm run relay -- send --session <session-id> [--status processing|complete|failed] [--mention <member-id>]... [--body-zh <中文正文>] [--body-en <English body>] [--shared <两版共用的数据>] <message> [--file <path>]
   npm run relay -- update --session <session-id> --message <message-id> [--status processing|complete|failed] <message>
   npm run relay -- history --connection <mcp-name> --expected-group <group-id> [--after <message-id>] [--limit 100]
   npm run relay -- send --connection <mcp-name> --expected-group <group-id> [--status processing|complete|failed] <message> [--file <path>]

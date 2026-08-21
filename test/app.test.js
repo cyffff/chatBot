@@ -1367,6 +1367,106 @@ exit 0
   assert.ok(saved.cursor);
 });
 
+test("system messages carry key + values so each reader sees their own language", async (t) => {
+  /// 一条存下来的文本没法同时满足两种语言:主人切成英文,群里的中文同事也会看到英文。
+  /// 所以这几条有限模板除了渲染好的 text,再存一份 {key, values},客户端用自己的语言重渲染 ——
+  /// 这是精确渲染,不是机器翻译,用的就是前后端共用的那张表。
+  const { base, sweepUnanswered } = await fixture(t, { unansweredMinutes: 10, giveUpMinutes: 45 });
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "双语系统消息", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const aiId = "ai:owner@example.com:claude";
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: owner,
+    body: new URLSearchParams({ text: "@Claude 看一下", mentions: JSON.stringify([aiId]) })
+  });
+  await sweepUnanswered(Date.now() + 11 * 60_000);
+
+  const history = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
+  const fallback = history.body.messages.at(-1);
+  assert.match(fallback.text, /没有接到这条任务/);
+  assert.ok(fallback.i18n, "系统消息要带 i18n,否则读者只能看写它时定死的那一种语言");
+  assert.match(fallback.i18n.key, /没有接到这条任务（已过 \{0\} 分钟）/);
+  assert.equal(fallback.i18n.values.length, 2);
+  assert.equal(fallback.i18n.values[1], "Owner");
+  // 客户端用同一张字典 + 自己的 locale 重渲染,应当得到英文
+  const { translate } = await import("../src/i18n.js");
+  const asEnglish = translate("en", fallback.i18n.key, fallback.i18n.values);
+  assert.match(asEnglish, /Nobody picked this up \(11 min ago\)/);
+  assert.doesNotMatch(asEnglish, /[一-鿿]/);
+});
+
+test("a message can carry both languages and a shared data block", async (t) => {
+  /// 平台只负责存和切换:双语正文由写答案的那个 AI 自己给出(它本来就懂这些术语),
+  /// 群内容一步都不离开这套系统,不接任何第三方翻译服务。
+  const { base } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "双语正文", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const ai = { ...owner, "X-Relay-Provider": "claude" };
+
+  const sent = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({
+      text: "通过率掉了 3 个点。",
+      bodies: JSON.stringify({ zh: "通过率掉了 3 个点。", en: "Approval rate dropped 3 points." }),
+      // 数字和表格是语言中立的:两版共用,别让模型把数据重打一遍
+      shared: "| day | rate |\n| --- | --- |\n| 08-20 | 71.2% |"
+    })
+  }).then((response) => response.json());
+  assert.deepEqual(sent.message.bodies, {
+    zh: "通过率掉了 3 个点。",
+    en: "Approval rate dropped 3 points."
+  });
+  assert.match(sent.message.shared, /71\.2%/);
+  // text 一字不动:老客户端和历史记录照旧
+  assert.equal(sent.message.text, "通过率掉了 3 个点。");
+
+  // 原地回填时也能把占位换成双语答案
+  const placeholder = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: ai, body: new URLSearchParams({ text: "正在处理…", status: "processing" })
+  }).then((response) => response.json());
+  const patched = await json(base, `/api/groups/${groupId}/messages/${placeholder.message.id}`, {
+    method: "PATCH",
+    headers: ai,
+    body: JSON.stringify({
+      text: "查完了。",
+      status: "complete",
+      bodies: { zh: "查完了。", en: "Done." },
+      expectedGroupId: groupId
+    })
+  });
+  assert.deepEqual(patched.body.message.bodies, { zh: "查完了。", en: "Done." });
+
+  // 半截结构不许进消息:客户端拿它当渲染依据
+  const rejected = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "x", bodies: JSON.stringify({ fr: "Bonjour" }) })
+  });
+  assert.equal(rejected.status, 400);
+  const emptyBodies = await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: ai,
+    body: new URLSearchParams({ text: "x", bodies: "{}" })
+  });
+  assert.equal(emptyBodies.status, 400);
+});
+
 test("language follows the account, and Accept-Language covers the rest", async (t) => {
   const { base, sweepUnanswered } = await fixture(t, { unansweredMinutes: 10 });
   const created = await json(base, "/api/groups", {
