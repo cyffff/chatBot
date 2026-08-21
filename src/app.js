@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { FileStore } from "./storage.js";
+import { localeFromAcceptLanguage, normalizeLocale, translate } from "./i18n.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(here, "../public");
@@ -93,7 +94,8 @@ const accountSchema = z.object({
 
 const accountProfileSchema = z.object({
   displayName: z.string().trim().min(1).max(60),
-  avatarDataUrl: z.string().max(750_000).nullable()
+  avatarDataUrl: z.string().max(750_000).nullable(),
+  locale: z.enum(["zh", "en"]).optional()
 }).strict().superRefine((value, ctx) => {
   if (value.avatarDataUrl === null) return;
   const match = value.avatarDataUrl.match(/^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/);
@@ -262,6 +264,21 @@ export async function createApp(options = {}) {
     return memberships;
   }
 
+  /// 语言按这个顺序定:账号里存的偏好 → 请求的 Accept-Language → 中文。
+  /// 服务端发出去的用户可见字符串都过这里,包括写进群聊的系统消息 —— 那些会永久留在
+  /// 聊天记录里,只翻前端解决不了。
+  const localeForEmail = async (email) => {
+    if (!email) return null;
+    const account = await store.accountByEmail(email).catch(() => null);
+    return normalizeLocale(account?.locale);
+  };
+  const requestLocale = async (req) => (
+    normalizeLocale(req.account?.locale)
+    ?? await localeForEmail(req.member?.email ?? req.account?.email)
+    ?? localeFromAcceptLanguage(req.get("accept-language"))
+    ?? "zh"
+  );
+
   function publicAccount(account) {
     return {
       // email 就是账号 id,没有第二个标识符。
@@ -269,6 +286,8 @@ export async function createApp(options = {}) {
       email: account.email,
       displayName: account.displayName ?? null,
       avatarDataUrl: account.avatarDataUrl ?? null,
+      // 界面语言:客户端启动时按这个渲染,所以它必须跟着账号一起下发。
+      locale: normalizeLocale(account.locale) ?? null,
       createdAt: account.createdAt
     };
   }
@@ -354,22 +373,25 @@ export async function createApp(options = {}) {
 
   /// 对面必须是同一套身份模型。旧版本的 /health 只回 {ok:true},没有 identity 字段 ——
   /// 那台上同步过去的数据会被它当成不认识的格式,而客户端切过去之后全部 401。
-  async function targetCompatibility(targetBaseUrl) {
+  async function targetCompatibility(targetBaseUrl, locale = "zh") {
     const health = new URL("/health", targetBaseUrl);
     const response = await fetch(health, { signal: AbortSignal.timeout(15_000) })
       .catch((error) => ({ ok: false, failure: error.message }));
     if (response.failure) {
-      return { ok: false, error: `目标服务器无法访问：${response.failure}` };
+      return { ok: false, error: translate(locale, "目标服务器无法访问：{0}", [response.failure]) };
     }
     if (!response.ok) {
-      return { ok: false, error: `目标服务器 /health 返回 ${response.status}` };
+      return { ok: false, error: translate(locale, "目标服务器 /health 返回 {0}", [response.status]) };
     }
     const body = await response.json().catch(() => ({}));
     if (body.identity !== "email") {
       return {
         ok: false,
-        error: "目标服务器还在旧协议（没有 email 身份），先把它更新到这个版本再同步；"
+        error: translate(
+          locale,
+          "目标服务器还在旧协议（没有 email 身份），先把它更新到这个版本再同步；"
           + "否则同步过去的数据它认不出来，客户端切过去会全部失效。"
+        )
       };
     }
     return { ok: true };
@@ -551,7 +573,8 @@ export async function createApp(options = {}) {
   app.post("/api/account/sync", requireAccount, async (req, res, next) => {
     try {
       const { targetBaseUrl } = syncSchema.parse(req.body);
-      const compatibility = await targetCompatibility(targetBaseUrl);
+      const locale = await requestLocale(req);
+      const compatibility = await targetCompatibility(targetBaseUrl, locale);
       if (!compatibility.ok) return res.status(409).json({ error: compatibility.error, targetBaseUrl });
       const target = new URL("/api/account/import", targetBaseUrl);
       const payload = await store.exportAccount(req.account.email);
@@ -561,12 +584,12 @@ export async function createApp(options = {}) {
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(20_000)
       }).catch((error) => {
-        throw new Error(`目标服务器无法访问：${error.message}`);
+        throw new Error(translate(locale, "目标服务器无法访问：{0}", [error.message]));
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         return res.status(502).json({
-          error: body.error || `目标服务器返回 ${response.status}`,
+          error: body.error || translate(locale, "目标服务器返回 {0}", [response.status]),
           targetBaseUrl
         });
       }
@@ -581,7 +604,8 @@ export async function createApp(options = {}) {
         applied: body
       });
     } catch (error) {
-      if (error?.message?.startsWith("目标服务器")) {
+      // 这里原来靠中文前缀认「目标服务器那边的错」,翻译之后前缀会变,所以两种语言都认。
+      if (/^(目标服务器|Target server)/.test(error?.message ?? "")) {
         return res.status(502).json({ error: error.message });
       }
       next(error);
@@ -659,7 +683,10 @@ export async function createApp(options = {}) {
       const { provider } = identityFrom(req);
       if (!provider) {
         return res.status(403).json({
-          error: "反馈只接受 AI 提交：把你的想法讲给自己的 AI，让它润色成工单后替你提交"
+          error: translate(
+            await requestLocale(req),
+            "反馈只接受 AI 提交：把你的想法讲给自己的 AI，让它润色成工单后替你提交"
+          )
         });
       }
       const payload = feedbackSchema.parse(req.body);
@@ -763,7 +790,9 @@ export async function createApp(options = {}) {
   app.patch("/api/feedback/:ticketId", requireAccount, async (req, res, next) => {
     try {
       if (identityFrom(req).provider) {
-        return res.status(403).json({ error: "工单状态由人来定：AI 只负责提" });
+        return res.status(403).json({
+          error: translate(await requestLocale(req), "工单状态由人来定：AI 只负责提")
+        });
       }
       const { status, note } = feedbackStatusSchema.parse(req.body);
       const ticket = await store.updateFeedbackStatus(req.params.ticketId, {
@@ -810,7 +839,11 @@ export async function createApp(options = {}) {
               // AI 自己写的 summary —— 派下去的活还能描述清楚,只是少了原始附件。
               const source = await sourceMessageFor(group.id, approval.sourceMessageId);
               const redelivery = await store.appendMessage(group.id, owner, {
-                text: `【已批准执行】${source?.text || approval.summary}`,
+                text: translate(
+                  await requestLocale(req),
+                  "【已批准执行】{0}",
+                  [source?.text || approval.summary]
+                ),
                 attachments: source?.attachments ?? [],
                 mentions: [{
                   id: target.id,
@@ -1205,7 +1238,7 @@ export async function createApp(options = {}) {
         const interrupted = await store.failProcessingMessages(
           req.params.groupId,
           req.member.id,
-          "任务因客户端重启或连接中断而停止，请重新发送任务。"
+          translate(await requestLocale(req), "任务因客户端重启或连接中断而停止，请重新发送任务。")
         );
         for (const message of interrupted) {
           await store.setMessageActivity(req.params.groupId, req.member.id, message.id, false);
@@ -1655,7 +1688,11 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
     try {
       if (!wantsAgentText(req)) return res.sendFile(path.join(publicDir, "index.html"));
       const group = await store.groupFromInvite(req.params.inviteToken);
-      if (!group) return res.status(404).type("text/plain; charset=utf-8").send("邀请链接已失效。\n");
+      if (!group) {
+        const locale = localeFromAcceptLanguage(req.get("accept-language")) ?? "zh";
+        return res.status(404).type("text/plain; charset=utf-8")
+          .send(`${translate(locale, "邀请链接已失效。")}\n`);
+      }
       res.type("text/plain; charset=utf-8").send(aiOnboardingSheet({
         origin: publicBaseUrl(req),
         group,
@@ -1786,11 +1823,17 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
               && Date.parse(message.createdAt) > Date.parse(question.createdAt)
             ));
             if (spokeSince) continue;
-            const owner = ai.ownerName ?? "它的主人";
+            /// 这条会永久留在聊天记录里,所以按这个 AI 主人的语言写 —— 他才是要去
+            /// 检查那台机器的人。拿不到偏好就中文(和以前一致)。
+            const locale = await localeForEmail(ai.email) ?? "zh";
+            const owner = ai.ownerName ?? translate(locale, "它的主人");
             await store.appendMessage(groupId, ai, {
-              text: `没有接到这条任务(已过 ${Math.round(age)} 分钟)。多半是执行端没在运行:`
-                + `客户端已退出、机器休眠,或本机 CLI 的登录/额度失效。`
-                + `请重发一次,或让 ${owner} 检查那台机器。`,
+              text: translate(
+                locale,
+                "没有接到这条任务（已过 {0} 分钟）。多半是执行端没在运行：客户端已退出、机器休眠，"
+                + "或本机 CLI 的登录/额度失效。请重发一次，或让 {1} 检查那台机器。",
+                [Math.round(age), owner]
+              ),
               attachments: [],
               mentions: [],
               replyTo: question.id,
@@ -1803,9 +1846,13 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
           const pending = answers.find((reply) => reply.status === "processing");
           if (!pending) continue;
           if (age >= giveUpMinutes) {
+            const locale = await localeForEmail(ai.email) ?? "zh";
             const updated = await store.updateMessage(groupId, pending.id, ai.id, {
-              text: `${pending.text}\n\n⚠️ 已过 ${Math.round(age)} 分钟仍未回写结果，`
-                + "执行端可能已经退出。请重发一次这条提问。",
+              text: translate(
+                locale,
+                "{0}\n\n⚠️ 已过 {1} 分钟仍未回写结果，执行端可能已经退出。请重发一次这条提问。",
+                [pending.text, Math.round(age)]
+              ),
               status: "failed"
             }).catch(() => null);
             if (updated?.message) {
@@ -1817,8 +1864,9 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
           }
           if (age >= stallMinutes && !nudgedPlaceholders.has(pending.id)) {
             nudgedPlaceholders.add(pending.id);
+            const locale = await localeForEmail(ai.email) ?? "zh";
             const updated = await store.updateMessage(groupId, pending.id, ai.id, {
-              text: `${pending.text}\n\n（仍在进行，已 ${Math.round(age)} 分钟）`,
+              text: translate(locale, "{0}\n\n（仍在进行，已 {1} 分钟）", [pending.text, Math.round(age)]),
               status: "processing"
             }).catch(() => null);
             if (updated?.message) {

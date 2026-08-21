@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { normalizeLocale, translate } from "../src/i18n.js";
 
 const args = process.argv.slice(2);
 const command = args.shift();
@@ -327,7 +328,15 @@ async function join() {
       placeholder: hookPlaceholder
     });
   }
-  const online = await sendText(config, `${ownerName}’s ${name} 已加入群聊，正在监听消息。`);
+  /// 上线播报会永久留在聊天记录里,按主人的语言写(拿不到偏好就中文)。
+  const { provider: _ownerView, ...ownerIdentity } = config;
+  const locale = normalizeLocale(
+    (await request(ownerIdentity, "/api/account").catch(() => null))?.account?.locale
+  ) ?? "zh";
+  const online = await sendText(
+    config,
+    translate(locale, "{0} 已加入群聊，正在监听消息。", [`${ownerName}’s ${name}`])
+  );
   await reportPresence(config, "online");
   console.log(JSON.stringify({
     connected: true,

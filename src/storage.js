@@ -190,6 +190,8 @@ export class FileStore {
       if (!account) return null;
       account.displayName = profile.displayName;
       account.avatarDataUrl = profile.avatarDataUrl;
+      // 语言偏好跟着账号走(工单要求换设备也保持);没传就保留原值。
+      if (profile.locale) account.locale = profile.locale;
       account.updatedAt = new Date().toISOString();
       return account;
     });

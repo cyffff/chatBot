@@ -1367,6 +1367,69 @@ exit 0
   assert.ok(saved.cursor);
 });
 
+test("language follows the account, and Accept-Language covers the rest", async (t) => {
+  const { base, sweepUnanswered } = await fixture(t, { unansweredMinutes: 10 });
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Bilingual", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+
+  /// 服务端也在发用户直接看得到的字符串,只翻前端解决不了。没有账号偏好时按请求头兜底。
+  const zhError = await json(base, "/api/feedback", {
+    method: "POST",
+    headers: owner,
+    body: JSON.stringify({ title: "x", body: "y" })
+  });
+  assert.equal(zhError.response.status, 403);
+  assert.match(zhError.body.error, /反馈只接受 AI 提交/);
+  const enError = await json(base, "/api/feedback", {
+    method: "POST",
+    headers: { ...owner, "Accept-Language": "en-GB,en;q=0.9" },
+    body: JSON.stringify({ title: "x", body: "y" })
+  });
+  assert.equal(enError.response.status, 403);
+  assert.match(enError.body.error, /Feedback is accepted from AIs only/);
+
+  // 选择存在账号上,换设备也保持 —— 所以要能存下来并跟着账号下发
+  const saved = await json(base, "/api/account", {
+    method: "PATCH",
+    headers: owner,
+    body: JSON.stringify({ displayName: "Owner", avatarDataUrl: null, locale: "en" })
+  });
+  assert.equal(saved.body.account.locale, "en");
+  const reread = await json(base, "/api/account", { headers: owner });
+  assert.equal(reread.body.account.locale, "en");
+
+  // 账号偏好优先于请求头:这次请求头明说中文,回的仍是英文
+  const stillEnglish = await json(base, "/api/feedback", {
+    method: "POST",
+    headers: { ...owner, "Accept-Language": "zh-CN" },
+    body: JSON.stringify({ title: "x", body: "y" })
+  });
+  assert.match(stillEnglish.body.error, /Feedback is accepted from AIs only/);
+
+  /// 写进群聊的系统消息同样要跟语言 —— 它们会永久留在聊天记录里,英文用户不该在自己的
+  /// 群里看到中文兜底提示。这条按 AI 主人的语言写。
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const aiId = "ai:owner@example.com:claude";
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST",
+    headers: owner,
+    body: new URLSearchParams({ text: "@Claude anyone there", mentions: JSON.stringify([aiId]) })
+  });
+  assert.deepEqual(await sweepUnanswered(Date.now() + 11 * 60_000), { prompted: 1, nudged: 0, gaveUp: 0 });
+  const history = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
+  const fallback = history.body.messages.at(-1);
+  assert.equal(fallback.status, "failed");
+  assert.match(fallback.text, /Nobody picked this up/);
+  assert.match(fallback.text, /ask Owner to check that machine/);
+  assert.doesNotMatch(fallback.text, /[一-鿿]/);
+});
+
 test("an @-mention never goes silent: no pickup, stalled, and given up", async (t) => {
   /// 真实事故:有人在群里连问两条,三天里既没有回复、也没有「正在处理」或失败提示 ——
   /// 从群成员的视角完全分不清是 AI 在跑、任务丢了、还是整套 relay 挂了。执行端那时可能
@@ -1577,6 +1640,62 @@ test("routed polls say which group they are, and a mismatched worker refuses to 
   assert.equal(JSON.parse(crossed.stdout).handled, 0);
   const untouched = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
   assert.equal(untouched.body.messages.filter((message) => message.sender.type === "ai").length, 0);
+});
+
+test("the worker writes its chat-visible messages in the owner's language", async (t) => {
+  const { base, dataDir } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "English group", email: "owner@example.com", displayName: "Owner" })
+  });
+  const configFile = path.join(dataDir, "en-session.json");
+  const failing = path.join(dataDir, "fake-claude-en");
+  await fs.writeFile(failing, `#!/bin/sh
+printf '%s\\n' 'OAuth session expired'
+exit 1
+`, { mode: 0o700 });
+  const workerEnv = {
+    ...process.env,
+    GROUP_RELAY_AGENT_CONFIG: configFile,
+    GROUP_RELAY_LOCAL_WORKERS: path.join(dataDir, "local-workers.json")
+  };
+  const joined = await execFileAsync(process.execPath, [
+    relayClient, "join", created.body.inviteUrl.replace("http://relay.test", base),
+    "--provider", "claude", "--owner", "Zoe", "--email", "zoe@example.com", "--name", "Claude"
+  ], { env: workerEnv });
+  const aiMemberId = JSON.parse(joined.stdout).member.id;
+  // 上线播报默认中文(账号还没选语言)
+  const afterJoin = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { ...asMember("owner@example.com") }
+  });
+  assert.match(afterJoin.body.messages.at(-1).text, /已加入群聊/);
+
+  // 主人把语言切成英文之后,占位和失败提示都要跟着 —— 这些都会永久留在聊天记录里
+  await json(base, "/api/account", {
+    method: "PATCH",
+    headers: { "X-Relay-Email": "zoe@example.com" },
+    body: JSON.stringify({ displayName: "Zoe", avatarDataUrl: null, locale: "en" })
+  });
+  const question = new FormData();
+  question.set("text", "@Claude have a look");
+  question.set("mentions", JSON.stringify([aiMemberId]));
+  await fetch(`${base}/api/groups/${created.body.group.id}/messages`, {
+    method: "POST",
+    headers: { ...asMember("owner@example.com") },
+    body: question
+  });
+  await execFileAsync(process.execPath, [
+    relayClient, "worker", "--once", "--agent-bin", failing
+  ], { env: workerEnv, timeout: 20_000 });
+
+  const history = await json(base, `/api/groups/${created.body.group.id}/messages`, {
+    headers: { ...asMember("owner@example.com") }
+  });
+  const failure = history.body.messages.at(-1);
+  assert.equal(failure.status, "failed");
+  assert.match(failure.text, /^Failed:/);
+  assert.match(failure.text, /login has expired/);
+  assert.doesNotMatch(failure.text, /[一-鿿]/);
 });
 
 test("a failed CLI reports why, not just an exit code", async (t) => {

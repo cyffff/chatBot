@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertWithinAllowedDirs } from "./security.js";
+import { normalizeLocale, translate } from "../src/i18n.js";
 
 const approvalMarker = "GROUP_RELAY_APPROVAL_REQUIRED:";
 /// 任务不按总耗时硬杀,按「是否还在动」判定:三个 CLI 中途都不吐 stdout(claude 是
@@ -428,16 +429,19 @@ function killTree(child) {
 /// CLI 非零退出时不能只报一句「exited with status 1」—— 那在群里没法行动。它们的真实原因
 /// 常常打在 stdout(claude 的「OAuth session expired」就是),所以两股输出都要带上;
 /// 登录过期这一类还要直接说清该在哪台机器上做什么。
-function agentFailure(provider, code, stdout, stderr) {
+function agentFailure(provider, code, stdout, stderr, say = (key, values) => translate("zh", key, values)) {
   const detail = [stdout, stderr].map((part) => String(part ?? "").trim()).filter(Boolean).join("\n").slice(-600);
   const authExpired = /oauth|authenticat|not logged in|log ?in|unauthorized|invalid api key|credentials/i.test(detail);
   const hint = authExpired
-    ? `本机 ${provider} CLI 的登录已失效，请到运行 worker 的那台机器上重新登录（例如直接跑一次 ${provider} 并完成 /login），然后重试。`
+    ? say(
+        "本机 {0} CLI 的登录已失效，请到运行 worker 的那台机器上重新登录（例如直接跑一次 {0} 并完成 /login），然后重试。",
+        [provider]
+      )
     : "";
   return new Error([`${provider} exited with status ${code}`, detail, hint].filter(Boolean).join("\n"));
 }
 
-async function askLocalAI({ config, configFile, message, trustedExecution, senderIsOwner, model, agentBin, log }) {
+async function askLocalAI({ config, configFile, message, trustedExecution, senderIsOwner, model, agentBin, log, say = (key, values) => translate("zh", key, values) }) {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-worker-"));
   try {
     const attachmentsDirectory = path.join(temporary, "attachments");
@@ -531,7 +535,7 @@ async function askLocalAI({ config, configFile, message, trustedExecution, sende
       if (!partial) throw new Error(`${reason}；未拿到任何输出，请重试或拆分任务`);
       return `⚠️ ${reason}。以下是中断前已产出的内容，可能不完整：\n\n${partial}`.slice(0, 20_000);
     }
-    if (code !== 0) throw agentFailure(config.provider, code, raw, stderr);
+    if (code !== 0) throw agentFailure(config.provider, code, raw, stderr, say);
     const reply = extractReply(config.provider, raw);
     if (!reply) {
       throw new Error(["AI returned an empty reply", String(stderr ?? "").trim().slice(-600)].filter(Boolean).join("\n"));
@@ -574,6 +578,13 @@ export async function runWorker({
   const persist = async () => {
     if (saveConfig) await saveConfig(config);
   };
+  /// 占位、失败、上线播报都会写进群里、永久留在聊天记录里,所以要按主人的语言写。
+  /// 启动时问一次就够(语言不常改),问不到就中文 —— 和以前一致。
+  const { provider: _asOwner, ...ownerIdentity } = config;
+  const locale = normalizeLocale(
+    (await relayRequest(ownerIdentity, "/api/account").catch(() => null))?.account?.locale
+  ) ?? "zh";
+  const say = (key, values = []) => translate(locale, key, values);
   const presence = async (status, recoverInterrupted = false) => {
     const result = await relayRequest(config, `/api/groups/${config.groupId}/members/me/presence`, {
       method: "POST",
@@ -632,7 +643,7 @@ export async function runWorker({
         const senderIsOwner = message.senderIsOwner === true;
         await presence("busy");
         const form = new FormData();
-        form.set("text", trustedExecution ? "已接单，正在项目中免审批执行…" : "正在处理这个问题，请稍等…");
+        form.set("text", say(trustedExecution ? "已接单，正在项目中免审批执行…" : "正在处理这个问题，请稍等…"));
         form.set("status", "processing");
         if (message.id) form.set("replyTo", message.id);
         const placeholder = await relayRequest(config, `/api/groups/${config.groupId}/messages`, {
@@ -651,7 +662,8 @@ export async function runWorker({
             senderIsOwner,
             model,
             agentBin,
-            log
+            log,
+            say
           });
           const summary = trustedExecution ? null : approvalSummary(reply);
           if (summary && message.id) {
@@ -663,8 +675,10 @@ export async function runWorker({
               config,
               placeholderId,
               // 要说清为什么还要批:开了免审批的人会以为这条不该再问他。
-              `需要使用本机工具，已发送给 ${config.ownerName ?? "设备主人"} 审批。`
-              + "（该 AI 未开启免审批：开启后群内成员的指令会直接执行。）",
+              say(
+                "需要使用本机工具，已发送给 {0} 审批。（该 AI 未开启免审批：开启后群内成员的指令会直接执行。）",
+                [config.ownerName ?? "设备主人"]
+              ),
               "complete"
             );
           } else {
@@ -672,7 +686,7 @@ export async function runWorker({
           }
           log(`Replied to ${message.id}`);
         } catch (error) {
-          await updateMessage(config, placeholderId, `处理失败：${error.message}`, "failed").catch(() => {});
+          await updateMessage(config, placeholderId, say("处理失败：{0}", [error.message]), "failed").catch(() => {});
           log(`AI task ${message.id ?? "unknown"} failed: ${error.message}`);
         } finally {
           clearInterval(heartbeat);

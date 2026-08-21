@@ -15,6 +15,7 @@
     <!-- app.js 里 import 的这两个,浏览器要等 app.js 到齐才会去拿。隧道一次往返半秒上下,
          白排一轮很明显,所以让它们和 app.js 一起出发。 -->
     <link rel="modulepreload" href="/app.js" />
+    <link rel="modulepreload" href="/i18n.js" />
     <link rel="modulepreload" href="/history.js" />
     <link rel="modulepreload" href="/markdown.js" />
   </head>
@@ -253,6 +254,17 @@
                   <p id="server-sync-result" class="muted compact"></p>
                 </div>
               </form>
+
+              <div class="profile-settings-card">
+                <div class="profile-settings-heading">
+                  <div><strong>语言</strong><small>选择跟着账号走，换设备也保持</small></div>
+                </div>
+                <div class="locale-choice" role="group" aria-label="界面语言">
+                  <button id="locale-zh" class="secondary" type="button" data-locale="zh" lang="zh-CN">中文</button>
+                  <button id="locale-en" class="secondary" type="button" data-locale="en" lang="en">English</button>
+                </div>
+                <p class="muted compact">服务端写进群里的系统消息也会跟着这个语言；已经存下来的旧消息保持原样。</p>
+              </div>
 
               <div class="profile-settings-card">
                 <div class="profile-settings-heading">

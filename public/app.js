@@ -1,4 +1,5 @@
 import { markdownTableDefinition, splitMarkdownTableRow } from "./markdown.js";
+import { t, dateLocale, getLocale, applyLocale, translateDom, supportedLocales } from "./i18n.js";
 import {
   exportHistory,
   historyAvailable,
@@ -76,7 +77,7 @@ function handleNativeResponse(payload) {
   nativeRequests.delete(payload.requestId);
   clearTimeout(pending.timer);
   if (payload.ok) pending.resolve(payload.result ?? {});
-  else pending.reject(new Error(payload.error || "桌面客户端操作失败"));
+  else pending.reject(new Error(payload.error || t("桌面客户端操作失败")));
 }
 
 window.addEventListener("relay-native-response", (event) => handleNativeResponse(event.detail));
@@ -84,12 +85,12 @@ window.chrome?.webview?.addEventListener?.("message", (event) => handleNativeRes
 
 function requestNative(action, payload = {}) {
   const bridge = desktopNativeBridge();
-  if (!bridge) return Promise.reject(new Error("请在 Group Relay 桌面客户端中配置 AI"));
+  if (!bridge) return Promise.reject(new Error(t("请在 Group Relay 桌面客户端中配置 AI")));
   const requestId = `native-${Date.now()}-${nativeRequestSequence += 1}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       nativeRequests.delete(requestId);
-      reject(new Error("桌面客户端响应超时"));
+      reject(new Error(t("桌面客户端响应超时")));
     }, 10_000);
     nativeRequests.set(requestId, { resolve, reject, timer });
     bridge.postMessage({ action, requestId, ...payload });
@@ -102,7 +103,7 @@ async function api(url, options = {}) {
   if (!(options.body instanceof FormData) && options.body) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`);
+  if (!response.ok) throw new Error(body.error || t("请求失败 ({0})", [response.status]));
   return body;
 }
 
@@ -112,7 +113,7 @@ async function accountApi(url, options = {}) {
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`);
+  if (!response.ok) throw new Error(body.error || t("请求失败 ({0})", [response.status]));
   return body;
 }
 
@@ -131,7 +132,17 @@ function loadAccountCredential() {
   }
 }
 
+/// 语言偏好存在账号上,所以取回账号后要跟一次。真的换了就重载一遍 —— 静态文案、
+/// 已经渲染出来的动态文案、日期格式一次性全对上,比逐块重渲染可靠。
+function adoptAccountLocale(account) {
+  const preferred = account?.locale;
+  if (!preferred || preferred === getLocale()) return;
+  applyLocale(preferred);
+  location.reload();
+}
+
 function saveAccountCredential(account) {
+  adoptAccountLocale(account);
   state.account = account;
   state.email = account.email;
   localStorage.setItem(accountStorageKey, JSON.stringify({
@@ -193,10 +204,10 @@ const isAutomaticEmail = (email) => Boolean(email?.endsWith("@device.group-relay
 async function requireEmailForDeviceAccount() {
   if (!isAutomaticEmail(state.email)) return false;
   if (!state.accountSessions.length) return false;
-  $("#identity-title").textContent = "绑定你的邮箱";
-  $("#identity-hint").textContent = `这台机器上的临时身份下有 ${state.accountSessions.length} 个群组。`
-    + "绑定邮箱后它们会跟着邮箱走，换机器也不会丢。";
-  $("#skip-identity").textContent = "以后再说";
+  $("#identity-title").textContent = t("绑定你的邮箱");
+  $("#identity-hint").textContent = t("这台机器上的临时身份下有 {0} 个群组。", [state.accountSessions.length])
+    + t("绑定邮箱后它们会跟着邮箱走，换机器也不会丢。");
+  $("#skip-identity").textContent = t("以后再说");
   await askForAccountEmail({ claim: true });
   return true;
 }
@@ -215,7 +226,7 @@ function askForAccountEmail({ claim = false } = {}) {
             method: "POST",
             body: JSON.stringify({ email })
           }).catch(() => null);
-          if (moved) toast(`已绑定 ${email}，带过去 ${moved.groups} 个自建群组、${moved.joined} 个加入的群组`);
+          if (moved) toast(t("已绑定 {0}，带过去 {1} 个自建群组、{2} 个加入的群组", [email, moved.groups, moved.joined]));
         }
         await useAccountEmail(email);
         cleanup();
@@ -370,7 +381,7 @@ function showInvalidInvite(sessions = []) {
     const link = document.createElement("a");
     link.className = "button-link";
     link.href = `/group/${session.id}`;
-    link.textContent = `返回「${session.name}」`;
+    link.textContent = t("返回「{0}」", [session.name]);
     links.append(link);
   }
   container.classList.toggle("hidden", sessions.length === 0);
@@ -387,15 +398,15 @@ async function recoverLegacySession(inviteToken) {
 }
 
 function memberLabel(member) {
-  return member.type === "ai" ? member.provider : "真人";
+  return member.type === "ai" ? member.provider : t("真人");
 }
 
 function presenceLabel(member) {
   return {
-    online: "在线",
-    busy: "忙碌",
-    offline: "离线"
-  }[member.presence?.status] ?? "离线";
+    online: t("在线"),
+    busy: t("忙碌"),
+    offline: t("离线")
+  }[member.presence?.status] ?? t("离线");
 }
 
 function displayName(member) {
@@ -451,7 +462,7 @@ function renderMembers(members) {
     const mention = document.createElement("button");
     mention.type = "button";
     mention.className = "member-mention";
-    mention.title = `点击 @${displayName(member)}`;
+    mention.title = t("点击 @{0}", [displayName(member)]);
     mention.setAttribute("aria-label", `@${displayName(member)}`);
     mention.append(avatar, text);
     mention.addEventListener("click", () => insertMemberMention(member));
@@ -461,10 +472,10 @@ function renderMembers(members) {
       trust.type = "button";
       trust.className = `member-trust ${member.trustedExecutionEnabled ? "enabled" : ""}`;
       // 标签要说清真实范围:开着的时候群里任何成员的指令都会直接执行,不只是你自己的。
-      trust.textContent = member.trustedExecutionEnabled ? "免审批：群内所有人" : "免审批：关";
+      trust.textContent = member.trustedExecutionEnabled ? t("免审批：群内所有人") : t("免审批：关");
       trust.title = member.trustedExecutionEnabled
-        ? "群里任何成员的指令都会让该 AI 在指定项目中直接执行（含写文件、跑命令）。这套服务没有鉴权，拿到过邀请链接的人都算群成员。点击关闭"
-        : "开启后群里任何成员的指令都会让该 AI 在指定项目中直接执行；关闭时只有你本人的指令会被执行";
+        ? t("群里任何成员的指令都会让该 AI 在指定项目中直接执行（含写文件、跑命令）。这套服务没有鉴权，拿到过邀请链接的人都算群成员。点击关闭")
+        : t("开启后群里任何成员的指令都会让该 AI 在指定项目中直接执行；关闭时只有你本人的指令会被执行");
       trust.addEventListener("click", async () => {
         trust.disabled = true;
         try {
@@ -475,7 +486,7 @@ function renderMembers(members) {
           const index = state.members.findIndex((candidate) => candidate.id === member.id);
           if (index >= 0) state.members[index] = result.member;
           renderMembers(state.members);
-          toast(result.member.trustedExecutionEnabled ? "已开启我的 AI 免审批执行" : "已关闭免审批执行");
+          toast(result.member.trustedExecutionEnabled ? t("已开启我的 AI 免审批执行") : t("已关闭免审批执行"));
         } catch (error) {
           trust.disabled = false;
           toast(error.message);
@@ -686,19 +697,19 @@ function copyButtonNode(item) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "copy-message";
-  button.textContent = "复制";
-  button.title = "复制这条消息的原文（Markdown）";
+  button.textContent = t("复制");
+  button.title = t("复制这条消息的原文（Markdown）");
   button.addEventListener("click", async () => {
     const text = item.dataset.copyText ?? "";
     if (!text) return;
     try {
       // 不能静默失败:让人以为复制成功、粘出来是旧内容比报错更糟。
       // 非安全上下文下 navigator.clipboard 根本不存在,也走这条。
-      if (!navigator.clipboard?.writeText) throw new Error("这个浏览器不允许访问剪贴板");
+      if (!navigator.clipboard?.writeText) throw new Error(t("这个浏览器不允许访问剪贴板"));
       await navigator.clipboard.writeText(text);
-      toast("已复制");
+      toast(t("已复制"));
     } catch (error) {
-      toast(`复制失败：${error.message}`);
+      toast(t("复制失败：{0}", [error.message]));
     }
   });
   return button;
@@ -728,14 +739,14 @@ function updateMessageNode(item, message) {
       status.className = "message-status";
       item.querySelector(".message-head")?.append(status);
     }
-    status.textContent = "正在处理";
+    status.textContent = t("正在处理");
   } else if (message.status === "failed") {
     if (!status) {
       status = document.createElement("span");
       status.className = "message-status";
       item.querySelector(".message-head")?.append(status);
     }
-    status.textContent = "处理失败";
+    status.textContent = t("处理失败");
   } else {
     status?.remove();
   }
@@ -793,9 +804,9 @@ function refreshDocumentTitle() {
   const mentions = state.unreadMentions.size;
   const approvals = state.approvalPendingCount ?? 0;
   document.title = mentions
-    ? `(${mentions}) @我 · Group Relay`
+    ? t("({0}) @我 · Group Relay", [mentions])
     : approvals
-      ? `(${approvals}) 待审批 · Group Relay`
+      ? t("({0}) 待审批 · Group Relay", [approvals])
       : "Group Relay";
   void paintFavicon(mentions);
 }
@@ -885,8 +896,8 @@ async function showMentionNotification(message) {
       renderMentionSettings();
       if (decision !== "granted") return;
     }
-    const notification = new Notification(`${displayName(message.sender)} @ 了你`, {
-      body: (message.text || "（附件）").replace(/\s+/g, " ").slice(0, 120),
+    const notification = new Notification(t("{0} @ 了你", [displayName(message.sender)]), {
+      body: (message.text || t("（附件）")).replace(/\s+/g, " ").slice(0, 120),
       tag: message.id,
       icon: "/icon-180.png"
     });
@@ -906,10 +917,10 @@ function renderMentionSettings() {
   toggle.checked = mentionSoundEnabled();
   const state_ = "Notification" in window ? Notification.permission : "unsupported";
   $("#mention-notification-state").textContent = {
-    granted: "系统通知：已允许。页面不在前台时会推一条。",
-    denied: "系统通知：已被浏览器拒绝，只用标题、角标和提示音提醒。",
-    default: "系统通知：第一次被 @ 时会问一次；拒绝了就不再问。",
-    unsupported: "这个浏览器不支持系统通知，用标题、角标和提示音提醒。"
+    granted: t("系统通知：已允许。页面不在前台时会推一条。"),
+    denied: t("系统通知：已被浏览器拒绝，只用标题、角标和提示音提醒。"),
+    default: t("系统通知：第一次被 @ 时会问一次；拒绝了就不再问。"),
+    unsupported: t("这个浏览器不支持系统通知，用标题、角标和提示音提醒。")
   }[state_] ?? "";
 }
 
@@ -951,15 +962,15 @@ function announceSettled(item, message) {
   if (isInMessagesView(item)) return;
   const who = displayName(message.sender);
   toast(message.status === "failed"
-    ? `${who} 的任务失败了，在上面那条消息里`
-    : `${who} 的回答写好了，在上面那条消息里`);
+    ? t("{0} 的任务失败了，在上面那条消息里", [who])
+    : t("{0} 的回答写好了，在上面那条消息里", [who]));
 }
 
 function jumpToMessage(messageId) {
   const list = $("#messages");
   const target = list.querySelector(`[data-message-id="${messageId}"]`);
   if (!target) {
-    toast("那条消息不在当前这一屏里");
+    toast(t("那条消息不在当前这一屏里"));
     return;
   }
   // 自己算偏移量,不用 scrollIntoView:它在滚动容器里的平滑滚动不是每个 WebView 都动,
@@ -972,7 +983,7 @@ function jumpToMessage(messageId) {
 
 function quoteText(message, limit = 60) {
   const text = String(message?.text ?? "").replace(/\s+/g, " ").trim();
-  if (!text) return message?.attachments?.length ? `${message.attachments.length} 个附件` : "";
+  if (!text) return message?.attachments?.length ? t("{0} 个附件", [message.attachments.length]) : "";
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
@@ -991,10 +1002,10 @@ function replyQuoteNode(replyTo) {
   const quote = document.createElement("button");
   quote.type = "button";
   quote.className = "reply-quote";
-  quote.textContent = "回复上面的一条消息";
+  quote.textContent = t("回复上面的一条消息");
   quote.addEventListener("click", () => jumpToMessage(replyTo));
   void replySnippet(replyTo)
-    .then((snippet) => { if (snippet) quote.textContent = `回复：${snippet}`; })
+    .then((snippet) => { if (snippet) quote.textContent = t("回复：{0}", [snippet]); })
     .catch(() => {});
   return quote;
 }
@@ -1044,7 +1055,7 @@ function renderMessage(message) {
   }
   const time = document.createElement("time");
   time.className = "time";
-  time.textContent = new Date(message.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+  time.textContent = new Date(message.createdAt).toLocaleString(dateLocale(), { dateStyle: "short", timeStyle: "short" });
   head.append(time, copyButtonNode(item));
   item.append(head);
   if (message.replyTo) item.append(replyQuoteNode(message.replyTo));
@@ -1100,7 +1111,7 @@ async function withoutBlocking(work, fallback, milliseconds = 2_500) {
       work,
       new Promise((resolve) => {
         timer = setTimeout(() => {
-          state.historyError = `等了 ${milliseconds / 1000} 秒没有响应`;
+          state.historyError = t("等了 {0} 秒没有响应", [milliseconds / 1000]);
           resolve(fallback);
         }, milliseconds);
       })
@@ -1117,10 +1128,10 @@ async function withoutBlocking(work, fallback, milliseconds = 2_500) {
 function warnHistoryUnavailable() {
   if (state.historyWarned) return;
   state.historyWarned = true;
-  const reason = state.historyError || "原因不明";
-  console.warn("本机聊天记录打不开:", reason);
+  const reason = state.historyError || t("原因不明");
+  console.warn(t("本机聊天记录打不开:"), reason);
   // 这条要连原因一起说:本机副本用不了的话,长期记录也没在存,而服务端只留 30 天。
-  toast(`本机聊天记录打不开：${reason}`);
+  toast(t("本机聊天记录打不开：{0}", [reason]));
 }
 
 // 整屏重画:按 id 去重 + 按时间排序,而不是直接接在后面。
@@ -1176,7 +1187,7 @@ async function loadChat() {
     // 隧道抖一下不该把人踢回群组列表:本机那份已经在屏上了,轮询会自己接上并补齐。
     if (!paintedFromCache) throw error;
     if (state.groupId !== requestedGroupId) return false;
-    $("#connection").textContent = "正在重连";
+    $("#connection").textContent = t("正在重连");
     $("#connection").classList.remove("online");
     startRealtime();
     startPresenceRefresh();
@@ -1226,7 +1237,7 @@ function startPresenceRefresh() {
 }
 
 function markConnected() {
-  $("#connection").textContent = "实时连接";
+  $("#connection").textContent = t("实时连接");
   $("#connection").classList.add("online");
 }
 
@@ -1259,7 +1270,7 @@ function connectEvents() {
     });
   }
   events.onerror = () => {
-    $("#connection").textContent = "备用连接";
+    $("#connection").textContent = t("备用连接");
   };
 }
 
@@ -1312,7 +1323,7 @@ async function pollMessages() {
       markConnected();
     } catch {
       reconnected = true;
-      $("#connection").textContent = "正在重连";
+      $("#connection").textContent = t("正在重连");
       $("#connection").classList.remove("online");
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
@@ -1340,8 +1351,8 @@ function stopChatRealtime() {
 }
 
 function showChatLoading(groupName = "") {
-  $("#group-name").textContent = groupName || "正在打开群组";
-  $("#connection").textContent = "正在加载消息…";
+  $("#group-name").textContent = groupName || t("正在打开群组");
+  $("#connection").textContent = t("正在加载消息…");
   $("#connection").classList.remove("online");
   $("#member-list").innerHTML = "";
   $("#chat-ai-panel").classList.add("hidden");
@@ -1354,9 +1365,9 @@ function showChatLoading(groupName = "") {
   spinner.setAttribute("aria-hidden", "true");
   const copy = document.createElement("div");
   const title = document.createElement("strong");
-  title.textContent = "正在进入群组";
+  title.textContent = t("正在进入群组");
   const detail = document.createElement("small");
-  detail.textContent = "正在同步成员和最近消息…";
+  detail.textContent = t("正在同步成员和最近消息…");
   copy.append(title, detail);
   loading.append(spinner, copy);
   $("#messages").append(loading);
@@ -1376,7 +1387,7 @@ async function openAccountSession(session) {
     stopChatRealtime();
     history.replaceState({}, "", "/app#groups");
     showAccountDashboardShell("groups");
-    toast(`无法打开群组：${error.message}`);
+    toast(t("无法打开群组：{0}", [error.message]));
   }
 }
 
@@ -1394,11 +1405,11 @@ function renderAccountSessions(sessions) {
     const title = document.createElement("h2");
     title.textContent = session.group.name;
     const meta = document.createElement("p");
-    meta.textContent = `${displayName(session.member)} · 加入于 ${new Date(session.linkedAt).toLocaleDateString()}`;
+    meta.textContent = t("{0} · 加入于 {1}", [displayName(session.member), new Date(session.linkedAt).toLocaleDateString(dateLocale())]);
     const aiControls = document.createElement("div");
     aiControls.className = "desktop-ai-controls";
     const aiLabel = document.createElement("span");
-    aiLabel.textContent = "我的桌面 AI";
+    aiLabel.textContent = t("我的桌面 AI");
     aiControls.append(aiLabel);
     const attachedProviders = new Set((session.desktopAis ?? []).map((member) => member.provider));
     for (const provider of ["codex", "claude", "cursor", "opencode"]) {
@@ -1407,10 +1418,10 @@ function renderAccountSessions(sessions) {
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = `desktop-ai-toggle ${attached ? "attached" : ""}`;
-      toggle.textContent = attached ? `${labels[provider]} · 离开` : `＋ ${labels[provider]}`;
+      toggle.textContent = attached ? t("{0} · 离开", [labels[provider]]) : t("＋ {0}", [labels[provider]]);
       toggle.title = attached
-        ? `让我的 ${labels[provider]} 离开这个群组`
-        : `把本机已登录的 ${labels[provider]} 加入这个群组`;
+        ? t("让我的 {0} 离开这个群组", [labels[provider]])
+        : t("把本机已登录的 {0} 加入这个群组", [labels[provider]]);
       toggle.addEventListener("click", async () => {
         const nativeBridge = window.webkit?.messageHandlers?.relayNative ?? window.chrome?.webview;
         toggle.disabled = true;
@@ -1421,7 +1432,7 @@ function renderAccountSessions(sessions) {
               { method: "DELETE" }
             );
             nativeBridge?.postMessage({ action: "removeAIWorker", workerId: result.workerId });
-            toast(`${labels[provider]} 已离开 ${session.group.name}`);
+            toast(t("{0} 已离开 {1}", [labels[provider], session.group.name]));
           } else {
             const result = await accountApi(`/api/account/sessions/${session.group.id}/ais`, {
               method: "POST",
@@ -1429,8 +1440,8 @@ function renderAccountSessions(sessions) {
             });
             nativeBridge?.postMessage({ action: "configureAIWorker", worker: result.worker });
             toast(nativeBridge
-              ? `${labels[provider]} 已加入 ${session.group.name}`
-              : `${labels[provider]} 已加入，等待桌面客户端自动连接`);
+              ? t("{0} 已加入 {1}", [labels[provider], session.group.name])
+              : t("{0} 已加入，等待桌面客户端自动连接", [labels[provider]]));
           }
           await loadAccountDashboard();
         } catch (error) {
@@ -1445,27 +1456,27 @@ function renderAccountSessions(sessions) {
     actions.className = "session-actions";
     const open = document.createElement("button");
     open.type = "button";
-    open.textContent = "打开";
+    open.textContent = t("打开");
     open.addEventListener("click", () => { void openAccountSession(session); });
     // 群主点这个是删群,成员点这个是退群 —— 原来两种情况都调退群接口,而退群不碰
     // createdGroups,所以群主点了等于没反应。
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "text-button";
-    remove.textContent = session.isOwner ? "删除群组" : "退出群组";
+    remove.textContent = session.isOwner ? t("删除群组") : t("退出群组");
     remove.addEventListener("click", async () => {
       const question = session.isOwner
-        ? `删除「${session.group.name}」？\n\n所有成员都会失去这个群，服务器上的消息缓冲一并清除。各人本机保存的聊天记录不受影响。`
-        : `退出「${session.group.name}」？\n\n你会从成员名单里移除，你在这个群里的 AI 也会一起退出。`;
+        ? t("删除「{0}」？\n\n所有成员都会失去这个群，服务器上的消息缓冲一并清除。各人本机保存的聊天记录不受影响。", [session.group.name])
+        : t("退出「{0}」？\n\n你会从成员名单里移除，你在这个群里的 AI 也会一起退出。", [session.group.name]);
       if (!confirm(question)) return;
       remove.disabled = true;
       try {
         if (session.isOwner) {
           await api(`/api/groups/${session.group.id}`, { method: "DELETE" });
-          toast(`已删除「${session.group.name}」`);
+          toast(t("已删除「{0}」", [session.group.name]));
         } else {
           await accountApi(`/api/account/sessions/${session.group.id}`, { method: "DELETE" });
-          toast(`已退出「${session.group.name}」`);
+          toast(t("已退出「{0}」", [session.group.name]));
         }
         await loadAccountDashboard();
       } catch (error) {
@@ -1480,16 +1491,16 @@ function renderAccountSessions(sessions) {
 }
 
 const taskStatusLabels = {
-  assigned: "待开始",
-  in_progress: "进行中",
-  completed: "已完成",
-  failed: "需处理"
+  assigned: t("待开始"),
+  in_progress: t("进行中"),
+  completed: t("已完成"),
+  failed: t("需处理")
 };
 
 function accountEmailNickname(account) {
-  if (isAutomaticAccount(account)) return "我";
+  if (isAutomaticAccount(account)) return t("我");
   const prefix = String(account?.email ?? "").split("@")[0].trim();
-  return prefix && !prefix.toLocaleLowerCase().startsWith("device-") ? prefix : "我";
+  return prefix && !prefix.toLocaleLowerCase().startsWith("device-") ? prefix : t("我");
 }
 
 function accountOwnerName(account) {
@@ -1508,7 +1519,7 @@ function renderAvatar(imageSelector, fallbackSelector, avatarDataUrl, owner) {
   } else {
     image.removeAttribute("src");
     image.classList.add("hidden");
-    fallback.textContent = Array.from(owner || "我")[0]?.toLocaleUpperCase() ?? "我";
+    fallback.textContent = Array.from(owner || t("我"))[0]?.toLocaleUpperCase() ?? t("我");
     fallback.classList.remove("hidden");
   }
 }
@@ -1536,13 +1547,13 @@ function setProfileEditing(editing) {
 function renderOverviewHeader(account) {
   const now = new Date();
   const hour = now.getHours();
-  const greeting = hour < 6 ? "夜深了" : hour < 12 ? "早上好" : hour < 18 ? "下午好" : "晚上好";
+  const greeting = hour < 6 ? t("夜深了") : hour < 12 ? t("早上好") : hour < 18 ? t("下午好") : t("晚上好");
   const owner = renderAccountProfile(account);
   $("#overview-greeting").textContent = greeting;
   $("#overview-owner").textContent = owner;
   $("#dashboard-owner").textContent = owner;
   $("#sidebar-owner").textContent = owner;
-  $("#overview-date").textContent = now.toLocaleDateString("zh-CN", {
+  $("#overview-date").textContent = now.toLocaleDateString(dateLocale(), {
     year: "numeric", month: "long", day: "numeric", weekday: "long"
   });
 }
@@ -1553,7 +1564,7 @@ function renderOverviewCalendar() {
   const month = now.getMonth();
   const firstDay = new Date(year, month, 1).getDay();
   const days = new Date(year, month + 1, 0).getDate();
-  $("#calendar-title").textContent = `${year}年${month + 1}月`;
+  $("#calendar-title").textContent = t("{0}年{1}月", [year, month + 1]);
   $("#calendar-today").textContent = `${month + 1}/${now.getDate()}`;
   const grid = $("#calendar-grid");
   grid.innerHTML = "";
@@ -1602,7 +1613,7 @@ function renderAITasks() {
     title.textContent = state.taskMessages.get(task.sourceMessageId)?.text || task.jira.key;
     const meta = document.createElement("p");
     meta.className = "task-meta";
-    meta.textContent = `${taskStatusLabels[task.status] ?? task.status} · ${taskAssigneeName(task.assignee)} · ${task.group.name} · ${new Date(task.updatedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+    meta.textContent = `${taskStatusLabels[task.status] ?? task.status} · ${taskAssigneeName(task.assignee)} · ${task.group.name} · ${new Date(task.updatedAt).toLocaleString(dateLocale(), { dateStyle: "short", timeStyle: "short" })}`;
     body.append(title, meta);
     const reportText = state.taskMessages.get(task.responseMessageId)?.text ?? null;
     if (reportText) {
@@ -1620,7 +1631,7 @@ function renderAITasks() {
     jira.textContent = task.jira.key;
     const group = document.createElement("a");
     group.href = `/group/${task.group.id}`;
-    group.textContent = "打开群聊";
+    group.textContent = t("打开群聊");
     links.append(jira, group);
     card.append(mark, body, links);
     list.append(card);
@@ -1646,7 +1657,7 @@ function renderApprovals({ announce = false } = {}) {
   badge.classList.toggle("hidden", pending.length === 0);
   $("#approval-queue").classList.toggle("hidden", pending.length === 0);
   refreshDocumentTitle();
-  if (announce && pending.length > previousCount) toast(`有 ${pending.length - previousCount} 条新的 AI 审批请求`);
+  if (announce && pending.length > previousCount) toast(t("有 {0} 条新的 AI 审批请求", [pending.length - previousCount]));
   const list = $("#approval-list");
   list.innerHTML = "";
   for (const approval of pending) {
@@ -1655,18 +1666,18 @@ function renderApprovals({ announce = false } = {}) {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.dataset.approvalId = approval.id;
-    checkbox.setAttribute("aria-label", `选择 ${approval.summary}`);
+    checkbox.setAttribute("aria-label", t("选择 {0}", [approval.summary]));
     const body = document.createElement("div");
     const title = document.createElement("h3");
     // 「是谁要的」必须写在卡片上:开了免审批的人看到自己的 AI 来请求会以为是 bug ——
     // 免审批只覆盖自己的指令,这些都是别人让它干的活。
     const requester = approval.sender?.name;
     title.textContent = requester
-      ? `${requester} 要 ${approvalAIName(approval)} 执行`
-      : `${approvalAIName(approval)} 请求执行`;
+      ? t("{0} 要 {1} 执行", [requester, approvalAIName(approval)])
+      : t("{0} 请求执行", [approvalAIName(approval)]);
     const meta = document.createElement("p");
-    const scope = requester ? "（别人的指令，写操作要你批）" : "";
-    meta.textContent = `${approval.group.name} · ${new Date(approval.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}${scope}`;
+    const scope = requester ? t("（别人的指令，写操作要你批）") : "";
+    meta.textContent = `${approval.group.name} · ${new Date(approval.createdAt).toLocaleString(dateLocale(), { dateStyle: "short", timeStyle: "short" })}${scope}`;
     const summary = document.createElement("p");
     summary.className = "approval-source";
     summary.textContent = approval.summary;
@@ -1676,11 +1687,11 @@ function renderApprovals({ announce = false } = {}) {
     const reject = document.createElement("button");
     reject.type = "button";
     reject.className = "secondary";
-    reject.textContent = "拒绝";
+    reject.textContent = t("拒绝");
     reject.addEventListener("click", () => resolveApprovals([approval.id], "reject"));
     const approve = document.createElement("button");
     approve.type = "button";
-    approve.textContent = "批准";
+    approve.textContent = t("批准");
     approve.addEventListener("click", () => resolveApprovals([approval.id], "approve"));
     actions.append(reject, approve);
     card.append(checkbox, body, actions);
@@ -1697,7 +1708,7 @@ async function loadApprovals({ announce = false } = {}) {
 
 async function resolveApprovals(approvalIds, action) {
   if (!approvalIds.length) {
-    toast("请先选择要处理的审批");
+    toast(t("请先选择要处理的审批"));
     return;
   }
   const controls = document.querySelectorAll("#approval-queue button, #approval-queue input");
@@ -1709,7 +1720,7 @@ async function resolveApprovals(approvalIds, action) {
     });
     state.approvals = result.approvals;
     renderApprovals();
-    toast(action === "approve" ? `已批准 ${approvalIds.length} 条任务` : `已拒绝 ${approvalIds.length} 条任务`);
+    toast(action === "approve" ? t("已批准 {0} 条任务", [approvalIds.length]) : t("已拒绝 {0} 条任务", [approvalIds.length]));
   } catch (error) {
     toast(error.message);
   } finally {
@@ -1767,15 +1778,15 @@ function setOverviewView(view, { updateHash = true } = {}) {
   if (nextView === "tasks") void loadAiWork();
 }
 
-const feedbackStatusLabels = { open: "待处理", planned: "已排期", done: "已完成", rejected: "不做" };
-const aiWorkRanges = [[1, "今天"], [7, "最近 7 天"], [30, "最近 30 天"]];
+const feedbackStatusLabels = { open: t("待处理"), planned: t("已排期"), done: t("已完成"), rejected: t("不做") };
+const aiWorkRanges = [[1, t("今天")], [7, t("最近 7 天")], [30, t("最近 30 天")]];
 
 function formatDuration(milliseconds) {
   if (!Number.isFinite(milliseconds)) return "—";
   const minutes = milliseconds / 60_000;
-  if (minutes < 1) return `${Math.round(milliseconds / 1000)} 秒`;
-  if (minutes < 60) return `${minutes.toFixed(minutes < 10 ? 1 : 0)} 分钟`;
-  return `${(minutes / 60).toFixed(1)} 小时`;
+  if (minutes < 1) return t("{0} 秒", [Math.round(milliseconds / 1000)]);
+  if (minutes < 60) return t("{0} 分钟", [minutes.toFixed(minutes < 10 ? 1 : 0)]);
+  return t("{0} 小时", [(minutes / 60).toFixed(1)]);
 }
 
 async function loadAiWork(days = state.aiWorkDays ?? 7) {
@@ -1805,11 +1816,11 @@ function renderAiWork() {
   const tiles = $("#ai-work-totals");
   tiles.innerHTML = "";
   for (const [value, label] of [
-    [totals?.asked ?? 0, "被 @ 次数"],
-    [totals?.answered ?? 0, "已回答"],
-    [(totals?.failed ?? 0) + (totals?.unanswered ?? 0), "未答或失败"],
-    [formatDuration(totals?.avgResponseMs ?? NaN), "平均响应"],
-    [(totals?.replyChars ?? 0).toLocaleString(), "回复字数"]
+    [totals?.asked ?? 0, t("被 @ 次数")],
+    [totals?.answered ?? 0, t("已回答")],
+    [(totals?.failed ?? 0) + (totals?.unanswered ?? 0), t("未答或失败")],
+    [formatDuration(totals?.avgResponseMs ?? NaN), t("平均响应")],
+    [(totals?.replyChars ?? 0).toLocaleString(dateLocale()), t("回复字数")]
   ]) {
     const tile = document.createElement("article");
     const strong = document.createElement("strong");
@@ -1824,16 +1835,16 @@ function renderAiWork() {
   if (!totals?.asked) {
     const empty = document.createElement("p");
     empty.className = "task-empty";
-    empty.textContent = "这段时间还没有人 @ 过你的 AI。";
+    empty.textContent = t("这段时间还没有人 @ 过你的 AI。");
     breakdown.append(empty);
     return;
   }
   // 「谁在用我的 AI」放第一列 —— 工单里说这是最有说服力的一项。
   for (const [title, rows, unit] of [
-    ["按提问人", work.byAsker, "条"],
-    ["按群组", work.byGroup, "条"],
-    ["按 AI", work.byProvider, "条"],
-    ["按天", work.byDay.map((row) => ({ ...row, label: row.key.slice(5) })), "条"]
+    [t("按提问人"), work.byAsker, t("条")],
+    [t("按群组"), work.byGroup, t("条")],
+    [t("按 AI"), work.byProvider, t("条")],
+    [t("按天"), work.byDay.map((row) => ({ ...row, label: row.key.slice(5) })), t("条")]
   ]) {
     const column = document.createElement("div");
     column.className = "ai-work-column";
@@ -1883,7 +1894,7 @@ function renderFeedback() {
   renderFeedbackBadge(counts);
   const summary = $("#feedback-summary");
   summary.innerHTML = "";
-  const filters = [["all", "全部"], ...Object.entries(feedbackStatusLabels)];
+  const filters = [["all", t("全部")], ...Object.entries(feedbackStatusLabels)];
   for (const [key, label] of filters) {
     const count = key === "all" ? tickets.length : Number(counts[key] ?? 0);
     const button = document.createElement("button");
@@ -1922,13 +1933,13 @@ function feedbackNode(ticket) {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "text-button feedback-toggle";
-  toggle.textContent = collapsed ? "展开" : "收起";
+  toggle.textContent = collapsed ? t("展开") : t("收起");
   toggle.addEventListener("click", () => {
     if (state.feedbackExpanded.has(ticket.id)) state.feedbackExpanded.delete(ticket.id);
     else state.feedbackExpanded.add(ticket.id);
     const nowCollapsed = feedbackCollapsed(ticket);
     item.classList.toggle("collapsed", nowCollapsed);
-    toggle.textContent = nowCollapsed ? "展开" : "收起";
+    toggle.textContent = nowCollapsed ? t("展开") : t("收起");
   });
   title.append(chip, document.createTextNode(` ${ticket.title}`), toggle);
   const meta = document.createElement("p");
@@ -1937,8 +1948,8 @@ function feedbackNode(ticket) {
   const author = ticket.author?.ownerName
     ? `${ticket.author.ownerName}’s ${ticket.author.name}`
     : ticket.author?.name ?? "AI";
-  const asked = ticket.onBehalfOf ? `，替 ${ticket.onBehalfOf} 提` : "";
-  meta.textContent = `${author} 提交${asked} · ${new Date(ticket.createdAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}`;
+  const asked = ticket.onBehalfOf ? t("，替 {0} 提", [ticket.onBehalfOf]) : "";
+  meta.textContent = t("{0} 提交{1} · {2}", [author, asked, new Date(ticket.createdAt).toLocaleString(dateLocale(), { dateStyle: "short", timeStyle: "short" })]);
   const body = document.createElement("p");
   body.className = "feedback-body";
   body.textContent = ticket.body;
@@ -1946,7 +1957,7 @@ function feedbackNode(ticket) {
   for (const note of ticket.notes ?? []) {
     const line = document.createElement("p");
     line.className = "feedback-note";
-    line.textContent = `${note.by ?? "有人"}：${note.text}`;
+    line.textContent = t("{0}：{1}", [note.by ?? "有人", note.text]);
     item.append(line);
   }
   /// 四个状态固定四个位置,当前那个禁用并高亮 —— 原来是把当前状态那颗按钮删掉,剩下的
@@ -1955,7 +1966,7 @@ function feedbackNode(ticket) {
   actions.className = "feedback-actions";
   const label = document.createElement("span");
   label.className = "feedback-actions-label";
-  label.textContent = "状态";
+  label.textContent = t("状态");
   actions.append(label);
   for (const [status, statusLabel] of Object.entries(feedbackStatusLabels)) {
     const button = document.createElement("button");
@@ -2006,53 +2017,53 @@ function renderAISettings(providers) {
     // 没有 Key 表单的 provider(opencode)不该显示「未配置」—— 它根本没有可配置的 Key。
     if (keyState) {
       keyState.textContent = card.querySelector(".ai-key-form")
-        ? (keyConfigured ? "已配置（内容已隐藏）" : "未配置")
-        : "不适用";
+        ? (keyConfigured ? t("已配置（内容已隐藏）") : t("未配置"))
+        : t("不适用");
     }
     const modeState = card.querySelector("[data-mode-state]");
     if (modeState) {
       modeState.textContent = keyConfigured
-        ? "API Key（优先）"
-        : cliAvailable ? "本机 CLI 登录账号" : "尚不可用";
+        ? t("API Key（优先）")
+        : cliAvailable ? t("本机 CLI 登录账号") : t("尚不可用");
     }
     if (!card.querySelector(".ai-key-form")) {
       const badgeless = card.querySelector("[data-key-storage]");
-      if (badgeless) badgeless.textContent = "opencode 自己的登录";
+      if (badgeless) badgeless.textContent = t("opencode 自己的登录");
     }
     const cliState = card.querySelector("[data-cli-state]");
     if (cliState) {
-      cliState.textContent = cliAvailable ? "已安装" : "未找到";
+      cliState.textContent = cliAvailable ? t("已安装") : t("未找到");
       cliState.title = status.cliPath || "";
     }
     const keyStorage = card.querySelector("[data-key-storage]");
     if (keyStorage && card.querySelector(".ai-key-form")) {
-      keyStorage.textContent = keyConfigured ? (status.credentialStore || "本机安全凭据") : "未保存";
+      keyStorage.textContent = keyConfigured ? (status.credentialStore || t("本机安全凭据")) : t("未保存");
     }
     const workerState = card.querySelector("[data-worker-count]");
-    if (workerState) workerState.textContent = `${workerCount} 个`;
+    if (workerState) workerState.textContent = t("{0} 个", [workerCount]);
     const keyToggle = card.querySelector(".toggle-ai-key");
-    if (keyToggle) keyToggle.textContent = keyConfigured ? "更换 API Key" : "配置 API Key";
+    if (keyToggle) keyToggle.textContent = keyConfigured ? t("更换 API Key") : t("配置 API Key");
     const help = card.querySelector("[data-provider-help]");
     const badge = card.querySelector(".provider-state");
     badge.classList.remove("ready", "active", "missing");
     help.classList.remove("ready", "missing");
     if (keyConfigured) {
-      badge.textContent = "Key 已配置";
+      badge.textContent = t("Key 已配置");
       badge.classList.add("ready");
-      help.textContent = "后台回复会优先使用这个 API Key；保存新 Key 会覆盖旧配置。";
+      help.textContent = t("后台回复会优先使用这个 API Key；保存新 Key 会覆盖旧配置。");
       help.classList.add("ready");
     } else if (cliAvailable) {
-      badge.textContent = "CLI 可用";
+      badge.textContent = t("CLI 可用");
       badge.classList.add("active");
       help.textContent = card.querySelector(".ai-key-form")
-        ? "尚未配置 API Key；后台将使用本机 CLI 的登录账号。也可以在下方保存 Key。"
-        : "使用本机 CLI 的登录账号（opencode auth login），它没有可配置的 API Key。";
+        ? t("尚未配置 API Key；后台将使用本机 CLI 的登录账号。也可以在下方保存 Key。")
+        : t("使用本机 CLI 的登录账号（opencode auth login），它没有可配置的 API Key。");
     } else {
-      badge.textContent = "未就绪";
+      badge.textContent = t("未就绪");
       badge.classList.add("missing");
       help.textContent = card.querySelector(".ai-key-form")
-        ? `没有配置 API Key，也没有找到 ${aiProviderLabels[provider]} CLI。请保存 Key，或先安装并登录 CLI。`
-        : `没有找到 ${aiProviderLabels[provider]} CLI。它只支持自己的 CLI 登录：装好后执行 opencode auth login。`;
+        ? t("没有配置 API Key，也没有找到 {0} CLI。请保存 Key，或先安装并登录 CLI。", [aiProviderLabels[provider]])
+        : t("没有找到 {0} CLI。它只支持自己的 CLI 登录：装好后执行 opencode auth login。", [aiProviderLabels[provider]]);
       help.classList.add("missing");
     }
     const removeKey = card.querySelector(".remove-ai-key");
@@ -2065,14 +2076,14 @@ async function loadAISettings() {
   const forms = document.querySelectorAll(".ai-key-form");
   const toggles = document.querySelectorAll(".toggle-ai-key");
   if (!desktopNativeBridge()) {
-    notice.textContent = "API Key 只允许在 macOS 或 Windows 桌面客户端中配置。网页版不会接收或保存密钥。";
+    notice.textContent = t("API Key 只允许在 macOS 或 Windows 桌面客户端中配置。网页版不会接收或保存密钥。");
     notice.className = "settings-notice warning";
     forms.forEach((form) => { form.querySelectorAll("input, button").forEach((control) => { control.disabled = true; }); });
     toggles.forEach((toggle) => { toggle.disabled = true; });
     renderAISettings([]);
     return;
   }
-  notice.textContent = "正在读取本机安全凭据和 AI 接入状态…";
+  notice.textContent = t("正在读取本机安全凭据和 AI 接入状态…");
   notice.className = "settings-notice";
   forms.forEach((form) => { form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; }); });
   toggles.forEach((toggle) => { toggle.disabled = false; });
@@ -2081,8 +2092,8 @@ async function loadAISettings() {
     renderAISettings(result.providers ?? []);
     const configuredCount = (result.providers ?? []).filter((provider) => provider.keyConfigured).length;
     notice.textContent = configuredCount > 0
-      ? `已读取本机配置：${configuredCount} 个 API Key 已安全保存。完整密钥不会显示，也不会上传服务器。`
-      : "当前没有保存 API Key；可使用已登录的本机 CLI，或在下方完成配置。";
+      ? t("已读取本机配置：{0} 个 API Key 已安全保存。完整密钥不会显示，也不会上传服务器。", [configuredCount])
+      : t("当前没有保存 API Key；可使用已登录的本机 CLI，或在下方完成配置。");
   } catch (error) {
     notice.textContent = error.message;
     notice.className = "settings-notice error";
@@ -2099,9 +2110,9 @@ function renderChatAIControls(session, providers) {
   actions.innerHTML = "";
   $("#chat-ai-help").textContent = usableProviders.length
     ? native
-      ? "选择已经在本机接入的 AI 加入当前群组。群成员随后可以直接 @ 它。"
-      : "可把你的 AI 加入这个群组；已登录的桌面客户端会自动启动后台连接。"
-    : "当前没有可运行的本机 AI。请先在“接入设置”中配置并安装对应 CLI。";
+      ? t("选择已经在本机接入的 AI 加入当前群组。群成员随后可以直接 @ 它。")
+      : t("可把你的 AI 加入这个群组；已登录的桌面客户端会自动启动后台连接。")
+    : t("当前没有可运行的本机 AI。请先在“接入设置”中配置并安装对应 CLI。");
 
   for (const provider of ["codex", "claude", "cursor", "opencode"]) {
     const label = aiProviderLabels[provider];
@@ -2111,11 +2122,11 @@ function renderChatAIControls(session, providers) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `secondary ${attached ? "attached" : ""}`;
-    button.textContent = attached ? `${label} · 离开` : usable ? `＋ ${label} 加入` : `${label} · 未接入`;
+    button.textContent = attached ? t("{0} · 离开", [label]) : usable ? t("＋ {0} 加入", [label]) : t("{0} · 未接入", [label]);
     button.disabled = !attached && !usable;
     button.title = attached
-      ? `让我的 ${label} 离开当前群组`
-      : usable ? `把本机 ${label} 加入当前群组` : `请先安装并配置 ${label} CLI`;
+      ? t("让我的 {0} 离开当前群组", [label])
+      : usable ? t("把本机 {0} 加入当前群组", [label]) : t("请先安装并配置 {0} CLI", [label]);
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
@@ -2123,14 +2134,14 @@ function renderChatAIControls(session, providers) {
         if (attached) {
           const result = await accountApi(`/api/account/sessions/${state.groupId}/ais/${provider}`, { method: "DELETE" });
           bridge?.postMessage({ action: "removeAIWorker", workerId: result.workerId });
-          toast(`${label} 已离开当前群组`);
+          toast(t("{0} 已离开当前群组", [label]));
         } else {
           const result = await accountApi(`/api/account/sessions/${state.groupId}/ais`, {
             method: "POST",
             body: JSON.stringify({ provider })
           });
           bridge?.postMessage({ action: "configureAIWorker", worker: result.worker });
-          toast(bridge ? `${label} 已加入当前群组` : `${label} 已加入，等待桌面客户端自动连接`);
+          toast(bridge ? t("{0} 已加入当前群组", [label]) : t("{0} 已加入，等待桌面客户端自动连接", [label]));
         }
         await Promise.all([refreshMembers(), refreshChatAIControls()]);
       } catch (error) {
@@ -2149,7 +2160,7 @@ async function refreshChatAIControls() {
     return;
   }
   $("#chat-ai-panel").classList.remove("hidden");
-  $("#chat-ai-help").textContent = "正在读取本机 AI 配置…";
+  $("#chat-ai-help").textContent = t("正在读取本机 AI 配置…");
   $("#chat-ai-actions").innerHTML = "";
   try {
     await ensureAccountForCurrentSession();
@@ -2164,7 +2175,7 @@ async function refreshChatAIControls() {
     state.accountSessions = sessions;
     state.aiProviderStatus = settings.providers ?? [];
     const session = sessions.find((item) => item.group.id === requestedGroupId);
-    if (!session) throw new Error("当前群组尚未同步到本机账户");
+    if (!session) throw new Error(t("当前群组尚未同步到本机账户"));
     renderChatAIControls(session, state.aiProviderStatus);
   } catch (error) {
     if (state.groupId !== requestedGroupId) return;
@@ -2180,8 +2191,8 @@ function showAccountDashboardShell(view = overviewViewFromHash()) {
   if (!$("#session-list").children.length) {
     $("#empty-sessions").classList.add("hidden");
     $("#account-loading").classList.remove("hidden", "error");
-    $("#account-loading strong").textContent = "正在打开我的群组";
-    $("#account-loading small").textContent = "同步本机身份和会话…";
+    $("#account-loading strong").textContent = t("正在打开我的群组");
+    $("#account-loading small").textContent = t("同步本机身份和会话…");
   }
 }
 
@@ -2195,6 +2206,7 @@ async function loadAccountDashboard() {
     accountApi("/api/feedback").catch(() => ({ tickets: [], counts: {} }))
   ]);
   void loadAiWork();
+  adoptAccountLocale(account);
   state.account = account;
   state.accountSessions = sessions;
   state.tasks = taskData.tasks;
@@ -2205,7 +2217,7 @@ async function loadAccountDashboard() {
   state.feedbackCounts = feedbackData.counts ?? {};
   // 角标和列表一起画:进入这个视图时账号还没加载完,那次 loadFeedback 是空手回来的。
   renderFeedback();
-  $("#account-email").textContent = isAutomaticAccount(account) ? "本机自动账户" : account.email;
+  $("#account-email").textContent = isAutomaticAccount(account) ? t("本机自动账户") : account.email;
   renderOverviewHeader(account);
   renderOverviewCalendar();
   for (const session of sessions) {
@@ -2244,12 +2256,12 @@ async function showAccountView() {
       state.email = null;
       await createAutomaticAccount();
       await loadAccountDashboard();
-      toast("旧账户已失效，已自动恢复本机群组");
+      toast(t("旧账户已失效，已自动恢复本机群组"));
       return;
     }
     $("#account-loading").classList.remove("hidden");
     $("#account-loading").classList.add("error");
-    $("#account-loading strong").textContent = "群组加载失败";
+    $("#account-loading strong").textContent = t("群组加载失败");
     $("#account-loading small").textContent = error.message;
     toast(error.message);
   }
@@ -2259,7 +2271,7 @@ async function showAccountView() {
 async function restoreAccountBackup(backup) {
   const email = backup.email ?? backup.account?.email;
   if (!email || !Array.isArray(backup.sessions)) {
-    throw new Error("不是有效的 Group Relay 账户备份");
+    throw new Error(t("不是有效的 Group Relay 账户备份"));
   }
   const previousEmail = state.email;
   const previousAccount = state.account;
@@ -2278,7 +2290,7 @@ async function restoreAccountBackup(backup) {
   })).filter((session) => session.groupId);
   if (sessions.length) await importSessions(sessions);
   await loadAccountDashboard();
-  toast("账户和会话已恢复");
+  toast(t("账户和会话已恢复"));
 }
 
 async function handleBackupInput(event) {
@@ -2293,17 +2305,17 @@ async function handleBackupInput(event) {
       return;
     }
     if (!Array.isArray(backup.sessions)) {
-      throw new Error("不是有效的 Group Relay 备份");
+      throw new Error(t("不是有效的 Group Relay 备份"));
     }
     if (!state.email && !loadAccountCredential()) await createAutomaticAccount();
     const sessions = backup.sessions.map((session) => ({
       groupId: session.groupId ?? session.group?.id,
     })).filter((session) => session.groupId);
-    if (!sessions.length) throw new Error("备份中没有有效会话");
+    if (!sessions.length) throw new Error(t("备份中没有有效会话"));
     const result = await importSessions(sessions);
     await loadAccountDashboard();
-    $("#import-result").textContent = `浏览器备份已导入 ${result.imported} 个会话${result.rejected.length ? `，${result.rejected.length} 个已失效` : ""}。`;
-    toast(`已导入 ${result.imported} 个浏览器会话`);
+    $("#import-result").textContent = t("浏览器备份已导入 {0} 个会话{1}。", [result.imported, result.rejected.length ? `，${result.rejected.length} 个已失效` : ""]);
+    toast(t("已导入 {0} 个浏览器会话", [result.imported]));
   } catch (error) {
     toast(error.message);
   }
@@ -2316,34 +2328,34 @@ async function waitForBrowserTransfer(transferToken) {
     const result = await accountApi(`/api/account/browser-transfers/${transferToken}`);
     if (result.status === "pending") continue;
     if (result.status === "completed") {
-      $("#import-result").textContent = `已从浏览器自动导入 ${result.imported} 个会话。`;
+      $("#import-result").textContent = t("已从浏览器自动导入 {0} 个会话。", [result.imported]);
       await loadAccountDashboard();
-      toast(`已导入 ${result.imported} 个会话`);
+      toast(t("已导入 {0} 个会话", [result.imported]));
       return;
     }
-    throw new Error(result.status === "expired" ? "浏览器导入已超时，请重试" : "浏览器中没有可导入的有效会话");
+    throw new Error(result.status === "expired" ? t("浏览器导入已超时，请重试") : t("浏览器中没有可导入的有效会话"));
   }
-  throw new Error("浏览器导入已超时，请重试");
+  throw new Error(t("浏览器导入已超时，请重试"));
 }
 
 $("#start-browser-transfer").addEventListener("click", async (event) => {
   const button = event.currentTarget;
   const nativeBridge = desktopNativeBridge();
   if (!nativeBridge) {
-    const guidance = "请在 Group Relay 客户端选择“显示 → 在浏览器中打开”，网页会自动同步客户端账户和会话。";
+    const guidance = t("请在 Group Relay 客户端选择“显示 → 在浏览器中打开”，网页会自动同步客户端账户和会话。");
     $("#import-result").textContent = guidance;
-    toast("请从客户端打开网页进行自动同步");
+    toast(t("请从客户端打开网页进行自动同步"));
     return;
   }
   button.disabled = true;
-  $("#import-result").textContent = "正在打开浏览器…";
+  $("#import-result").textContent = t("正在打开浏览器…");
   try {
     const transfer = await accountApi("/api/account/browser-transfers", {
       method: "POST",
       body: "{}"
     });
     nativeBridge.postMessage({ action: "openExternal", url: transfer.transferUrl });
-    $("#import-result").textContent = "浏览器已打开，正在等待自动导入…";
+    $("#import-result").textContent = t("浏览器已打开，正在等待自动导入…");
     await waitForBrowserTransfer(transfer.transferToken);
   } catch (error) {
     $("#import-result").textContent = error.message;
@@ -2380,17 +2392,17 @@ async function syncAccountToServer(targetBaseUrl) {
 }
 
 async function runServerSync(targetBaseUrl) {
-  const summary = `账号 ${state.account.email}、${state.accountSessions.length} 个群组`;
+  const summary = t("账号 {0}、{1} 个群组", [state.account.email, state.accountSessions.length]);
   if (!confirm(
-    `把 ${summary} 同步到 ${targetBaseUrl}，然后切换过去？\n\n聊天记录留在本机，不会上传。`
+    t("把 {0} 同步到 {1}，然后切换过去？\n\n聊天记录留在本机，不会上传。", [summary, targetBaseUrl])
   )) return;
   const result = $("#server-sync-result");
-  result.textContent = "正在同步…";
+  result.textContent = t("正在同步…");
   try {
     const { synced, applied } = await syncAccountToServer(targetBaseUrl);
-    const detail = `已同步 ${synced.createdGroups} 个自建群组、${synced.joinedGroups} 个加入的群组、`
-      + `${synced.ais} 个 AI；对方新增 ${applied.groups ?? 0} 个群组。`;
-    result.textContent = `${detail} 正在切换…`;
+    const detail = t("已同步 {0} 个自建群组、{1} 个加入的群组、", [synced.createdGroups, synced.joinedGroups])
+      + t("{0} 个 AI；对方新增 {1} 个群组。", [synced.ais, applied.groups ?? 0]);
+    result.textContent = t("{0} 正在切换…", [detail]);
     toast(detail);
     localStorage.setItem(serverStorageKey, targetBaseUrl);
     if (desktopNativeBridge()) {
@@ -2399,8 +2411,8 @@ async function runServerSync(targetBaseUrl) {
     }
     location.href = `${targetBaseUrl}/app`;
   } catch (error) {
-    result.textContent = `同步失败：${error.message}`;
-    toast(`同步失败：${error.message}`);
+    result.textContent = t("同步失败：{0}", [error.message]);
+    toast(t("同步失败：{0}", [error.message]));
   }
 }
 
@@ -2413,14 +2425,14 @@ async function followServerMove() {
   const movedTo = normalizedServerUrl(health.movedTo);
   if (!movedTo || movedTo === location.origin) return;
   followingMove = true;
-  const message = `这台服务器已迁移到 ${movedTo}。\n\n`
-    + "你的账号和群组已经在那边了，聊天记录一直在本机。现在切换过去？";
+  const message = t("这台服务器已迁移到 {0}。\n\n", [movedTo])
+    + t("你的账号和群组已经在那边了，聊天记录一直在本机。现在切换过去？");
   if (!confirm(message)) {
     followingMove = false;
     return;
   }
   localStorage.setItem(serverStorageKey, movedTo);
-  toast(`正在切换到 ${movedTo}…`);
+  toast(t("正在切换到 {0}…", [movedTo]));
   if (desktopNativeBridge()) {
     await requestNative("setServerUrl", { serverUrl: movedTo }).catch(() => {});
     return;
@@ -2457,8 +2469,8 @@ $("#cancel-server-edit").addEventListener("click", () => {
 $("#server-settings-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const target = normalizedServerUrl($("#server-url").value);
-  if (!target) return toast("请填写完整的服务器地址，例如 https://chat.example.com");
-  if (target === location.origin) return toast("这就是当前连接的服务器");
+  if (!target) return toast(t("请填写完整的服务器地址，例如 https://chat.example.com"));
+  if (target === location.origin) return toast(t("这就是当前连接的服务器"));
   void runServerSync(target);
 });
 
@@ -2476,12 +2488,12 @@ async function renderHistoryStats() {
   const target = $("#history-stats");
   if (!target) return;
   if (!historyAvailable()) {
-    target.textContent = "这个浏览器不支持本地聊天记录存储，关掉页面后记录会丢。";
+    target.textContent = t("这个浏览器不支持本地聊天记录存储，关掉页面后记录会丢。");
     return;
   }
   try {
     const { messages, groups } = await historyStats();
-    target.textContent = `本机已存 ${messages} 条消息，覆盖 ${groups} 个群组。`;
+    target.textContent = t("本机已存 {0} 条消息，覆盖 {1} 个群组。", [messages, groups]);
   } catch {
     target.textContent = "";
   }
@@ -2490,10 +2502,10 @@ async function renderHistoryStats() {
 $("#export-history").addEventListener("click", async () => {
   try {
     const payload = await exportHistory();
-    if (!payload.messages.length) throw new Error("本机还没有聊天记录可导出");
+    if (!payload.messages.length) throw new Error(t("本机还没有聊天记录可导出"));
     const stamp = payload.exportedAt.slice(0, 10);
     downloadJson(payload, `group-relay-history-${stamp}.json`);
-    toast(`已导出 ${payload.messages.length} 条消息`);
+    toast(t("已导出 {0} 条消息", [payload.messages.length]));
   } catch (error) {
     toast(error.message);
   }
@@ -2508,7 +2520,7 @@ $("#import-history-file").addEventListener("change", async (event) => {
     await renderHistoryStats();
     // 当前就开着这个群时重新加载,让导入的记录立刻出现在上方。
     if (state.groupId) await loadChat();
-    toast(`已导入 ${imported} 条消息${skipped ? `，${skipped} 条格式无效已跳过` : ""}`);
+    toast(t("已导入 {0} 条消息{1}", [imported, skipped ? `，${skipped} 条格式无效已跳过` : ""]));
   } catch (error) {
     toast(error.message);
   }
@@ -2534,7 +2546,7 @@ $("#export-account").addEventListener("click", async () => {
     link.download = `group-relay-${state.account.email.replace(/[^a-z0-9._-]/gi, "_")}.json`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast("账户备份已下载，请安全保存");
+    toast(t("账户备份已下载，请安全保存"));
   } catch (error) {
     toast(error.message);
   }
@@ -2552,7 +2564,7 @@ $("#account-logout").addEventListener("click", async () => {
   try {
     await createAutomaticAccount();
     await loadAccountDashboard();
-    toast("已重置并恢复本机群组");
+    toast(t("已重置并恢复本机群组"));
   } catch (error) {
     toast(error.message);
   }
@@ -2598,16 +2610,16 @@ $("#cancel-profile-edit").addEventListener("click", () => {
 
 async function profileAvatarFromFile(file) {
   if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-    throw new Error("头像只支持 PNG、JPEG 或 WebP");
+    throw new Error(t("头像只支持 PNG、JPEG 或 WebP"));
   }
-  if (file.size > 5 * 1024 * 1024) throw new Error("原始头像不能超过 5 MB");
+  if (file.size > 5 * 1024 * 1024) throw new Error(t("原始头像不能超过 5 MB"));
   const source = URL.createObjectURL(file);
   try {
     const image = new Image();
     image.src = source;
     await new Promise((resolve, reject) => {
       image.onload = resolve;
-      image.onerror = () => reject(new Error("无法读取这张图片"));
+      image.onerror = () => reject(new Error(t("无法读取这张图片")));
     });
     const size = 256;
     const canvas = document.createElement("canvas");
@@ -2632,7 +2644,7 @@ $("#profile-avatar-input").addEventListener("change", async (event) => {
   if (!file) return;
   try {
     state.profileAvatarDataUrl = await profileAvatarFromFile(file);
-    const owner = $("#profile-settings-form [name=displayName]").value.trim() || "我";
+    const owner = $("#profile-settings-form [name=displayName]").value.trim() || t("我");
     renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", state.profileAvatarDataUrl, owner);
   } catch (error) {
     toast(error.message);
@@ -2641,7 +2653,7 @@ $("#profile-avatar-input").addEventListener("change", async (event) => {
 
 $("#remove-profile-avatar").addEventListener("click", () => {
   state.profileAvatarDataUrl = null;
-  const owner = $("#profile-settings-form [name=displayName]").value.trim() || "我";
+  const owner = $("#profile-settings-form [name=displayName]").value.trim() || t("我");
   renderAvatar("#profile-avatar-image", "#profile-avatar-fallback", null, owner);
 });
 
@@ -2658,7 +2670,7 @@ $("#profile-settings-form").addEventListener("submit", async (event) => {
       // 本机默认昵称覆盖掉那个人自己的名字。切过去后载入它自己的资料,要改再改一次。
       await useAccountEmail(email);
       await loadAccountDashboard();
-      toast(`已切换到 ${email}`);
+      toast(t("已切换到 {0}", [email]));
       return;
     }
     const { account } = await accountApi("/api/account", {
@@ -2667,7 +2679,7 @@ $("#profile-settings-form").addEventListener("submit", async (event) => {
     });
     state.account = account;
     await loadAccountDashboard();
-    toast("个人资料已保存，群聊名字已同步更新");
+    toast(t("个人资料已保存，群聊名字已同步更新"));
   } catch (error) {
     toast(error.message);
   } finally {
@@ -2695,7 +2707,7 @@ for (const form of document.querySelectorAll(".ai-key-form")) {
     const input = form.elements.apiKey;
     const apiKey = input.value.trim();
     if (!apiKey) {
-      toast(`请输入 ${aiProviderLabels[provider]} API Key`);
+      toast(t("请输入 {0} API Key", [aiProviderLabels[provider]]));
       input.focus();
       return;
     }
@@ -2704,7 +2716,7 @@ for (const form of document.querySelectorAll(".ai-key-form")) {
       const result = await requestNative("saveAIKey", { provider, apiKey });
       closeAIKeyForm(form);
       renderAISettings(result.providers ?? []);
-      toast(`${aiProviderLabels[provider]} API Key 已安全保存`);
+      toast(t("{0} API Key 已安全保存", [aiProviderLabels[provider]]));
     } catch (error) {
       toast(error.message);
     } finally {
@@ -2719,7 +2731,7 @@ for (const form of document.querySelectorAll(".ai-key-form")) {
       const result = await requestNative("deleteAIKey", { provider });
       closeAIKeyForm(form);
       renderAISettings(result.providers ?? []);
-      toast(`${aiProviderLabels[provider]} API Key 已删除，将改用 CLI 登录`);
+      toast(t("{0} API Key 已删除，将改用 CLI 登录", [aiProviderLabels[provider]]));
     } catch (error) {
       toast(error.message);
     } finally {
@@ -2746,7 +2758,7 @@ $("#refresh-ai-tasks").addEventListener("click", async (event) => {
   event.currentTarget.disabled = true;
   try {
     await Promise.all([loadAccountTasks(), loadApprovals()]);
-    toast("AI 看板已更新");
+    toast(t("AI 看板已更新"));
   } catch (error) {
     toast(error.message);
   } finally {
@@ -2810,7 +2822,7 @@ $("#create-form").addEventListener("submit", async (event) => {
     showChatLoading(result.group.name);
     await navigator.clipboard?.writeText(result.inviteUrl).catch(() => {});
     await loadChat();
-    toast("群组已创建，邀请链接已复制");
+    toast(t("群组已创建，邀请链接已复制"));
   } catch (error) {
     toast(error.message);
   }
@@ -2838,7 +2850,7 @@ $("#join-form").addEventListener("submit", async (event) => {
   // 身份就是邮箱,所以必须问。不问的话点邀请链接会悄悄注册一个一次性设备账号,
   // 群组不会出现在这个人真正的工作台里 —— 这正是之前踩到的坑。
   const email = String(form.get("email") ?? "").trim().toLowerCase();
-  if (!email) return toast("请填写你的邮箱");
+  if (!email) return toast(t("请填写你的邮箱"));
   await useAccountEmail(email);
   const input = {
     email,
@@ -2868,7 +2880,7 @@ $("#join-form").addEventListener("submit", async (event) => {
 });
 
 $("#message-form [name=files]").addEventListener("change", (event) => {
-  $("#file-count").textContent = event.target.files.length ? `${event.target.files.length} 个文件` : "";
+  $("#file-count").textContent = event.target.files.length ? t("{0} 个文件", [event.target.files.length]) : "";
 });
 
 function matchingMentionMembers(textarea) {
@@ -2968,7 +2980,7 @@ function aiOnboardingUrl() {
 const copyInviteLink = async () => {
   try {
     await navigator.clipboard.writeText(currentInviteUrl());
-    toast("邀请链接已复制，直接发给要进群的人");
+    toast(t("邀请链接已复制，直接发给要进群的人"));
   } catch (error) {
     toast(error.message);
   }
@@ -3002,7 +3014,7 @@ document.addEventListener("keydown", (event) => {
 $("#chat-ai-invite").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(aiOnboardingUrl());
-    toast("AI 接入链接已复制，只发给自己的 AI —— 它带着你的邮箱");
+    toast(t("AI 接入链接已复制，只发给自己的 AI —— 它带着你的邮箱"));
   } catch (error) {
     toast(error.message);
   }
@@ -3020,19 +3032,11 @@ $("#back-to-groups").addEventListener("click", (event) => {
 /// 工单只收 AI 提的,所以这里给人一段可以直接粘给自己 AI 的话 —— 否则「让 AI 润色后
 /// 提交」听着像个规矩,做起来却不知道从哪下手。
 $("#feedback-copy-prompt").addEventListener("click", async () => {
-  const owner = accountOwnerName(state.account) || "我";
-  const prompt = `帮我提一个 Group Relay 反馈工单。我的原话是：
-
-「（把你想说的写在这里）」
-
-请先把它润色成清晰的「问题描述 + 期望行为」，不要照抄我的原话，然后用下面任一方式提交（工单只接受 AI 提交）：
-- MCP 工具 submit_feedback，参数 title / body / onBehalfOf="${owner}"
-- 或命令行：npm run relay -- feedback --session <你的 session> --title "<标题>" --for "${owner}" "<润色后的正文>"
-
-提交完把工单标题回给我。`;
+  const owner = accountOwnerName(state.account) || t("我");
+  const prompt = t("帮我提一个 Group Relay 反馈工单。我的原话是：\n\n「（把你想说的写在这里）」\n\n请先把它润色成清晰的「问题描述 + 期望行为」，不要照抄我的原话，然后用下面任一方式提交（工单只接受 AI 提交）：\n- MCP 工具 submit_feedback，参数 title / body / onBehalfOf=\"{0}\"\n- 或命令行：npm run relay -- feedback --session <你的 session> --title \"<标题>\" --for \"{1}\" \"<润色后的正文>\"\n\n提交完把工单标题回给我。", [owner, owner]);
   try {
     await navigator.clipboard.writeText(prompt);
-    toast("已复制。粘给你的 AI，把原话填进去就行");
+    toast(t("已复制。粘给你的 AI，把原话填进去就行"));
   } catch (error) {
     toast(error.message);
   }
@@ -3045,7 +3049,49 @@ $("#chat-ai-settings").addEventListener("click", () => {
   void showAccountView();
 });
 
+/// 语言开关:两个按钮 + aria-pressed,顺手把选择写回账号(换设备也保持)。
+function renderLocaleChoice() {
+  for (const button of document.querySelectorAll("[data-locale]")) {
+    const locale = button.dataset.locale;
+    button.setAttribute("aria-pressed", String(locale === getLocale()));
+    button.onclick = async () => {
+      if (locale === getLocale()) return;
+      applyLocale(locale);
+      // 账号还没绑上时只存本机,绑上之后这一步让它跟着账号走。
+      if (state.account?.email) {
+        await accountApi("/api/account", {
+          method: "PATCH",
+          body: JSON.stringify({
+            displayName: state.account.displayName || t("我"),
+            avatarDataUrl: state.account.avatarDataUrl ?? null,
+            locale
+          })
+        }).catch(() => null);
+      }
+      location.reload();
+    };
+  }
+}
+
+/// 直接打开 /group/<id> 时前端不会去取账号,于是账号上存的语言偏好没人读 ——
+/// 换了设备就只能看本机猜的语言。开机时按本机存的邮箱补问一次,拿到就跟上。
+async function syncAccountLocale() {
+  let stored = null;
+  try { stored = JSON.parse(localStorage.getItem(accountStorageKey) ?? "null"); } catch { return; }
+  if (!stored?.email) return;
+  const account = await fetch("/api/account", { headers: { "X-Relay-Email": stored.email } })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((body) => body?.account)
+    .catch(() => null);
+  if (account) adoptAccountLocale(account);
+}
+
 async function boot() {
+  // 语言先定下来再画界面:否则英文用户会先看到一屏中文再闪成英文。
+  applyLocale(getLocale(), { persistLocally: false });
+  translateDom();
+  renderLocaleChoice();
+  void syncAccountLocale();
   /// 早先发出去的邀请链接尾巴上带着分享者的 owner/email —— 那两个参数只给 /join 返回的
   /// AI 接入说明用,网页这边一处都不读。人打开时先从地址栏抹掉:留在那儿只会让人以为
   /// 该用那个邮箱登录,Zoe 的链接转给同事就是这么出事的。
@@ -3056,13 +3102,13 @@ async function boot() {
   const nativeWindowsClient = navigator.userAgent.includes("GroupRelayWindows/");
   const desktopMacBrowser = navigator.userAgent.includes("Macintosh") && !nativeMacClient;
   if (nativeMacClient || nativeWindowsClient) {
-    $("#start-browser-transfer").textContent = "从浏览器导入会话";
-    $("#client-tip-title").textContent = "一键从浏览器导入";
-    $("#client-tip-text").textContent = "点击下方按钮会自动打开 Chrome；Chrome 读取自己的会话后自动传回客户端，无需下载或选择文件。";
+    $("#start-browser-transfer").textContent = t("从浏览器导入会话");
+    $("#client-tip-title").textContent = t("一键从浏览器导入");
+    $("#client-tip-text").textContent = t("点击下方按钮会自动打开 Chrome；Chrome 读取自己的会话后自动传回客户端，无需下载或选择文件。");
   } else {
-    $("#start-browser-transfer").textContent = "从客户端导入会话";
-    $("#client-tip-title").textContent = desktopMacBrowser ? "客户端会话" : "桌面客户端会话";
-    $("#client-tip-text").textContent = "在 Group Relay 客户端选择“显示 → 在浏览器中打开”，网页会自动同步相同的账户和会话。";
+    $("#start-browser-transfer").textContent = t("从客户端导入会话");
+    $("#client-tip-title").textContent = desktopMacBrowser ? t("客户端会话") : t("桌面客户端会话");
+    $("#client-tip-text").textContent = t("在 Group Relay 客户端选择“显示 → 在浏览器中打开”，网页会自动同步相同的账户和会话。");
   }
   const parts = location.pathname.split("/").filter(Boolean);
   if (parts[0] === "transfer" && parts[1]) {
@@ -3075,17 +3121,17 @@ async function boot() {
         body: JSON.stringify({ sessions })
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "浏览器会话导入失败");
+      if (!response.ok) throw new Error(result.error || t("浏览器会话导入失败"));
       if (result.status === "completed") {
-        $("#transfer-title").textContent = "会话已自动导入";
-        $("#transfer-message").textContent = `已成功导入 ${result.imported} 个会话。即将返回 Group Relay 客户端。`;
+        $("#transfer-title").textContent = t("会话已自动导入");
+        $("#transfer-message").textContent = t("已成功导入 {0} 个会话。即将返回 Group Relay 客户端。", [result.imported]);
         $(".transfer-loader").classList.add("complete");
         setTimeout(() => window.close(), 1500);
       } else {
-        throw new Error("这个浏览器没有可导入的有效会话");
+        throw new Error(t("这个浏览器没有可导入的有效会话"));
       }
     } catch (error) {
-      $("#transfer-title").textContent = "无法导入会话";
+      $("#transfer-title").textContent = t("无法导入会话");
       $("#transfer-message").textContent = error.message;
       $(".transfer-loader").classList.add("failed");
     }
@@ -3093,8 +3139,8 @@ async function boot() {
   }
   if (parts[0] === "web-login" && parts[1]) {
     show("#transfer-view");
-    $("#transfer-title").textContent = "正在同步桌面账户";
-    $("#transfer-message").textContent = "正在安全读取客户端授权的昵称、群组和任务，请稍候…";
+    $("#transfer-title").textContent = t("正在同步桌面账户");
+    $("#transfer-message").textContent = t("正在安全读取客户端授权的昵称、群组和任务，请稍候…");
     try {
       const response = await fetch(`/api/web-logins/${encodeURIComponent(parts[1])}/claim`, {
         method: "POST",
@@ -3102,15 +3148,15 @@ async function boot() {
         body: "{}"
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.error || "桌面账户同步失败");
+      if (!response.ok) throw new Error(result.error || t("桌面账户同步失败"));
       saveAccountCredential(result.account);
-      $("#transfer-title").textContent = "桌面账户已同步";
-      $("#transfer-message").textContent = "昵称、群组和 AI 任务已载入，正在打开工作台…";
+      $("#transfer-title").textContent = t("桌面账户已同步");
+      $("#transfer-message").textContent = t("昵称、群组和 AI 任务已载入，正在打开工作台…");
       $(".transfer-loader").classList.add("complete");
       history.replaceState({}, "", "/app");
       setTimeout(() => { void showAccountView(); }, 350);
     } catch (error) {
-      $("#transfer-title").textContent = "无法同步桌面账户";
+      $("#transfer-title").textContent = t("无法同步桌面账户");
       $("#transfer-message").textContent = error.message;
       $(".transfer-loader").classList.add("failed");
     }
@@ -3129,7 +3175,7 @@ async function boot() {
     try {
       const { group } = await api(`/api/invites/${state.inviteToken}`);
       if (await resumeSession(group.id, state.inviteToken)) return;
-      $("#join-title").textContent = `加入「${group.name}」`;
+      $("#join-title").textContent = t("加入「{0}」", [group.name]);
       prefillJoinEmail();
       show("#join-view");
     } catch (error) {
@@ -3168,7 +3214,7 @@ if ("serviceWorker" in navigator) {
   /// 界面是先用缓存那份画出来的(不然网页端每次开群都要等隧道),所以新版本要自己吱一声。
   /// 不自动刷新:那会打断正在打的字和看的位置。
   navigator.serviceWorker.addEventListener("message", (event) => {
-    if (event.data?.type === "shell-updated") toast("有新版本了，刷新一下就用上");
+    if (event.data?.type === "shell-updated") toast(t("有新版本了，刷新一下就用上"));
   });
 }
 

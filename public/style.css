@@ -1201,3 +1201,7 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   .ai-work-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ai-work-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.locale-choice { display: flex; gap: 8px; margin-top: 12px; }
+.locale-choice button { flex: 1; padding: 10px 12px; }
+.locale-choice button[aria-pressed="true"] { color: white; background: #1f6848; }

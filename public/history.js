@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 // 聊天记录的长期副本存在本机,服务端只是 7 天的中转缓冲区。Mac 是 WKWebView、
 // Windows 是 WebView2(带持久 userDataFolder),两端都用默认持久存储,所以这一份
 // IndexedDB 实现同时覆盖网页和两个桌面客户端。
@@ -30,7 +31,7 @@ export function historyAvailable() {
 
 export async function openHistory() {
   if (connection) return connection;
-  if (!historyAvailable()) throw new Error("这个浏览器不支持本地聊天记录存储");
+  if (!historyAvailable()) throw new Error(t("这个浏览器不支持本地聊天记录存储"));
   const open = indexedDB.open(databaseName, databaseVersion);
   open.onupgradeneeded = () => {
     const database = open.result;
@@ -59,11 +60,11 @@ export async function openHistory() {
   const database = await new Promise((resolve, reject) => {
     open.onblocked = () => {
       abandoned = true;
-      reject(new Error("另一个标签页还开着旧版本的本机记录，关掉或刷新那一页就好"));
+      reject(new Error(t("另一个标签页还开着旧版本的本机记录，关掉或刷新那一页就好")));
     };
     opened.then(resolve, reject);
   });
-  if (!database) throw new Error("本机记录这次没打开成功，稍后再试");
+  if (!database) throw new Error(t("本机记录这次没打开成功，稍后再试"));
   connection = database;
   connection.onclose = () => { connection = null; };
   /// 下一次升版本时主动让路,否则这一页就是把别人卡住的那一页。
@@ -187,7 +188,7 @@ export async function exportHistory() {
 
 export async function importHistory(payload) {
   if (payload?.format !== exportFormat || !Array.isArray(payload.messages)) {
-    throw new Error("不是有效的 Group Relay 聊天记录文件");
+    throw new Error(t("不是有效的 Group Relay 聊天记录文件"));
   }
   const imported = await saveMessages(payload.messages);
   const skipped = payload.messages.length - imported;
