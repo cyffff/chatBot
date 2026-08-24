@@ -47,6 +47,13 @@ const presenceSchema = z.object({
   recoverInterrupted: z.boolean().optional().default(false)
 });
 const trustedExecutionSchema = z.object({ enabled: z.boolean() });
+/// AI 没有账号级默认名字,provider 标签就是它的默认值(join 时没给 name 就用这个)。
+/// 三处都要用同一份,原来各自写了一遍字面量。
+const providerDisplayNames = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
+/// 群内昵称:真人改这个只影响这一个群,不碰账号级 displayName;AI 的名字本来就按
+/// (群, provider)存,这条只是补上直接改名的路,不用再靠“先退群再带新名字重新加入”。
+/// 空字符串/null 都当“清掉覆盖”—— 真人回落到账号级名字,AI 回落到 provider 默认标签。
+const nicknameSchema = z.object({ nickname: z.string().trim().max(60).nullable() });
 const desktopWorkerSchema = z.object({ enabled: z.boolean() });
 const approvalRequestSchema = z.object({
   sourceMessageId: z.string().uuid(),
@@ -935,9 +942,8 @@ export async function createApp(options = {}) {
       if (!group || !owner || owner.type !== "human") {
         return res.status(403).json({ error: "a human membership is required to attach desktop AI" });
       }
-      const names = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
       const result = await store.addDesktopAI(groupId, {
-        name: names[provider],
+        name: providerDisplayNames[provider],
         provider,
         email: req.account.email,
         trusted: owner.id === group.ownerMemberId
@@ -1123,9 +1129,8 @@ export async function createApp(options = {}) {
       if (!result) return res.status(404).json({ error: "invite not found" });
       // AI 通过邀请链接接入时,先把它挂到这个 email 名下,再作为该群的桌面 AI 注册。
       if (input.type === "ai") {
-        const names = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
         const attached = await store.addDesktopAI(result.group.id, {
-          name: input.name || names[input.provider],
+          name: input.name || providerDisplayNames[input.provider],
           provider: input.provider,
           email: input.email,
           trusted: result.member.id === result.group.ownerMemberId
@@ -1157,7 +1162,13 @@ export async function createApp(options = {}) {
           member.desktopOwnerMemberId
             ? member.desktopOwnerMemberId === req.member.id
             : req.member.id === ownerMemberId
-        )
+        ),
+        // 真人只能改自己的群内昵称;AI 由它的主人改 —— 和上面免审批的判权是同一条规则。
+        canRename: member.type === "human"
+          ? member.id === req.member.id
+          : (member.desktopOwnerMemberId
+            ? member.desktopOwnerMemberId === req.member.id
+            : req.member.id === ownerMemberId)
       }));
       res.json({
         group,
@@ -1199,6 +1210,55 @@ export async function createApp(options = {}) {
         if (!member) return res.status(404).json({ error: "AI member not found" });
         publish(req.params.groupId, "member_updated", publicMember(member));
         res.json({ member: { ...publicMember(member), canManageTrustedExecution: true } });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  /// 群内昵称。和账号级改名(PATCH /api/account)不一样:那个改的是 displayName,影响这个人
+  /// 加入的所有群;这条只改一个群成员记录上的名字,是「一个人在不同群里可能有不同角色」这件事
+  /// 的存储面。真人只能改自己的;AI 由它的主人改,和免审批开关同一条判权规则 —— AI 的名字本来
+  /// 就按(群, provider)存在注册项上,以前只是没有直接改名的路,只能先退群再带新名字重新加入。
+  app.post(
+    "/api/groups/:groupId/members/:memberId/nickname",
+    requireMember,
+    async (req, res, next) => {
+      try {
+        const input = nicknameSchema.parse(req.body);
+        const [group, members] = await Promise.all([
+          store.getGroup(req.params.groupId),
+          store.listMembers(req.params.groupId)
+        ]);
+        if (!group) return res.status(404).json({ error: "group not found" });
+        const ownerMemberId = group.ownerMemberId ?? members.find((member) => member.type === "human")?.id;
+        const target = members.find((member) => member.id === req.params.memberId);
+        if (!target) return res.status(404).json({ error: "member not found" });
+        const canManage = target.type === "human"
+          ? target.id === req.member.id
+          : (target.desktopOwnerMemberId
+            ? target.desktopOwnerMemberId === req.member.id
+            : req.member.id === ownerMemberId);
+        if (!canManage) {
+          return res.status(403).json({
+            error: target.type === "human"
+              ? "only this member can set their own nickname"
+              : "only the AI owner can rename it"
+          });
+        }
+        const member = target.type === "human"
+          ? await store.setGroupNickname(req.params.groupId, target.email, input.nickname)
+          : await store.renameAiRegistration(
+            req.params.groupId,
+            target.email,
+            target.provider,
+            input.nickname || providerDisplayNames[target.provider]
+          );
+        if (!member) return res.status(404).json({ error: "member not found" });
+        publish(req.params.groupId, "member_updated", publicMember(member));
+        // 调用方一定有权改(不然上面已经 403 了),直接把这个 true 带回去,免得再等一轮
+        // refreshMembers() —— 和免审批开关那个端点是同一个理由。
+        res.json({ member: { ...publicMember(member), canRename: true } });
       } catch (error) {
         next(error);
       }

@@ -1217,3 +1217,23 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   font-weight: 800;
 }
 .toggle-message-language:hover { color: #1f6848; background: #eaf2eb; }
+
+.member-rename {
+  padding: 5px 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #97a098;
+  background: transparent;
+  font-size: 11px;
+  line-height: 1;
+}
+.member-rename:hover { color: #1f6848; background: #edf4ee; border-color: #d5dfd6; }
+.member-rename-holder { flex: 1; min-width: 0; display: flex; }
+.member-rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid #78a48c;
+  border-radius: 7px;
+  font-size: 13px;
+}

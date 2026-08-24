@@ -439,6 +439,55 @@ function insertMemberMention(member, { replaceActiveQuery = false } = {}) {
   $("#mention-menu").classList.add("hidden");
 }
 
+/// 群内昵称是覆盖层,不是账号级改名:真人只能改自己的一行,AI 由它的主人改。
+/// 就地把名字换成输入框,Enter 提交、Esc 取消、留空等于清掉覆盖(回落到默认名字)——
+/// 不新开一个表单区域,和这一行其他小按钮(@、免审批)保持同一种交互重量。
+function startRenameMember(item, member, mentionButton) {
+  if (item.querySelector(".member-rename-input")) return;
+  // 输入框不能塞进 mentionButton 里面 —— 那是个 <button>,里面嵌交互控件既不合法,
+  // 点进输入框调整光标也会把点击冒泡给外层按钮,顺手把这行插进消息框当 @提及。
+  // 所以整个按钮先换成一个不可点击的容器,编辑完再把原按钮(连带里面的头像和状态行)换回去。
+  const holder = document.createElement("span");
+  holder.className = "member-rename-holder";
+  const input = document.createElement("input");
+  input.className = "member-rename-input";
+  input.maxLength = 60;
+  input.value = member.type === "human" ? (member.groupNickname ?? "") : member.name;
+  input.placeholder = member.type === "human"
+    ? (state.account?.displayName ?? member.name)
+    : (providerDisplayLabels[member.provider] ?? member.name);
+  holder.append(input);
+  mentionButton.replaceWith(holder);
+  input.focus();
+  input.select();
+  let settled = false;
+  const restore = () => { if (!settled) { settled = true; holder.replaceWith(mentionButton); } };
+  const submit = async () => {
+    if (settled) return;
+    settled = true;
+    const nickname = input.value.trim();
+    try {
+      const result = await api(`/api/groups/${state.groupId}/members/${member.id}/nickname`, {
+        method: "POST",
+        body: JSON.stringify({ nickname: nickname || null })
+      });
+      const index = state.members.findIndex((candidate) => candidate.id === member.id);
+      if (index >= 0) state.members[index] = result.member;
+      renderMembers(state.members);
+    } catch (error) {
+      toast(error.message);
+      holder.replaceWith(mentionButton);
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); submit(); }
+    else if (event.key === "Escape") { event.preventDefault(); restore(); }
+  });
+  input.addEventListener("blur", () => { if (!settled) submit(); });
+}
+
+const providerDisplayLabels = { codex: "Codex", claude: "Claude", cursor: "Cursor", opencode: "OpenCode" };
+
 function renderMembers(members) {
   state.members = members;
   $("#member-list").innerHTML = "";
@@ -467,6 +516,20 @@ function renderMembers(members) {
     mention.append(avatar, text);
     mention.addEventListener("click", () => insertMemberMention(member));
     item.append(mention);
+    if (member.canRename) {
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.className = "member-rename";
+      rename.textContent = "✎";
+      rename.title = member.type === "human"
+        ? t("只改我在这个群里显示的名字，不影响其他群")
+        : t("改这个 AI 在本群显示的名字，不影响其他群");
+      rename.addEventListener("click", (event) => {
+        event.stopPropagation();
+        startRenameMember(item, member, mention);
+      });
+      item.append(rename);
+    }
     if (member.type === "ai" && member.canManageTrustedExecution) {
       const trust = document.createElement("button");
       trust.type = "button";

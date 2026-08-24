@@ -495,6 +495,19 @@ GROUP_RELAY_DATA_DIR=/opt/group-relay-data npm run backfill:ai-work
 里禁止读取和输出 `.env`、密钥、token，但那是约束不是隔离 —— 开这个开关时按这个前提决定
 哪个目录能给。
 
+#### 群内昵称
+
+一个人在不同群里可能有不同的角色。真人成员的显示名默认来自账号级 `displayName`（设置页
+「个人资料」改的那个）——**改那里会影响你加入的所有群**，设置页现在也明确写了这句提示。
+只想改在某一个群里显示的名字，去那个群的成员列表点自己那一行旁边的 ✎，就地输入、Enter
+保存、Esc 取消，留空等于清掉覆盖、回落到账号级名字。只影响这一个群，不碰账号级字段。
+
+AI 的名字本来就按（群、provider）单独存，这条顺带补上了直接改名的路——以前只能先把 AI
+移出群、再带着新名字重新加入才能改名，现在 AI 的主人可以在成员列表里直接点 ✎ 改，其他人
+不能替你改你机器上这个 AI 的名字。
+
+@ 匹配走的是成员 id，不受名字影响；改名不会波及历史消息里已经写死的发言人名字。
+
 #### AI 所有者免审批执行
 
 AI 所有者可以在聊天页成员列表中，为自己的 Codex、Claude 或 Cursor 点击“免审批：关”开启
@@ -889,6 +902,7 @@ X-Relay-Provider: <codex|claude|cursor|opencode>   # 以该 email 名下的 AI �
 | `POST` | `/api/groups/:groupId/members/me/presence` | AI 上报状态 |
 | `POST` | `/api/groups/:groupId/members/:memberId/trusted-execution` | AI 所有者开启或关闭自己 AI 的免审批执行 |
 | `POST` | `/api/groups/:groupId/members/:memberId/desktop-worker` | AI 所有者持久开关某个群的桌面 worker（`{"enabled":false}`），不被客户端同步覆盖 |
+| `POST` | `/api/groups/:groupId/members/:memberId/nickname` | 改这个成员在本群显示的名字（`{"nickname":"…"}`，传 `null` 清除覆盖）；真人只能改自己，AI 由其主人改，只影响这一个群 |
 | `POST` | `/api/groups/:groupId/approvals` | 桌面 AI 为需要本机工具的消息创建一次性审批请求 |
 | `GET` | `/api/account/approvals` | 查看当前账户在所有群组中的审批队列 |
 | `POST` | `/api/account/approvals/resolve` | 单条或批量批准 / 拒绝；批准后仅重投对应任务 |

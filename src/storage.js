@@ -887,9 +887,13 @@ export class FileStore {
   }
 
   humanMember(account, groupId) {
+    // 群内昵称是可选的覆盖层:设置了就优先显示,没设置回落到账号级 displayName。
+    // 改账号级名字会影响所有群(那是另一个入口);改这一层只影响这一个群。
+    const groupNickname = account.groupNicknames?.[groupId] ?? null;
     return {
       id: humanMemberId(account.email),
-      name: account.displayName,
+      name: groupNickname || account.displayName,
+      groupNickname,
       type: "human",
       provider: null,
       email: account.email,
@@ -982,6 +986,33 @@ export class FileStore {
         .filter((ai) => !(ai.groupId === groupId && ai.provider === provider));
       return account.ais.length !== before;
     });
+  }
+
+  /// 群内昵称只改这一个群,不碰账号级 displayName —— 那是「一个人在不同群里可能有
+  /// 不同角色」这件事的存储面。nickname 为空/null 时清掉覆盖,回落到账号级名字。
+  async setGroupNickname(groupId, email, nickname) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      if (!found || !this.groupIdsFor(found).includes(groupId)) return null;
+      found.groupNicknames ??= {};
+      if (nickname) found.groupNicknames[groupId] = nickname;
+      else delete found.groupNicknames[groupId];
+      return found;
+    });
+    return account ? this.memberFor(groupId, email) : null;
+  }
+
+  /// AI 的名字本来就按(groupId, provider)存在注册项上,天然就是「群内昵称」——只是以前
+  /// 没有一条直接改名的路,只能先退群再带着新名字重新加入。这条补上直接改名。
+  async renameAiRegistration(groupId, email, provider, name) {
+    const account = await this.updateAccounts((accounts) => {
+      const found = accounts[normalizeEmail(email)];
+      const registration = found?.ais?.find((ai) => ai.groupId === groupId && ai.provider === provider);
+      if (!registration) return null;
+      registration.name = name;
+      return found;
+    });
+    return account ? this.memberFor(groupId, email, provider) : null;
   }
 
   async setTrustedExecution(groupId, email, provider, enabled) {

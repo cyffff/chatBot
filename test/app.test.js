@@ -3276,6 +3276,101 @@ test("a routed message goes to the first worker that asks, and a placeholder is 
   assert.equal(history.body.messages.filter((message) => message.status === "processing").length, 1);
 });
 
+test("a human's group nickname overrides only that group, not the account name", async (t) => {
+  const { base } = await fixture(t);
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  const groupA = await json(base, "/api/groups", {
+    method: "POST", body: JSON.stringify({ name: "A 群", email: "owner@example.com", displayName: "Yunfei" })
+  });
+  const groupB = await json(base, "/api/groups", {
+    method: "POST", body: JSON.stringify({ name: "B 群", email: "owner@example.com", displayName: "Yunfei" })
+  });
+  const humanId = "human:owner@example.com";
+  const nameIn = async (groupId) => {
+    const view = await json(base, `/api/groups/${groupId}`, { headers: owner });
+    return view.body.members.find((member) => member.id === humanId);
+  };
+
+  /// 真实事故:改自己的显示名以为只影响当前群,结果所有群都变了 —— 因为真人的名字
+  /// 只存在账号上。群内昵称是一层可选的覆盖,只落在这一个群成员记录上。
+  const before = await nameIn(groupA.body.group.id);
+  assert.equal(before.name, "Yunfei");
+  assert.equal(before.groupNickname, null);
+  assert.equal(before.canRename, true);
+
+  const renamed = await json(base, `/api/groups/${groupA.body.group.id}/members/${humanId}/nickname`, {
+    method: "POST", headers: owner, body: JSON.stringify({ nickname: "Admin" })
+  });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.body.member.name, "Admin");
+  assert.equal(renamed.body.member.groupNickname, "Admin");
+  assert.equal(renamed.body.member.canRename, true);
+
+  // 另一个群、以及账号级 displayName,都必须纹丝不动
+  assert.equal((await nameIn(groupB.body.group.id)).name, "Yunfei");
+  const account = await json(base, "/api/account", { headers: owner });
+  assert.equal(account.body.account.displayName, "Yunfei");
+
+  // 别人不能替你改你在群里的昵称 —— 哪怕对方是这个群里的另一个真人成员
+  const guest = await json(base, `/api/invites/${groupA.body.group.inviteToken}/join`, {
+    method: "POST", body: JSON.stringify({ email: "guest@example.com", name: "Guest" })
+  });
+  const denied = await json(base, `/api/groups/${groupA.body.group.id}/members/${humanId}/nickname`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "guest@example.com" },
+    body: JSON.stringify({ nickname: "冒充" })
+  });
+  assert.equal(denied.response.status, 403);
+  assert.equal(guest.body.member.type, "human");
+
+  // 清空(留空/传 null)等于撤销覆盖,回落到账号级名字
+  const cleared = await json(base, `/api/groups/${groupA.body.group.id}/members/${humanId}/nickname`, {
+    method: "POST", headers: owner, body: JSON.stringify({ nickname: null })
+  });
+  assert.equal(cleared.body.member.name, "Yunfei");
+  assert.equal(cleared.body.member.groupNickname, null);
+});
+
+test("an AI's owner can rename it in one group without leaving and rejoining", async (t) => {
+  const { base } = await fixture(t);
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  const created = await json(base, "/api/groups", {
+    method: "POST", body: JSON.stringify({ name: "改名", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  await json(base, `/api/account/sessions/${groupId}/ais`, {
+    method: "POST", headers: owner, body: JSON.stringify({ provider: "claude" })
+  });
+  const aiId = "ai:owner@example.com:claude";
+
+  /// AI 的名字本来就按(群, provider)存,以前只是没有直接改名的路,只能先退群再带着
+  /// 新名字重新加入 —— 那个流程本身还有一个已知 bug(重新加入会被强制改回 provider 默认值)。
+  /// 这条补的是直接改名,绕开整条退群/重新加入的流程。
+  const renamed = await json(base, `/api/groups/${groupId}/members/${aiId}/nickname`, {
+    method: "POST", headers: owner, body: JSON.stringify({ nickname: "值班 Claude" })
+  });
+  assert.equal(renamed.response.status, 200);
+  assert.equal(renamed.body.member.name, "值班 Claude");
+
+  // 群里别人不能改你机器上这个 AI 的名字 —— 和免审批开关同一条判权
+  const guest = await json(base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST", body: JSON.stringify({ email: "guest@example.com", name: "Guest" })
+  });
+  const denied = await json(base, `/api/groups/${groupId}/members/${aiId}/nickname`, {
+    method: "POST",
+    headers: { "X-Relay-Email": "guest@example.com" },
+    body: JSON.stringify({ nickname: "别人改的" })
+  });
+  assert.equal(denied.response.status, 403);
+  assert.equal(guest.body.member.type, "human");
+
+  // 留空回落到 provider 默认标签(AI 没有独立的"账号级默认名字",这就是它的默认值)
+  const cleared = await json(base, `/api/groups/${groupId}/members/${aiId}/nickname`, {
+    method: "POST", headers: owner, body: JSON.stringify({ nickname: null })
+  });
+  assert.equal(cleared.body.member.name, "Claude");
+});
+
 test("switching off a group's desktop worker survives the next client sync", async (t) => {
   const { base } = await fixture(t);
   const created = await json(base, "/api/groups", {

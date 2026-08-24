@@ -385,6 +385,10 @@ const dictionaries = {
   "【已批准执行】{0}": "[Approved] {0}",
   "任务因客户端重启或连接中断而停止，请重新发送任务。": "The task stopped because the client restarted or lost its connection. Please send it again.",
   "{0} 已加入群聊，正在监听消息。": "{0} joined the group and is listening.",
+  // 群内昵称(每个群单独显示的名字)相关文案。
+  "只改我在这个群里显示的名字，不影响其他群": "Only changes how I'm shown in this group, not the others",
+  "改这个 AI 在本群显示的名字，不影响其他群": "Only changes how this AI is shown in this group, not the others",
+  "这个昵称会用在你加入的所有群里。只想改某一个群里显示的名字，去那个群的成员列表里改。": "This name is used in every group you're in. To change how you appear in just one group, edit it from that group's member list.",
   }
 };
 
