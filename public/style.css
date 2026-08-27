@@ -843,7 +843,16 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 .chat-loading small { color: #7a857d; font-size: 11px; }
 /* 跟着聊天窗口一起放宽:群里常见的表格、SQL、代码块本来就受益于更宽的一行,
    窄窗口下会自动被容器夹回去,不用另外写 min()。 */
-.message { max-width: 960px; }
+/* 两条都必须:
+   1) min-width:0 —— .message 是 #messages(display:flex)里的 flex item,默认
+      min-width:auto 意味着「不会缩到比内容最小宽度还窄」,宽表格(自带 min-width:360px)
+      会靠这条赢过 max-width,把整条消息撑爆。
+   2) max-width 用 min(960px,100%)而不是写死 960px —— 自己发的消息(.message.own)
+      靠 margin-left:auto 居右,而 flex 对有 auto margin 的项目会跳过 stretch,
+      所以这类消息根本不会被拉伸到容器宽度,得单独靠一个能随容器解析的 100% 才卡得住。
+   两条只要少一条,手机上一出现宽表格,就会变成连头像和别的消息一起被拖着横向滚动,
+   而不是表格自己在 .markdown-table-scroll 里滚。 */
+.message { max-width: min(960px, 100%); min-width: 0; }
 .message-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; }
 .sender { font-size: 14px; font-weight: 800; }
 .provider { padding: 2px 6px; border-radius: 5px; background: #e8edf8; color: #465b88; font-size: 10px; text-transform: uppercase; }
@@ -922,7 +931,14 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 }
 .markdown-body table { width: 100%; min-width: 360px; border-collapse: collapse; font-size: 13px; }
 .markdown-body th,
-.markdown-body td { padding: 9px 11px; border-right: 1px solid #e0e7e1; border-bottom: 1px solid #e0e7e1; vertical-align: top; }
+.markdown-body td {
+  padding: 9px 11px; border-right: 1px solid #e0e7e1; border-bottom: 1px solid #e0e7e1; vertical-align: top;
+  /* .bubble 上的 overflow-wrap:anywhere 会一路继承进单元格,把没有空格的短字段(特征码、
+     表名、订单号)逐字拆断成两三行 —— 手机上尤其明显。表格外面本来就套了一层
+     .markdown-table-scroll 会横向滚动,重置成默认值,让浏览器把撑不下的整词交给那层滚动,
+     而不是先拆碎了硬塞进窄列里。 */
+  overflow-wrap: normal;
+}
 .markdown-body th:last-child,
 .markdown-body td:last-child { border-right: 0; }
 .markdown-body tbody tr:last-child td { border-bottom: 0; }
@@ -1120,6 +1136,11 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   }
   .aside-backdrop.hidden { display: none; }
   #messages { padding: 18px 16px; }
+  /* 手机屏幕本来就窄,表格单元格再按桌面那份内边距/字号,两三列就得靠横向滚动了。
+     缩小一档,同样内容能多摆一两列再触发滚动,超出的部分仍然滚,不是不滚。 */
+  .markdown-body table { font-size: 12px; }
+  .markdown-body th,
+  .markdown-body td { padding: 7px 9px; }
   #message-form { padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
   .auth-card { min-height: 100vh; border: 0; border-radius: 0; padding: 36px 24px; }
   .account-card {
