@@ -716,11 +716,12 @@ button.secondary { color: #24573e; background: #e7f0e8; }
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-/* 原来固定卡在 1180×860,大屏幕(常见的 1440~2560 宽)会在窗口正中间留出大片空白,
-   实际能看消息的地方反而没跟着变大。改成跟窗口走、只留一个远比原来宽松的上限 ——
-   宽度用 100%(不是 calc(100vw - Npx)):移动端 main 的 padding 会变成 0(见下方
-   720px 断点),100% 能跟着一起变成整宽;写死减 64px 的话手机上会平白多出一圈留边。 */
-.chat { width: min(1680px, 100%); height: min(1100px, calc(100vh - 64px)); overflow: hidden; }
+/* 原来先是固定卡在 1180×860,后来改成上限放宽到 1680×1100,但只要是固定上限,
+   窗口开得够大(常见的 1440~2560 宽)还是会在四周留出空白。现在直接铺满视口:
+   fixed + inset:0 贴着浏览器窗口四条边,不再受 main 的 padding/居中影响,也就不再
+   有任何上限。贴边状态下圆角/描边/阴影没有意义,一并去掉(和以前只在手机宽度下
+   才做的处理一样,现在所有尺寸都这样)。 */
+.chat { position: fixed; inset: 0; overflow: hidden; border: 0; border-radius: 0; box-shadow: none; }
 header {
   height: 90px;
   padding: 20px 26px;
@@ -1027,7 +1028,9 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 
 @media (max-width: 720px) {
   main { padding: 0; min-height: 100dvh; }
-  .chat { height: 100dvh; border: 0; border-radius: 0; }
+  /* .chat 现在任何宽度都是 fixed + inset:0(见上面那条规则),这里不用再单独处理 ——
+     以前这行专门给手机做的贴边效果,现在所有尺寸默认就是这样。main 的 padding:0
+     还留着,是给这个宽度下同样会出现的登录/仪表盘卡片(.card)用的,与聊天窗口无关。 */
   /* 手机上的头部是一行:[←] [群名] [状态] [⋯]。以前为了腾横向空间把 .header-link 一起
      关掉了,结果进了聊天就出不去 —— 返回入口必须常驻,次要操作让位。 */
   header {
