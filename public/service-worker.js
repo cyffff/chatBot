@@ -2,7 +2,7 @@
 // 0.5-1.8 秒,所以桌面客户端(窗口一直开着,不重新加载)秒开,网页端却要盯着转圈等。
 // 这里改成先用缓存、再后台校验:界面立刻画出来,新版本在后台发现并提示刷新。
 // cacheName 每次发版都要跟着升,activate 时会删掉所有旧名字的缓存。
-const cacheName = "group-relay-shell-v40";
+const cacheName = "group-relay-shell-v41";
 const shell = ["/app", "/style.css", "/app.js", "/i18n.js", "/markdown.js", "/history.js", "/manifest.json", "/icon-180.png", "/icon-512.png"];
 
 // 导航请求(地址栏、/group/xxx)统统回这一份 HTML —— 路由是前端做的。
