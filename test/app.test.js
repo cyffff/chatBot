@@ -10,7 +10,7 @@ import zlib from "node:zlib";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { createApp } from "../src/app.js";
+import { createApp, isQuietHours } from "../src/app.js";
 import { markdownTableDefinition, splitMarkdownTableRow } from "../public/markdown.js";
 
 const execFileAsync = promisify(execFile);
@@ -62,6 +62,9 @@ async function fixture(t, options = {}) {
   const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
+    // 夜间限流默认关掉:真实运行时间有一半概率落在 21:00-09:00(UAE)窗口内,开着的话
+    // 现有那些 1-2 秒超时的长轮询测试会被拖到 5 分钟才超时,变成看运行时刻决定测试挂不挂。
+    quietHoursEnabled: false,
     ...options
   });
   const server = app.listen(0);
@@ -1528,6 +1531,57 @@ test("language follows the account, and Accept-Language covers the rest", async 
   assert.match(fallback.text, /Nobody picked this up/);
   assert.match(fallback.text, /ask Owner to check that machine/);
   assert.doesNotMatch(fallback.text, /[一-鿿]/);
+});
+
+test("quiet hours span 21:00-09:00 UAE time (UTC+4), including the midnight wrap", () => {
+  const uae = (hour, minute = 0) => new Date(Date.UTC(2026, 8, 16, (hour - 4 + 24) % 24, minute));
+  // 白天:9:00-20:59 都不算夜间
+  assert.equal(isQuietHours(uae(9, 0)), false);
+  assert.equal(isQuietHours(uae(14, 30)), false);
+  assert.equal(isQuietHours(uae(20, 59)), false);
+  // 21:00 整开始算夜间,一路跨过午夜到第二天 8:59
+  assert.equal(isQuietHours(uae(21, 0)), true);
+  assert.equal(isQuietHours(uae(23, 59)), true);
+  assert.equal(isQuietHours(uae(0, 0)), true);
+  assert.equal(isQuietHours(uae(3, 0)), true);
+  assert.equal(isQuietHours(uae(8, 59)), true);
+  // 9:00 整恢复白天
+  assert.equal(isQuietHours(uae(9, 0)), false);
+});
+
+test("a long poll during quiet hours waits far longer for 'no news', but a real message still returns instantly", async (t) => {
+  // UAE 3:00am,落在夜间窗口里
+  const nightUtc = () => new Date(Date.UTC(2026, 8, 16, 23, 0));
+  const { base } = await fixture(t, {
+    quietHoursEnabled: true,
+    quietHoursPollFloorMs: 400,
+    now: nightUtc
+  });
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "夜间限流", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+
+  // 客户端照样请求 25 秒,服务端要把地板抬到 quietHoursPollFloorMs(这里设成 400ms 方便测试快跑)
+  const started = Date.now();
+  const empty = await json(base, `/api/groups/${groupId}/messages/wait?timeoutMs=25000`, { headers: owner });
+  const waitedMs = Date.now() - started;
+  assert.equal(empty.body.messages.length, 0);
+  assert.ok(waitedMs >= 380, `地板没生效,只等了 ${waitedMs}ms`);
+
+  // 但真有新消息不用等地板:另一个请求进来时,挂着的长轮询要立刻返回,不能也被拖到 400ms 地板
+  const pending = fetch(`${base}/api/groups/${groupId}/messages/wait?timeoutMs=25000`, { headers: owner });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const sentAt = Date.now();
+  await fetch(`${base}/api/groups/${groupId}/messages`, {
+    method: "POST", headers: owner, body: new URLSearchParams({ text: "夜里也要立刻送到" })
+  });
+  const delivered = await pending.then((response) => response.json());
+  const deliveredMs = Date.now() - sentAt;
+  assert.equal(delivered.messages[0]?.text, "夜里也要立刻送到");
+  assert.ok(deliveredMs < 300, `真消息被地板拖住了,等了 ${deliveredMs}ms`);
 });
 
 test("an @-mention never goes silent: no pickup, stalled, and given up", async (t) => {

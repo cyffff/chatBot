@@ -158,10 +158,29 @@ const joinSchema = z.object({
   }
 });
 
+/// UAE(UTC+4,不实行夏令时)21:00-09:00 算夜间。实测:51 个注册的 AI 身份各自每 25 秒
+/// 轮询一次 /messages/wait,单次响应体只有几百字节,但协议开销叠起来能到 ~4GB/天出站流量,
+/// GCP 账单因此从月初 364% 涨上去。直接拒绝请求会更糟 —— 现有客户端(Mac/Windows/
+/// relay-worker)失败后立刻重试,拒绝只会变成更快的重试风暴。所以是纯函数,不依赖任何
+/// 闭包状态,方便单独测边界(21:00 整、09:00 整、跨午夜)。
+export function isQuietHours(now = new Date()) {
+  const uaeHour = (now.getUTCHours() + 4) % 24;
+  return uaeHour >= 21 || uaeHour < 9;
+}
+
 export async function createApp(options = {}) {
   const dataDir = options.dataDir ?? process.env.GROUP_RELAY_DATA_DIR ?? "./data";
   const configuredPublicBaseUrl = options.publicBaseUrl ?? process.env.PUBLIC_BASE_URL;
   const presenceTimeoutMs = Number(options.presenceTimeoutMs ?? 90_000);
+  /// 夜间把「没有新消息」的确认周期从 25 秒拉长到 5 分钟:轮询频率从每小时 144 次降到
+  /// 12 次,这段时间的协议开销降 90%+;真有新消息照样从 waiter 事件立刻返回,不受影响。
+  /// 测试默认关掉(quietHoursEnabled: false 在 fixture 里设),否则一半的测试运行会因为
+  /// 真实运行时间恰好落在这 12 小时窗口里,把 1-2 秒的轮询测试拖到 5 分钟才超时。
+  const quietHoursEnabled = options.quietHoursEnabled ?? true;
+  const quietHoursPollFloorMs = Number(
+    options.quietHoursPollFloorMs ?? process.env.GROUP_RELAY_QUIET_HOURS_POLL_MS ?? 5 * 60_000
+  );
+  const currentTime = options.now ?? (() => new Date());
   /// 提问不能石沉大海。三个阈值都从「提问那一刻」算起(不看 updatedAt,否则下面的提醒
   /// 自己会把计时器一次次推后,永远不到期):没人接单 → 兜底一条;接了但迟迟不回 → 提醒一次
   /// 「仍在进行」;再久 → 判定执行端已经没了,把占位改成失败并让提问的人重发。
@@ -1465,7 +1484,12 @@ export async function createApp(options = {}) {
           syncedAt
         });
       }
-      const timeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
+      const requestedTimeoutMs = Math.min(Math.max(Number(req.query.timeoutMs) || 25_000, 1_000), 30_000);
+      // 夜间把地板抬高到 quietHoursPollFloorMs,客户端一直请求 25 秒,这里强制拉长;
+      // 真有新消息还是走下面的 waiter 事件立刻 finish,地板只影响"没有新消息"这一支。
+      const timeoutMs = quietHoursEnabled && isQuietHours(currentTime())
+        ? Math.max(requestedTimeoutMs, quietHoursPollFloorMs)
+        : requestedTimeoutMs;
       const update = await new Promise((resolve) => {
         const groupId = req.params.groupId;
         const groupWaiters = waiters.get(groupId) ?? new Set();
