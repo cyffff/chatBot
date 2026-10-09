@@ -1669,6 +1669,20 @@ export async function createApp(options = {}) {
   });
 
   app.get("/api/groups/:groupId/events", requireMember, (req, res) => {
+    if (shuttingDown) {
+      // 正在下线:不在将死的实例上开新流。drainClients 结束旧流后浏览器 EventSource 会立刻重连,
+      // 而 cloudflared 复用的是到这个实例的 keep-alive 连接,重连又落回这里 —— 2026-10-09 发布实测,
+      // 这样新开的流只能等 5 秒兜底被硬关,cloudflared 报 unexpected EOF。
+      // 必须回 200 + text/event-stream:按规范 EventSource 遇到别的状态码会永久放弃、不再重连。
+      // retry 让它 1 秒后重连;Connection: close 让 cloudflared 不再复用这条连接,重连自然落到存活实例。
+      res.set({
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "close"
+      });
+      res.end("retry: 1000\n\n");
+      return;
+    }
     res.set({
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
