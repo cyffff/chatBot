@@ -59,7 +59,7 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
-  const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer } = await createApp({
+  const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer, drainClients } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
     // 夜间限流默认关掉:真实运行时间可能落在 00:00-09:00(UAE)窗口内,开着的话
@@ -72,7 +72,7 @@ async function fixture(t, options = {}) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, store, dataDir, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer };
+  return { base, store, dataDir, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer, drainClients };
 }
 
 async function json(base, url, options = {}) {
@@ -1582,6 +1582,40 @@ test("a long poll during quiet hours waits far longer for 'no news', but a real 
   const deliveredMs = Date.now() - sentAt;
   assert.equal(delivered.messages[0]?.text, "夜里也要立刻送到");
   assert.ok(deliveredMs < 300, `真消息被地板拖住了,等了 ${deliveredMs}ms`);
+});
+
+test("draining ends open SSE streams and turns away new ones with a clean, retryable close", async (t) => {
+  /// 2026-10-09 发布实测:drainClients 结束旧 SSE 流后,浏览器 EventSource 立刻重连,而 cloudflared
+  /// 复用到正在下线实例的 keep-alive 连接,重连落回将死的实例又开了一条新流,只能等 5 秒兜底硬关,
+  /// cloudflared 报 unexpected EOF。下线中的实例要拒绝开新流,但得用 EventSource 会重连的方式拒绝。
+  const { base, drainClients } = await fixture(t);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "发布不断流", email: "owner@example.com", displayName: "Owner" })
+  });
+  const groupId = created.body.group.id;
+  const owner = { "X-Relay-Email": "owner@example.com" };
+  const within = (promise, ms, what) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} 超过 ${ms}ms 没结束`)), ms))
+  ]);
+
+  // 已经开着的流:drain 时要被正常结束,不能挂到兜底超时
+  const open = await fetch(`${base}/api/groups/${groupId}/events`, { headers: owner });
+  const reader = open.body.getReader();
+  assert.match(new TextDecoder().decode((await reader.read()).value), /event: ready/);
+  drainClients();
+  const drained = async () => { while (!(await reader.read()).done) { /* 读到流结束 */ } };
+  await within(drained(), 1_000, "已开着的 SSE 流");
+
+  // drain 之后新来的重连:立刻以 200 + text/event-stream 结束,带 retry,并要求关掉连接
+  const late = await fetch(`${base}/api/groups/${groupId}/events`, { headers: owner });
+  assert.equal(late.status, 200);
+  assert.match(late.headers.get("content-type") ?? "", /text\/event-stream/);
+  assert.equal(late.headers.get("connection"), "close");
+  const body = await within(late.text(), 1_000, "下线后新开的 SSE 流");
+  assert.match(body, /retry: \d+/);
+  assert.doesNotMatch(body, /event: ready/);
 });
 
 test("an @-mention never goes silent: no pickup, stalled, and given up", async (t) => {
