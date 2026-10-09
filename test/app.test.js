@@ -1618,6 +1618,44 @@ test("draining ends open SSE streams and turns away new ones with a clean, retry
   assert.doesNotMatch(body, /event: ready/);
 });
 
+test("markdown with a bare list or heading marker line renders instead of hanging the page", async () => {
+  /// 2026-10-09 事故:一条 AI 回复里有一行只有 "- "(标记后没有内容)。列表分支要求标记后还有
+  /// 内容,markdownBlockStart 却只看前缀,两边对不上,段落循环一行都不吃、外层 while 原地打转,
+  /// 打开那个群的浏览器全部「页面无响应」。renderMarkdown 在浏览器端 app.js 里,这里抽出原函数配
+  /// 一个最小假 DOM 来跑:死循环每圈都会 append 一个空 <p>,超过上限就判定为卡死(同步死循环
+  /// 没法靠超时打断,只能靠这个计数)。
+  const source = await fs.readFile(path.resolve("public/app.js"), "utf8");
+  const start = source.indexOf("function appendInlineMarkdown(");
+  const renderStart = source.indexOf("function renderMarkdown(", start);
+  const end = source.indexOf("\n}\n", renderStart) + 2;
+  assert.ok(start >= 0 && renderStart > start && end > renderStart, "app.js 里没找到渲染函数");
+
+  let appends = 0;
+  const node = (tag) => ({
+    tag, children: [], dataset: {}, style: {}, className: "", textContent: "",
+    classList: { add() {} },
+    replaceChildren() { this.children = []; },
+    append(...items) {
+      appends += items.length;
+      if (appends > 5_000) throw new Error("renderMarkdown 卡在原地不前进");
+      this.children.push(...items);
+    }
+  });
+  const fakeDocument = { createElement: node, createTextNode: (text) => ({ tag: "#text", textContent: text }) };
+  const renderMarkdown = new Function("document", "markdownTableDefinition", "splitMarkdownTableRow",
+    `${source.slice(start, end)}\nreturn renderMarkdown;`)(fakeDocument, markdownTableDefinition, splitMarkdownTableRow);
+
+  for (const marker of ["- ", "* ", "+ ", "-\t", "1. ", "2) ", "# ", "## "]) {
+    appends = 0;
+    const target = node("div");
+    renderMarkdown(target, `前面一段\n\n1. 第一项\n2. 第二项\n${marker}\n后面一段`);
+    const rendered = JSON.stringify(target.children);
+    assert.match(rendered, /前面一段/, `${JSON.stringify(marker)}:前文丢了`);
+    assert.match(rendered, /第二项/, `${JSON.stringify(marker)}:列表丢了`);
+    assert.match(rendered, /后面一段/, `${JSON.stringify(marker)}:后文没渲染出来`);
+  }
+});
+
 test("an @-mention never goes silent: no pickup, stalled, and given up", async (t) => {
   /// 真实事故:有人在群里连问两条,三天里既没有回复、也没有「正在处理」或失败提示 ——
   /// 从群成员的视角完全分不清是 AI 在跑、任务丢了、还是整套 relay 挂了。执行端那时可能
