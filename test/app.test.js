@@ -62,7 +62,7 @@ async function fixture(t, options = {}) {
   const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
-    // 夜间限流默认关掉:真实运行时间有一半概率落在 21:00-09:00(UAE)窗口内,开着的话
+    // 夜间限流默认关掉:真实运行时间可能落在 00:00-09:00(UAE)窗口内,开着的话
     // 现有那些 1-2 秒超时的长轮询测试会被拖到 5 分钟才超时,变成看运行时刻决定测试挂不挂。
     quietHoursEnabled: false,
     ...options
@@ -1533,15 +1533,15 @@ test("language follows the account, and Accept-Language covers the rest", async 
   assert.doesNotMatch(fallback.text, /[一-鿿]/);
 });
 
-test("quiet hours span 21:00-09:00 UAE time (UTC+4), including the midnight wrap", () => {
+test("quiet hours span 00:00-09:00 UAE time (UTC+4)", () => {
   const uae = (hour, minute = 0) => new Date(Date.UTC(2026, 8, 16, (hour - 4 + 24) % 24, minute));
-  // 白天:9:00-20:59 都不算夜间
+  // 白天:9:00 一直到 23:59 都不算夜间(窗口收窄后,晚上 21-24 点恢复正常轮询)
   assert.equal(isQuietHours(uae(9, 0)), false);
   assert.equal(isQuietHours(uae(14, 30)), false);
   assert.equal(isQuietHours(uae(20, 59)), false);
-  // 21:00 整开始算夜间,一路跨过午夜到第二天 8:59
-  assert.equal(isQuietHours(uae(21, 0)), true);
-  assert.equal(isQuietHours(uae(23, 59)), true);
+  assert.equal(isQuietHours(uae(21, 0)), false);
+  assert.equal(isQuietHours(uae(23, 59)), false);
+  // 00:00 整开始算夜间,到第二天 8:59
   assert.equal(isQuietHours(uae(0, 0)), true);
   assert.equal(isQuietHours(uae(3, 0)), true);
   assert.equal(isQuietHours(uae(8, 59)), true);

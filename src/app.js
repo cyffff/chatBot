@@ -158,14 +158,14 @@ const joinSchema = z.object({
   }
 });
 
-/// UAE(UTC+4,不实行夏令时)21:00-09:00 算夜间。实测:51 个注册的 AI 身份各自每 25 秒
+/// UAE(UTC+4,不实行夏令时)00:00-09:00 算夜间。实测:51 个注册的 AI 身份各自每 25 秒
 /// 轮询一次 /messages/wait,单次响应体只有几百字节,但协议开销叠起来能到 ~4GB/天出站流量,
 /// GCP 账单因此从月初 364% 涨上去。直接拒绝请求会更糟 —— 现有客户端(Mac/Windows/
 /// relay-worker)失败后立刻重试,拒绝只会变成更快的重试风暴。所以是纯函数,不依赖任何
-/// 闭包状态,方便单独测边界(21:00 整、09:00 整、跨午夜)。
+/// 闭包状态,方便单独测边界(00:00 整、09:00 整)。
 export function isQuietHours(now = new Date()) {
   const uaeHour = (now.getUTCHours() + 4) % 24;
-  return uaeHour >= 21 || uaeHour < 9;
+  return uaeHour < 9;
 }
 
 export async function createApp(options = {}) {
