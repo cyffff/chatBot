@@ -738,6 +738,14 @@ function renderMarkdown(target, source) {
       firstLine = false;
       index += 1;
     }
+    // 上面哪个分支都没认领这一行、段落循环也一行没吃(只有标记没有内容的 "- "、"1. "、"# "):
+    // markdownBlockStart 只看前缀,而列表/标题分支要求标记后还有内容,两边对不上。不在这里
+    // 强制前进,外层 while 就原地打转、每圈塞一个空 <p>,浏览器直接「页面无响应」——
+    // 2026-10-09 Dubi 群一条 AI 回复里的 "- " 把整个群页面卡死了。保证外层每圈至少吃掉一行。
+    if (firstLine) {
+      appendInlineMarkdown(paragraph, lines[index]);
+      index += 1;
+    }
     target.append(paragraph);
   }
 }
