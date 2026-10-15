@@ -98,24 +98,30 @@ function requestNative(action, payload = {}) {
 }
 
 /// 服务端的访问防火墙拒绝了这个网络(403 + code=network_denied)。页面外壳可能来自 Service
-/// Worker 缓存,所以服务端那张拒绝页看不到,得在这里自己盖一层全屏提示;文字用服务端按
-/// Accept-Language 回的那句,不另造一份翻译。
+/// Worker 缓存,所以服务端那张拒绝页看不到,得在这里自己弹一个对话框盖住整个页面;
+/// 标题 / 说明 / 补充提示都用服务端按 Accept-Language 回的文字,不另造一份翻译
+/// (只有老服务端没带 title 时才退回一句通用的)。
 function showNetworkDenied(body) {
   let panel = document.querySelector("#network-denied");
   if (!panel) {
     panel = document.createElement("div");
     panel.id = "network-denied";
-    panel.setAttribute("role", "alert");
+    panel.setAttribute("role", "alertdialog");
+    panel.setAttribute("aria-modal", "true");
     panel.innerHTML = '<div class="network-denied-card"><h2></h2><p class="network-denied-message"></p>'
-      + '<p class="network-denied-ip"></p><button type="button"></button></div>';
+      + '<p class="network-denied-hint"></p><p class="network-denied-ip"></p><button type="button"></button></div>';
     panel.querySelector("button").addEventListener("click", () => location.reload());
     document.body.append(panel);
   }
-  panel.querySelector("h2").textContent = t("当前网络无法访问");
-  panel.querySelector(".network-denied-message").textContent = body.error ?? "";
+  const hint = panel.querySelector(".network-denied-hint");
+  panel.querySelector("h2").textContent = body.title || t("当前网络无法访问");
+  panel.querySelector(".network-denied-message").textContent = body.message || body.error || "";
+  hint.textContent = body.hint || "";
+  hint.hidden = !body.hint;
   panel.querySelector(".network-denied-ip").textContent = body.ip ? t("你的 IP：{0}", [body.ip]) : "";
   panel.querySelector("button").textContent = t("重新加载");
   panel.hidden = false;
+  panel.querySelector("button").focus();
 }
 
 function failedRequest(response, body) {

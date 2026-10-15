@@ -248,9 +248,12 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 - **三档**：`report` 只记日志、一个人都不拦，每个（地址，身份）组合记一行
   `[network] first-seen ip=… country=… identity=… verdict=…`，用来摸清谁从哪里连进来再写白名单；
   `enforce` 才真拦。`enforce` 没配任何规则、或规则里有写错的项，服务直接拒绝启动，不会悄悄把人锁在外面。
-- **被拦时**：浏览器看到一张中英文并排、带访客自己 IP 的说明页；API 返回 `403`，
-  `{"error": "<按 Accept-Language 的一句话>", "code": "network_denied", "ip": "…"}`，桌面客户端会把
-  `error` 直接显示成失败原因，网页端（包括 Service Worker 缓存的旧页面）会盖一层全屏提示。
+- **被拦时**：浏览器看到一张中英文并排的说明页，标题是「请先连接公司 VPN 后重试」，下面是说明、
+  `GROUP_RELAY_NETWORK_HINT` 补充的一句话和访客自己的 IP；API 返回 `403`，
+  `{"error": "<标题 — 说明 补充>", "title": "…", "message": "…", "hint": "…", "code": "network_denied", "ip": "…"}`
+  （文字按 Accept-Language 选中英文）。老的桌面客户端只认 `error`，会把整句显示成失败原因；
+  网页端（包括桌面客户端里的网页，也包括 Service Worker 缓存的旧页面）会弹出一个对话框盖住整个页面，
+  标题、说明、补充提示和 IP 分开排版。
   被拦的长轮询（`/messages/wait`）会拖满 `GROUP_RELAY_NETWORK_DENY_HOLD_MS` 再回，
   于是装在各人电脑上、来不及升级的桌面端被拦后请求频率和空闲时一样，不会变成重试风暴；
   `bin/relay-worker.js` 看到 `network_denied` 会退避 5 分钟。
@@ -262,6 +265,11 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 走各人自己的宽带，服务端看到的出口地址不管连没连 VPN 都一样，所以这里无从判断。要真做到这一点，
 得由网络侧把服务器地址加进 VPN 路由并告知 NAT 出口地址（再把它填进 `GROUP_RELAY_ALLOWED_CIDRS`），
 或者把服务放进内网域名之后。
+
+所以提示里的「请先连接公司 VPN」只是引导，判断依据始终是来源地址：连上分流 VPN 出口不变，
+还是会被拦。`GROUP_RELAY_NETWORK_HINT` 用来补一句「连上仍被拦怎么办」（比如把页面上的 IP 发给
+管理员）。如果某个 VPN 网关是全隧道、出口是公司统一的地址，让用户连上后访问一次，从 `first-seen`
+日志里读出那个出口地址，加进 `GROUP_RELAY_ALLOWED_CIDRS`，「连上 VPN 就能进」才真的成立。
 
 ```text
 # 先观察，一两天后看日志里都有哪些国家和地址

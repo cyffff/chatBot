@@ -14,6 +14,9 @@ import { localeFromAcceptLanguage, translate } from "./i18n.js";
 
 const modes = new Set(["off", "report", "enforce"]);
 const deniedKey = "这个服务只对内部成员开放，当前网络不在允许范围内。";
+/// 被拦的人该做什么。判断依据始终是来源地址,这句只是引导 —— 分流 VPN 连上之后出口地址
+/// 不一定会变,所以运营方还可以用 GROUP_RELAY_NETWORK_HINT 补一句「连上仍被拦怎么办」。
+const vpnPromptKey = "请先连接公司 VPN 后重试";
 const rateLimitedKey = "请求过于频繁，请稍后再试。";
 
 const isLoopback = (address) => /^(127\.|::1$|::ffff:127\.)/i.test(String(address ?? ""));
@@ -106,27 +109,29 @@ function noticePage({ address, hint }) {
 <meta name="robots" content="noindex">
 <title>Group Relay</title>
 <style>
-:root { color-scheme: light dark; --bg: #f5f6f8; --card: #fff; --text: #1d2129; --muted: #667085; --accent: #b42318; }
+:root { color-scheme: light dark; --bg: #f5f6f8; --card: #fff; --text: #1d2129; --muted: #667085; --accent: #b42318; --callout: #fdecea; }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #14161a; --card: #1e2127; --text: #e8eaed; --muted: #98a2b3; --accent: #f97066; }
+  :root { --bg: #14161a; --card: #1e2127; --text: #e8eaed; --muted: #98a2b3; --accent: #f97066; --callout: #3b2220; }
 }
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; box-sizing: border-box;
   background: var(--bg); color: var(--text);
   font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
 main { width: 100%; max-width: 460px; box-sizing: border-box; padding: 28px 24px; border-radius: 16px;
   background: var(--card); box-shadow: 0 8px 30px rgba(0, 0, 0, .08); }
-h1 { margin: 0 0 14px; font-size: 20px; line-height: 1.4; color: var(--accent); }
+h1 { margin: 0 0 16px; font-size: 22px; line-height: 1.4; color: var(--accent); }
+h1 small { display: block; margin-top: 2px; color: var(--muted); font-size: 14px; font-weight: 500; }
 p { margin: 0 0 10px; overflow-wrap: anywhere; }
 .en { color: var(--muted); font-size: 14px; }
+.hint { padding: 10px 12px; border-radius: 10px; background: var(--callout); }
 .ip { margin: 16px 0 0; color: var(--muted); font: 13px ui-monospace, Menlo, Consolas, monospace; }
 </style>
 </head>
 <body>
 <main>
-<h1>🔒 仅限内部成员访问 · Internal members only</h1>
+<h1>🔒 ${escapeHtml(translate("zh", vpnPromptKey))}<small>${escapeHtml(translate("en", vpnPromptKey))}</small></h1>
 <p>${escapeHtml(translate("zh", deniedKey))}</p>
 <p class="en">${escapeHtml(translate("en", deniedKey))}</p>
-${hint ? `<p>${escapeHtml(hint)}</p>\n` : ""}<p class="ip">IP: ${escapeHtml(address ?? "?")}</p>
+${hint ? `<p class="hint">${escapeHtml(hint)}</p>\n` : ""}<p class="ip">IP: ${escapeHtml(address ?? "?")}</p>
 </main>
 </body>
 </html>
@@ -236,7 +241,11 @@ export function createNetworkPolicy(config = {}) {
   const localized = (req, key) => translate(localeFromAcceptLanguage(req.get("accept-language")) ?? "zh", key);
 
   function deny(req, res, connection) {
-    const message = [localized(req, deniedKey), hint].filter(Boolean).join(" ");
+    /// error 是一整句话:老客户端(编译好的桌面端)只认这个字段,原样显示成失败原因,
+    /// 所以「先连 VPN」必须写在里面。title / message / hint 是给网页弹窗分开排版用的。
+    const title = localized(req, vpnPromptKey);
+    const message = localized(req, deniedKey);
+    const error = `${title} — ${message}${hint ? ` ${hint}` : ""}`;
     const send = () => {
       if (res.headersSent || res.writableEnded) return;
       res.status(403).set("Cache-Control", "no-store");
@@ -245,7 +254,7 @@ export function createNetworkPolicy(config = {}) {
       if (wantsPage) {
         res.type("html").send(noticePage({ address: connection.address, hint }));
       } else {
-        res.json({ error: message, code: "network_denied", ip: connection.address });
+        res.json({ error, title, message, hint: hint || null, code: "network_denied", ip: connection.address });
       }
     };
     const isLongPoll = req.method === "GET" && /\/messages\/wait$/.test(req.path);

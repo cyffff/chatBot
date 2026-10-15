@@ -3736,25 +3736,43 @@ test("network policy report mode lets everyone in but records who showed up", as
 
 test("network policy enforce turns unlisted addresses away and lets listed ones through", async (t) => {
   const { base } = await fixture(t, {
-    network: { mode: "enforce", allowedCidrs: "203.0.113.0/24, 2001:db8::/32", denyHoldMs: 0, log: () => {} }
+    network: {
+      mode: "enforce",
+      allowedCidrs: "203.0.113.0/24, 2001:db8::/32",
+      hint: "Still blocked? Send your IP to the <admin>.",
+      denyHoldMs: 0,
+      log: () => {}
+    }
   });
   const outsider = { "CF-Connecting-IP": "198.51.100.7" };
-  // API 客户端:403 + code,error 就是给人看的那句,语言跟 Accept-Language
+  // API 客户端:403 + code。error 是完整的一句话(老客户端只认它,「先连 VPN」必须在里面),
+  // title / message / hint 是给网页弹窗分开排版的,语言跟 Accept-Language
   const zh = await json(base, "/api/account", { headers: outsider });
   assert.equal(zh.response.status, 403);
   assert.equal(zh.body.code, "network_denied");
   assert.equal(zh.body.ip, "198.51.100.7");
+  assert.equal(zh.body.title, "请先连接公司 VPN 后重试");
+  assert.match(zh.body.message, /只对内部成员开放/);
+  assert.match(zh.body.error, /请先连接公司 VPN/);
   assert.match(zh.body.error, /只对内部成员开放/);
+  assert.match(zh.body.error, /Still blocked\?/);
+  assert.equal(zh.body.hint, "Still blocked? Send your IP to the <admin>.");
   const en = await json(base, "/api/account", { headers: { ...outsider, "Accept-Language": "en-US,en;q=0.9" } });
+  assert.equal(en.body.title, "Connect to the company VPN and try again");
+  assert.match(en.body.error, /Connect to the company VPN/);
   assert.match(en.body.error, /internal members only/);
-  // 浏览器:一张中英文都有、带访客 IP 的页面,不是 JSON
+  // 浏览器:一张中英文都有、带访客 IP 的页面,不是 JSON;补充提示按 HTML 转义
   const page = await fetch(`${base}/app`, { headers: { ...outsider, Accept: "text/html" } });
   assert.equal(page.status, 403);
   assert.match(page.headers.get("content-type"), /text\/html/);
   assert.equal(page.headers.get("cache-control"), "no-store");
   const html = await page.text();
-  assert.match(html, /Internal members only/);
+  assert.match(html, /请先连接公司 VPN 后重试/);
+  assert.match(html, /Connect to the company VPN and try again/);
   assert.match(html, /只对内部成员开放/);
+  assert.match(html, /internal members only/);
+  assert.match(html, /Send your IP to the &lt;admin&gt;/);
+  assert.doesNotMatch(html, /<admin>/);
   assert.match(html, /IP: 198\.51\.100\.7/);
   // 页面外壳和静态文件也拿不到
   assert.equal((await fetch(`${base}/app.js`, { headers: outsider })).status, 403);
