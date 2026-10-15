@@ -1267,3 +1267,27 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
   border-radius: 7px;
   font-size: 13px;
 }
+
+/* 访问防火墙拒绝时盖住整个页面(见 showNetworkDenied) */
+#network-denied {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: #edf3ee;
+}
+#network-denied[hidden] { display: none; }
+.network-denied-card {
+  width: min(100%, 460px);
+  padding: 28px 24px;
+  background: #fbfcf8;
+  border: 1px solid #dce5dc;
+  border-radius: 16px;
+  box-shadow: 0 18px 60px rgb(31 55 41 / 10%);
+}
+.network-denied-card h2 { margin: 0 0 12px; font-size: 20px; color: #a1281c; }
+.network-denied-card p { margin: 0 0 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.network-denied-card .network-denied-ip { color: #68736b; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.network-denied-card button { margin-top: 8px; }

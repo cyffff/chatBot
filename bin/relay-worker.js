@@ -70,6 +70,7 @@ async function relayRequest(config, pathname, options = {}) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         const error = new Error(payload.error || `Relay returned ${response.status}`);
+        error.code = payload.code;
         // 4xx 重试一万次也不会变(不在群里了、身份失效),直接往上抛。
         if (response.status < 500) throw error;
         lastError = error;
@@ -705,8 +706,13 @@ export async function runWorker({
         await onMembershipGone?.(reason);
         return { handled, stopped: reason };
       }
-      log(`Worker ${config.sessionId ?? config.groupId} error: ${reason}; retrying`);
-      await sleep(2_000);
+      // 服务端的访问防火墙拒绝(换了网络、出了白名单)或限流:每 2 秒重试一次只会火上浇油,
+      // 网络一时半会儿不会变,拉长间隔;一旦恢复,下一轮自然就通了。
+      const backoffMs = error?.code === "network_denied" ? 5 * 60_000
+        : error?.code === "rate_limited" ? 30_000
+        : 2_000;
+      log(`Worker ${config.sessionId ?? config.groupId} error: ${reason}; retrying${backoffMs > 2_000 ? ` in ${backoffMs / 1000}s` : ""}`);
+      await sleep(backoffMs);
     }
   } while (!once && shouldContinue());
   return { handled, stopped: null };

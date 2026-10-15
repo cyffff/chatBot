@@ -97,13 +97,39 @@ function requestNative(action, payload = {}) {
   });
 }
 
+/// 服务端的访问防火墙拒绝了这个网络(403 + code=network_denied)。页面外壳可能来自 Service
+/// Worker 缓存,所以服务端那张拒绝页看不到,得在这里自己盖一层全屏提示;文字用服务端按
+/// Accept-Language 回的那句,不另造一份翻译。
+function showNetworkDenied(body) {
+  let panel = document.querySelector("#network-denied");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "network-denied";
+    panel.setAttribute("role", "alert");
+    panel.innerHTML = '<div class="network-denied-card"><h2></h2><p class="network-denied-message"></p>'
+      + '<p class="network-denied-ip"></p><button type="button"></button></div>';
+    panel.querySelector("button").addEventListener("click", () => location.reload());
+    document.body.append(panel);
+  }
+  panel.querySelector("h2").textContent = t("当前网络无法访问");
+  panel.querySelector(".network-denied-message").textContent = body.error ?? "";
+  panel.querySelector(".network-denied-ip").textContent = body.ip ? t("你的 IP：{0}", [body.ip]) : "";
+  panel.querySelector("button").textContent = t("重新加载");
+  panel.hidden = false;
+}
+
+function failedRequest(response, body) {
+  if (response.status === 403 && body.code === "network_denied") showNetworkDenied(body);
+  return new Error(body.error || t("请求失败 ({0})", [response.status]));
+}
+
 async function api(url, options = {}) {
   const headers = new Headers(options.headers);
   if (state.email) headers.set("X-Relay-Email", state.email);
   if (!(options.body instanceof FormData) && options.body) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || t("请求失败 ({0})", [response.status]));
+  if (!response.ok) throw failedRequest(response, body);
   return body;
 }
 
@@ -113,7 +139,7 @@ async function accountApi(url, options = {}) {
   if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || t("请求失败 ({0})", [response.status]));
+  if (!response.ok) throw failedRequest(response, body);
   return body;
 }
 

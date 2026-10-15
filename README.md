@@ -219,6 +219,12 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 | `GROUP_RELAY_UNANSWERED_MINUTES` | `10` | `@` 了 AI 但连占位都没有,过这么久就由服务端兜底回一条 |
 | `GROUP_RELAY_STALL_MINUTES` | `20` | 占位一直是「处理中」,过这么久提醒一次「仍在进行」 |
 | `GROUP_RELAY_GIVE_UP_MINUTES` | `45` | 再久就判定执行端已退出,把占位改成失败并让提问者重发 |
+| `GROUP_RELAY_NETWORK_MODE` | `off` | 访问防火墙：`off` 不管、`report` 只记录不拦、`enforce` 拦截，见下文「访问防火墙」 |
+| `GROUP_RELAY_ALLOWED_CIDRS` | 空 | 放行的来源地址，IP 或 CIDR，逗号分隔，IPv4/IPv6 都行 |
+| `GROUP_RELAY_ALLOWED_COUNTRIES` | 空 | 放行的国家，ISO 两位代码，逗号分隔（取自 Cloudflare 的 `CF-IPCountry`） |
+| `GROUP_RELAY_NETWORK_HINT` | 空 | 追加在拒绝提示后面的一句话，比如告诉访客该怎么办 |
+| `GROUP_RELAY_NETWORK_DENY_HOLD_MS` | `25000` | 被拦的长轮询拖这么久再回 403，避免客户端失败后飞快重试 |
+| `GROUP_RELAY_RATE_LIMIT` | 关 | 每个来源地址限流，写成 `请求数/秒数`，例如 `600/10` |
 | `GROUP_RELAY_RESTRICT_DIRS` | 关 | 本机 agent 只能访问 `GROUP_RELAY_ALLOWED_DIRS` 里的目录 |
 | `GROUP_RELAY_ALLOWED_DIRS` | 空 | 允许访问的目录清单，按操作系统的路径分隔符分隔（Mac/Linux `:`，Windows `;`） |
 | `GROUP_RELAY_NO_DIR_LISTING` | 关 | 禁止把目录当文件发出（不提供目录结构） |
@@ -227,6 +233,46 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 后四个是**客户端侧**（`bin/mcp-server.js`、`bin/codex-worker.js`）的数据安全开关，默认全关、
 行为与历史一致。开启目录白名单后清单为空即拒绝所有本机路径；这些开关只影响本机 agent 能碰
 什么，和服务端存什么无关。
+
+### 访问防火墙
+
+服务没有登录（email 就是身份），公网地址一旦外泄，任何人都能读群、冒名发消息，还能把任务派给
+各人电脑上的 AI worker。防火墙在所有路由和静态文件**之前**按来源地址放行，另有限流。默认全关，
+行为与历史一致。
+
+- **来源地址**只认 Cloudflare 隧道带来的 `CF-Connecting-IP`。服务只监听回环，外部流量都经隧道进来；
+  本机自己的访问（部署脚本探活）没有任何代理头，永远放行；带了代理头却没有 `CF-Connecting-IP` 的
+  认不出来源，`enforce` 下拒绝。
+- **放行规则**是「地址在 `GROUP_RELAY_ALLOWED_CIDRS` 里」或「国家在 `GROUP_RELAY_ALLOWED_COUNTRIES` 里」，
+  满足任一条即可。`/health` 永远放行，客户端靠它发现服务搬迁。
+- **三档**：`report` 只记日志、一个人都不拦，每个（地址，身份）组合记一行
+  `[network] first-seen ip=… country=… identity=… verdict=…`，用来摸清谁从哪里连进来再写白名单；
+  `enforce` 才真拦。`enforce` 没配任何规则、或规则里有写错的项，服务直接拒绝启动，不会悄悄把人锁在外面。
+- **被拦时**：浏览器看到一张中英文并排、带访客自己 IP 的说明页；API 返回 `403`，
+  `{"error": "<按 Accept-Language 的一句话>", "code": "network_denied", "ip": "…"}`，桌面客户端会把
+  `error` 直接显示成失败原因，网页端（包括 Service Worker 缓存的旧页面）会盖一层全屏提示。
+  被拦的长轮询（`/messages/wait`）会拖满 `GROUP_RELAY_NETWORK_DENY_HOLD_MS` 再回，
+  于是装在各人电脑上、来不及升级的桌面端被拦后请求频率和空闲时一样，不会变成重试风暴；
+  `bin/relay-worker.js` 看到 `network_denied` 会退避 5 分钟。
+- **限流**：`GROUP_RELAY_RATE_LIMIT=600/10` 表示每个来源地址每 10 秒最多 600 个请求，超出回 `429` +
+  `Retry-After`。本机访问和 `/health` 不限。常规使用远低于这个量（一个人开着网页加十几个 worker
+  也只有每 10 秒几十次）。
+
+**做不到「只有连了公司 VPN 才能访问」。** 分流模式的 VPN 只把内网网段送进隧道，去 Cloudflare 的流量
+走各人自己的宽带，服务端看到的出口地址不管连没连 VPN 都一样，所以这里无从判断。要真做到这一点，
+得由网络侧把服务器地址加进 VPN 路由并告知 NAT 出口地址（再把它填进 `GROUP_RELAY_ALLOWED_CIDRS`），
+或者把服务放进内网域名之后。
+
+```text
+# 先观察，一两天后看日志里都有哪些国家和地址
+GROUP_RELAY_NETWORK_MODE=report
+GROUP_RELAY_RATE_LIMIT=600/10
+
+# 摸清楚之后再收紧
+GROUP_RELAY_NETWORK_MODE=enforce
+GROUP_RELAY_ALLOWED_COUNTRIES=AE,CN
+GROUP_RELAY_ALLOWED_CIDRS=203.0.113.0/24
+```
 
 ## 创建群组和邀请成员
 

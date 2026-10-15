@@ -11,6 +11,13 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createApp, isQuietHours } from "../src/app.js";
+import {
+  createNetworkPolicy,
+  normalizeAddress,
+  parseCidrList,
+  parseCountries,
+  parseRateLimit
+} from "../src/network-policy.js";
 import { markdownTableDefinition, splitMarkdownTableRow } from "../public/markdown.js";
 
 const execFileAsync = promisify(execFile);
@@ -59,13 +66,16 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
+  const { network, ...rest } = options;
   const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer, drainClients } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
     // 夜间限流默认关掉:真实运行时间可能落在 00:00-09:00(UAE)窗口内,开着的话
     // 现有那些 1-2 秒超时的长轮询测试会被拖到 5 分钟才超时,变成看运行时刻决定测试挂不挂。
     quietHoursEnabled: false,
-    ...options
+    // 访问防火墙同理默认关,并且不读环境变量:开发者 shell 里碰巧设了 GROUP_RELAY_* 不该让测试变红。
+    network: { env: {}, mode: "off", rateLimit: false, ...network },
+    ...rest
   });
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
@@ -3681,6 +3691,160 @@ test("an AI fetching the invite link gets the onboarding sheet, not the web page
   // 平台自己的需求要走反馈队列,不能让群里的 AI 顺手改掉 —— 免审批之下这条尤其重要
   assert.match(sheet, /不要自己动手实现/);
   assert.match(sheet, /会走反馈队列统一实现/);
+});
+
+test("network policy parsing accepts IPs and CIDRs and rejects typos loudly", () => {
+  const { list, count } = parseCidrList("203.0.113.0/24, 198.51.100.5 2001:db8::/32");
+  assert.equal(count, 3);
+  assert.equal(list.check("203.0.113.200", "ipv4"), true);
+  assert.equal(list.check("198.51.100.5", "ipv4"), true);
+  assert.equal(list.check("198.51.100.6", "ipv4"), false);
+  assert.equal(list.check("2001:db8:ffff::1", "ipv6"), true);
+  assert.equal(normalizeAddress("::FFFF:203.0.113.9"), "203.0.113.9");
+  assert.equal(normalizeAddress("not an ip"), null);
+  // enforce 下悄悄丢掉一条等于把人锁在门外,所以配错就直接拒绝启动
+  assert.throws(() => parseCidrList("203.0.113.0/33"), /Invalid network entry/);
+  assert.throws(() => parseCidrList("203.0.113.256"), /Invalid network entry/);
+  assert.throws(() => parseCountries("UAE"), /Invalid country code/);
+  assert.deepEqual([...parseCountries("ae, CN")], ["AE", "CN"]);
+  assert.throws(() => parseRateLimit("lots"), /Invalid rate limit/);
+  assert.deepEqual(parseRateLimit("600/10"), { max: 600, windowMs: 10_000 });
+  assert.equal(parseRateLimit("off"), null);
+  assert.throws(() => createNetworkPolicy({ mode: "enforce", env: {} }), /needs GROUP_RELAY_ALLOWED/);
+  assert.throws(() => createNetworkPolicy({ mode: "block", env: {} }), /Invalid GROUP_RELAY_NETWORK_MODE/);
+  assert.equal(createNetworkPolicy({ env: {} }).mode, "off");
+});
+
+test("network policy report mode lets everyone in but records who showed up", async (t) => {
+  const lines = [];
+  const { base } = await fixture(t, {
+    network: { mode: "report", allowedCidrs: "203.0.113.0/24", log: (line) => lines.push(line) }
+  });
+  const stranger = { "CF-Connecting-IP": "198.51.100.7", "CF-IPCountry": "ae", ...asMember("someone@example.com", "claude") };
+  assert.notEqual((await fetch(`${base}/api/account`, { headers: stranger })).status, 403);
+  await fetch(`${base}/api/account`, { headers: stranger });
+  const sightings = lines.filter((line) => line.includes("ip=198.51.100.7"));
+  // 同一个(地址, 身份)只记第一次
+  assert.equal(sightings.length, 1);
+  assert.match(sightings[0], /country=AE via=cloudflare identity=someone@example\.com#claude verdict=would-deny reason=not-listed/);
+  await fetch(`${base}/health`, { headers: { "CF-Connecting-IP": "203.0.113.9" } });
+  assert.ok(lines.some((line) => /ip=203\.0\.113\.9 .*identity=- verdict=allow reason=cidr/.test(line)));
+  // 本机自己的访问(部署脚本探活)不记
+  await fetch(`${base}/health`);
+  assert.equal(lines.filter((line) => line.includes("via=local")).length, 0);
+});
+
+test("network policy enforce turns unlisted addresses away and lets listed ones through", async (t) => {
+  const { base } = await fixture(t, {
+    network: { mode: "enforce", allowedCidrs: "203.0.113.0/24, 2001:db8::/32", denyHoldMs: 0, log: () => {} }
+  });
+  const outsider = { "CF-Connecting-IP": "198.51.100.7" };
+  // API 客户端:403 + code,error 就是给人看的那句,语言跟 Accept-Language
+  const zh = await json(base, "/api/account", { headers: outsider });
+  assert.equal(zh.response.status, 403);
+  assert.equal(zh.body.code, "network_denied");
+  assert.equal(zh.body.ip, "198.51.100.7");
+  assert.match(zh.body.error, /只对内部成员开放/);
+  const en = await json(base, "/api/account", { headers: { ...outsider, "Accept-Language": "en-US,en;q=0.9" } });
+  assert.match(en.body.error, /internal members only/);
+  // 浏览器:一张中英文都有、带访客 IP 的页面,不是 JSON
+  const page = await fetch(`${base}/app`, { headers: { ...outsider, Accept: "text/html" } });
+  assert.equal(page.status, 403);
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  const html = await page.text();
+  assert.match(html, /Internal members only/);
+  assert.match(html, /只对内部成员开放/);
+  assert.match(html, /IP: 198\.51\.100\.7/);
+  // 页面外壳和静态文件也拿不到
+  assert.equal((await fetch(`${base}/app.js`, { headers: outsider })).status, 403);
+  // /health 不拦:客户端靠它发现服务搬迁
+  assert.equal((await fetch(`${base}/health`, { headers: outsider })).status, 200);
+  // 白名单内:IPv4、IPv6、IPv4 映射地址都通过
+  for (const address of ["203.0.113.9", "2001:db8::5", "::ffff:203.0.113.77"]) {
+    const ok = await json(base, "/api/accounts", {
+      method: "POST",
+      headers: { "CF-Connecting-IP": address },
+      body: JSON.stringify({ email: "member@example.com" })
+    });
+    assert.equal(ok.response.status, 201, address);
+  }
+  // 本机直连(没有任何代理头)不受影响:部署脚本探活走这条
+  assert.equal((await fetch(`${base}/health`)).status, 200);
+  assert.equal((await json(base, "/api/account", { headers: asMember("member@example.com") })).response.status, 200);
+  // 带着代理头却没有 CF-Connecting-IP:认不出来源,宁可拒绝也不当成本机放行
+  const unverified = await json(base, "/api/account", {
+    headers: { "X-Forwarded-For": "203.0.113.9", ...asMember("member@example.com") }
+  });
+  assert.equal(unverified.response.status, 403);
+});
+
+test("network policy country allowlist works alongside the address list", async (t) => {
+  const { base } = await fixture(t, {
+    network: {
+      mode: "enforce",
+      allowedCountries: "ae, cn",
+      allowedCidrs: "203.0.113.0/24",
+      denyHoldMs: 0,
+      log: () => {}
+    }
+  });
+  const status = async (address, country) => (await fetch(`${base}/api/account`, {
+    headers: { "CF-Connecting-IP": address, ...(country ? { "CF-IPCountry": country } : {}) }
+  })).status;
+  assert.notEqual(await status("198.51.100.7", "AE"), 403);
+  assert.notEqual(await status("198.51.100.7", "cn"), 403);
+  assert.equal(await status("198.51.100.7", "US"), 403);
+  // Cloudflare 用 XX 表示「不知道」,不能当成一个国家
+  assert.equal(await status("198.51.100.7", "XX"), 403);
+  assert.equal(await status("198.51.100.7"), 403);
+  // 地址在名单里就行,国家无所谓
+  assert.notEqual(await status("203.0.113.9", "US"), 403);
+});
+
+test("network policy holds a turned-away long poll, and lets go of it on shutdown", async (t) => {
+  const groupWait = (base) => `${base}/api/groups/00000000-0000-4000-8000-000000000000/messages/wait`;
+  const outsider = { "CF-Connecting-IP": "198.51.100.7" };
+  const policy = { mode: "enforce", allowedCidrs: "203.0.113.0/24", log: () => {} };
+
+  // 拖满 denyHoldMs 再回 403:客户端失败后几秒就重试,立刻拒绝会把长轮询变成重试风暴
+  const { base } = await fixture(t, { network: { ...policy, denyHoldMs: 400 } });
+  const started = Date.now();
+  const held = await fetch(groupWait(base), { headers: outsider });
+  assert.equal(held.status, 403);
+  assert.ok(Date.now() - started >= 350, "the denial should wait out the hold");
+  // 其他请求不拖
+  const quick = Date.now();
+  assert.equal((await fetch(`${base}/api/account`, { headers: outsider })).status, 403);
+  assert.ok(Date.now() - quick < 300);
+
+  // 关机时(drainClients)被拖着的拒绝立刻放掉,不让任何请求挂着
+  const second = await fixture(t, { network: { ...policy, denyHoldMs: 20_000 } });
+  const pending = fetch(groupWait(second.base), { headers: outsider });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const released = second.drainClients();
+  assert.ok(released >= 1);
+  const late = Date.now();
+  assert.equal((await pending).status, 403);
+  assert.ok(Date.now() - late < 2_000);
+});
+
+test("network policy rate limit cuts off one address without touching others or local calls", async (t) => {
+  const lines = [];
+  const { base } = await fixture(t, { network: { rateLimit: "3/60", log: (line) => lines.push(line) } });
+  const hit = (address) => fetch(`${base}/api/account`, { headers: { "CF-Connecting-IP": address } });
+  for (let i = 0; i < 3; i += 1) assert.notEqual((await hit("198.51.100.7")).status, 429);
+  const limited = await hit("198.51.100.7");
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get("retry-after")) >= 1);
+  assert.equal((await limited.json()).code, "rate_limited");
+  await hit("198.51.100.7");
+  // 别的地址不受影响;/health 和本机都不限
+  assert.notEqual((await hit("198.51.100.8")).status, 429);
+  assert.equal((await fetch(`${base}/health`, { headers: { "CF-Connecting-IP": "198.51.100.7" } })).status, 200);
+  for (let i = 0; i < 6; i += 1) assert.notEqual((await fetch(`${base}/api/account`)).status, 429);
+  // 被限流的地址只记一行,不会被刷满日志
+  assert.equal(lines.filter((line) => line.includes("rate-limited")).length, 1);
 });
 
 // 公开仓库里不该出现真人身份和这台机器的细节。今天两次 git add -A 都差点(有一次真的)把

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { FileStore } from "./storage.js";
 import { localeFromAcceptLanguage, normalizeLocale, systemMessageKeys, translate } from "./i18n.js";
+import { createNetworkPolicy } from "./network-policy.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(here, "../public");
@@ -200,6 +201,9 @@ export async function createApp(options = {}) {
 
   const app = express();
   app.set("trust proxy", 1);
+  /// 必须排在所有路由和静态文件之前:被拦的访客连页面外壳都不该拿到。
+  const networkPolicy = createNetworkPolicy(options.network);
+  app.use(networkPolicy.middleware);
   const subscribers = new Map();
   const waiters = new Map();
   /// 同一个 AI 身份可能同时挂着两个 worker(CLI 注册的 claude-main 和桌面 App 自建的
@@ -1910,7 +1914,7 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
       }
     }
     subscribers.clear();
-    return released;
+    return released + networkPolicy.release();
   };
 
   /// 兜底看守:@ 了某个 AI 却什么都没回来时,由服务端替它说话。
