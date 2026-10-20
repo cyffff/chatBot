@@ -309,10 +309,14 @@ export function createNetworkPolicy(config = {}) {
     seen.add(key);
     if (seen.size > 5_000) seen.delete(seen.values().next().value);
     const outcome = verdict.allowed ? "allow" : mode === "enforce" ? "deny" : "would-deny";
+    /// UA 用来分辨对方是浏览器、桌面客户端还是 worker:同一个人被拦时,该给她网页链接还是换办法,
+    /// 取决于她用的是哪一种。
+    const agent = String(req.get("user-agent") ?? "").replace(/[^\x20-\x7e]/g, "").replace(/\s+/g, " ").slice(0, 80);
     emit(
       `[network] first-seen ip=${connection.address ?? "-"} country=${connection.country ?? "-"} `
       + `via=${connection.via} identity=${identity} verdict=${outcome} reason=${verdict.reason}`
       + (verdict.label ? ` pass=${verdict.label}` : "")
+      + ` ua=${JSON.stringify(agent || "-")}`
     );
   }
 

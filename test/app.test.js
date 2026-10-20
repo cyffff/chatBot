@@ -3722,13 +3722,20 @@ test("network policy report mode lets everyone in but records who showed up", as
   const { base } = await fixture(t, {
     network: { mode: "report", allowedCidrs: "203.0.113.0/24", log: (line) => lines.push(line) }
   });
-  const stranger = { "CF-Connecting-IP": "198.51.100.7", "CF-IPCountry": "ae", ...asMember("someone@example.com", "claude") };
+  const stranger = {
+    "CF-Connecting-IP": "198.51.100.7",
+    "CF-IPCountry": "ae",
+    "User-Agent": "GroupRelay/1.0 (test) \"quoted\"",
+    ...asMember("someone@example.com", "claude")
+  };
   assert.notEqual((await fetch(`${base}/api/account`, { headers: stranger })).status, 403);
   await fetch(`${base}/api/account`, { headers: stranger });
   const sightings = lines.filter((line) => line.includes("ip=198.51.100.7"));
   // 同一个(地址, 身份)只记第一次
   assert.equal(sightings.length, 1);
   assert.match(sightings[0], /country=AE via=cloudflare identity=someone@example\.com#claude verdict=would-deny reason=not-listed/);
+  // UA 带进日志用来分辨浏览器/桌面端/worker,引号被转义,日志里不会被它拆成两行
+  assert.match(sightings[0], / ua="GroupRelay\/1\.0 \(test\) \\"quoted\\""$/);
   await fetch(`${base}/health`, { headers: { "CF-Connecting-IP": "203.0.113.9" } });
   assert.ok(lines.some((line) => /ip=203\.0\.113\.9 .*identity=- verdict=allow reason=cidr/.test(line)));
   // 本机自己的访问(部署脚本探活)不记
