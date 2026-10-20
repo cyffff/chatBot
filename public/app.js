@@ -124,6 +124,14 @@ function showNetworkDenied(body) {
   panel.querySelector("button").focus();
 }
 
+/// 网络恢复(换了网络、加了白名单、点了通行链接)之后第一个成功的请求就把对话框收掉,
+/// 不用等用户自己去点「重新加载」。IPv4 / IPv6 来回切的网络会让同一个页面一会儿被拦一会儿放行,
+/// 如果对话框只出不收,页面就一直被它盖着,看上去就是「一直用不了」。
+function hideNetworkDenied() {
+  const panel = document.querySelector("#network-denied");
+  if (panel && !panel.hidden) panel.hidden = true;
+}
+
 function failedRequest(response, body) {
   if (response.status === 403 && body.code === "network_denied") showNetworkDenied(body);
   return new Error(body.error || t("请求失败 ({0})", [response.status]));
@@ -136,6 +144,7 @@ async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw failedRequest(response, body);
+  hideNetworkDenied();
   return body;
 }
 
@@ -146,6 +155,7 @@ async function accountApi(url, options = {}) {
   const response = await fetch(url, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw failedRequest(response, body);
+  hideNetworkDenied();
   return body;
 }
 
@@ -2920,14 +2930,17 @@ window.addEventListener("hashchange", () => {
 });
 
 $("#refresh-ai-tasks").addEventListener("click", async (event) => {
-  event.currentTarget.disabled = true;
+  /// currentTarget 只在事件派发期间有值,await 之后就是 null:原来在 finally 里取它,
+  /// 按钮点一次就再也恢复不了(请求失败时尤其明显,比如被防火墙拦了一次之后)。
+  const button = event.currentTarget;
+  button.disabled = true;
   try {
     await Promise.all([loadAccountTasks(), loadApprovals()]);
     toast(t("AI 看板已更新"));
   } catch (error) {
     toast(error.message);
   } finally {
-    event.currentTarget.disabled = false;
+    button.disabled = false;
   }
 });
 
