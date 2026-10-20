@@ -13,10 +13,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { createApp, isQuietHours } from "../src/app.js";
 import {
   createNetworkPolicy,
+  issuePass,
   normalizeAddress,
   parseCidrList,
   parseCountries,
-  parseRateLimit
+  parseRateLimit,
+  verifyPass
 } from "../src/network-policy.js";
 import { markdownTableDefinition, splitMarkdownTableRow } from "../public/markdown.js";
 
@@ -3863,6 +3865,107 @@ test("network policy rate limit cuts off one address without touching others or 
   for (let i = 0; i < 6; i += 1) assert.notEqual((await fetch(`${base}/api/account`)).status, 429);
   // 被限流的地址只记一行,不会被刷满日志
   assert.equal(lines.filter((line) => line.includes("rate-limited")).length, 1);
+});
+
+test("network pass is signed, expires, can be revoked and refuses to be forged", () => {
+  const secret = "s".repeat(40);
+  const now = Date.UTC(2026, 9, 20);
+  const token = issuePass({ secret, label: "alice", days: 30, now });
+  assert.match(token, /^alice\.\d+\.[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(
+    verifyPass(token, { secret, now }),
+    { ok: true, label: "alice", expiresAt: now + 30 * 86_400_000 - (now % 1000) }
+  );
+  // 过期、吊销、别的密钥签的、改过任何一段的,都不认
+  assert.equal(verifyPass(token, { secret, now: now + 31 * 86_400_000 }).reason, "expired");
+  assert.equal(verifyPass(token, { secret, now, revoked: new Set(["alice"]) }).reason, "revoked");
+  assert.equal(verifyPass(token, { secret: "t".repeat(40), now }).reason, "bad-signature");
+  const [label, expires, signature] = token.split(".");
+  assert.equal(verifyPass(`bob.${expires}.${signature}`, { secret, now }).reason, "bad-signature");
+  assert.equal(verifyPass(`${label}.${Number(expires) + 86_400}.${signature}`, { secret, now }).reason, "bad-signature");
+  assert.equal(verifyPass(`${label}.${expires}.${signature.slice(0, -1)}A`, { secret, now }).reason, "bad-signature");
+  assert.equal(verifyPass("alice.123", { secret, now }).reason, "malformed");
+  assert.equal(verifyPass("../etc.1.x", { secret, now }).reason, "malformed");
+  assert.equal(verifyPass(token, { secret: "", now }).reason, "malformed");
+  // 发证和配置也要求写对
+  assert.throws(() => issuePass({ secret: "short", label: "alice" }), /at least 32/);
+  assert.throws(() => issuePass({ secret, label: "Alice Wang" }), /Invalid pass label/);
+  assert.throws(() => issuePass({ secret, label: "alice", days: 0 }), /Invalid pass lifetime/);
+  assert.throws(() => createNetworkPolicy({ mode: "report", passSecret: "short", env: {} }), /at least 32/);
+});
+
+test("network pass lets one person through from any address until it is revoked", async (t) => {
+  const secret = "s".repeat(40);
+  const lines = [];
+  const { base } = await fixture(t, {
+    network: {
+      mode: "enforce",
+      allowedCidrs: "203.0.113.0/24",
+      passSecret: secret,
+      passRevoked: "mallory",
+      denyHoldMs: 0,
+      log: (line) => lines.push(line)
+    }
+  });
+  const outsider = { "CF-Connecting-IP": "198.51.100.7" };
+  const status = async (headers, url = "/api/account") => (await fetch(`${base}${url}`, { headers })).status;
+
+  assert.equal(await status(outsider), 403);
+
+  // 兑换:种 HttpOnly cookie 并跳回 /app。链接在 /api/ 下,老的 Service Worker 不会把它当导航拦下
+  const token = issuePass({ secret, label: "jianmei", days: 30 });
+  const redeemed = await fetch(`${base}/api/pass/${token}`, { headers: outsider, redirect: "manual" });
+  assert.equal(redeemed.status, 302);
+  assert.equal(redeemed.headers.get("location"), "/app");
+  assert.equal(redeemed.headers.get("cache-control"), "no-store");
+  const setCookie = redeemed.headers.get("set-cookie");
+  assert.match(setCookie, new RegExp(`^gr_pass=${token.replaceAll(".", "\\.")}; Path=/; Max-Age=\\d+; HttpOnly; SameSite=Lax`));
+  assert.doesNotMatch(setCookie, /Secure/);   // 本地走 http;经隧道带 x-forwarded-proto=https 才加
+  const cookie = { Cookie: setCookie.split(";")[0] };
+
+  // 带着 cookie,换什么地址都能进(404 = 进到了业务层),页面外壳和静态文件也一样
+  for (const address of ["198.51.100.7", "192.0.2.55", "2001:db8:ffff::9"]) {
+    const headers = { "CF-Connecting-IP": address, ...cookie };
+    assert.notEqual(await status(headers), 403, address);
+    assert.equal(await status({ ...headers, Accept: "text/html" }, "/app"), 200, address);
+  }
+  // 只对带 cookie 的那个浏览器有效:别人换了地址、或者 cookie 被改过,照拦
+  assert.equal(await status({ "CF-Connecting-IP": "192.0.2.55" }), 403);
+  assert.equal(await status({ ...outsider, Cookie: `${cookie.Cookie}x` }), 403);
+  assert.equal(await status({ ...outsider, Cookie: "other=1; gr_pass=nope" }), 403);
+  // 日志:谁兑换了,以及之后每个新地址第一次出现时带着通行证标签
+  assert.ok(lines.some((line) => /pass-redeemed pass=jianmei ip=198\.51\.100\.7 /.test(line)));
+  assert.ok(lines.some((line) => /ip=192\.0\.2\.55 .*verdict=allow reason=pass pass=jianmei/.test(line)));
+
+  // 兑换失败:过期、签名不对、被吊销,都回一张说明页,而且不种 cookie
+  const rejected = [
+    issuePass({ secret, label: "old", days: 1, now: Date.now() - 3 * 86_400_000 }),
+    issuePass({ secret: "t".repeat(40), label: "jianmei", days: 30 }),
+    issuePass({ secret, label: "mallory", days: 30 }),
+    "garbage"
+  ];
+  for (const bad of rejected) {
+    const response = await fetch(`${base}/api/pass/${bad}`, { headers: outsider, redirect: "manual" });
+    assert.equal(response.status, 403, bad);
+    assert.equal(response.headers.get("set-cookie"), null);
+    assert.match(await response.text(), /通行证无效或已过期/);
+  }
+  // 吊销:标签进了 GROUP_RELAY_PASS_REVOKED 之后,已经发出去的 cookie 也立刻失效
+  const revokedCookie = `gr_pass=${issuePass({ secret, label: "mallory", days: 30 })}`;
+  assert.equal(await status({ ...outsider, Cookie: revokedCookie }), 403);
+  assert.ok(lines.some((line) => /pass-rejected reason=expired /.test(line)));
+  assert.ok(lines.some((line) => /pass-rejected reason=revoked /.test(line)));
+});
+
+test("network pass is ignored when no secret is configured", async (t) => {
+  const { base } = await fixture(t, {
+    network: { mode: "enforce", allowedCidrs: "203.0.113.0/24", denyHoldMs: 0, log: () => {} }
+  });
+  const forged = issuePass({ secret: "s".repeat(40), label: "jianmei", days: 30 });
+  const outsider = { "CF-Connecting-IP": "198.51.100.7" };
+  // 没配密钥时兑换路径根本不存在,走普通的拦截;带 cookie 也没用
+  assert.equal((await fetch(`${base}/api/pass/${forged}`, { headers: outsider })).status, 403);
+  assert.equal((await fetch(`${base}/api/account`, { headers: { ...outsider, Cookie: `gr_pass=${forged}` } })).status, 403);
 });
 
 // 公开仓库里不该出现真人身份和这台机器的细节。今天两次 git add -A 都差点(有一次真的)把

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import net from "node:net";
 import { localeFromAcceptLanguage, translate } from "./i18n.js";
 
@@ -18,6 +19,8 @@ const deniedKey = "这个服务只对内部成员开放，当前网络不在允�
 /// 不一定会变,所以运营方还可以用 GROUP_RELAY_NETWORK_HINT 补一句「连上仍被拦怎么办」。
 const vpnPromptKey = "请先连接公司 VPN 后重试";
 const rateLimitedKey = "请求过于频繁，请稍后再试。";
+const passRejectedKey = "通行证无效或已过期";
+const passRejectedHintKey = "请让管理员重新发一条通行链接。";
 
 const isLoopback = (address) => /^(127\.|::1$|::ffff:127\.)/i.test(String(address ?? ""));
 
@@ -94,13 +97,57 @@ function createRateLimiter({ max, windowMs }, clock) {
   };
 }
 
+/// 通行证:给某个人的一条链接,点一次,她那个浏览器就带上 cookie,之后换什么地址都放行。
+/// 国内家宽/移动网络的 IPv4 每天都在变,按地址加白名单追不上;按邮箱认人又等于没有校验
+/// (邮箱谁都能填),所以认的是一份只有她手里有的凭证。凭证 = 「标签.过期秒数.签名」,
+/// 签名是 HMAC-SHA256,服务端不存任何东西:验得过签、没过期、标签没被吊销就算数。
+/// 吊销一个人改 GROUP_RELAY_PASS_REVOKED,全部作废就换 GROUP_RELAY_PASS_SECRET。
+const passLabelPattern = /^[a-z0-9_-]{1,32}$/;
+const passCookieName = "gr_pass";
+const maxPassDays = 365;
+
+const passSignature = (secret, label, expires) => (
+  crypto.createHmac("sha256", secret).update(`pass|${label}|${expires}`).digest("base64url")
+);
+
+export function issuePass({ secret, label, days = 90, now = Date.now() }) {
+  if (String(secret ?? "").length < 32) throw new Error("GROUP_RELAY_PASS_SECRET must be at least 32 characters");
+  if (!passLabelPattern.test(String(label ?? ""))) {
+    throw new Error(`Invalid pass label "${label}" (use a-z, 0-9, _ or -, up to 32 characters)`);
+  }
+  if (!Number.isInteger(days) || days < 1 || days > maxPassDays) {
+    throw new Error(`Invalid pass lifetime "${days}" (1 to ${maxPassDays} days)`);
+  }
+  const expires = Math.floor(now / 1000) + days * 86_400;
+  return `${label}.${expires}.${passSignature(secret, label, expires)}`;
+}
+
+export function verifyPass(token, { secret, revoked = new Set(), now = Date.now() } = {}) {
+  const parts = String(token ?? "").split(".");
+  if (!secret || parts.length !== 3) return { ok: false, reason: "malformed" };
+  const [label, expires, signature] = parts;
+  if (!passLabelPattern.test(label) || !/^\d{1,12}$/.test(expires)) return { ok: false, reason: "malformed" };
+  const expected = Buffer.from(passSignature(secret, label, expires));
+  const given = Buffer.from(signature);
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) {
+    return { ok: false, reason: "bad-signature" };
+  }
+  if (Number(expires) * 1000 <= now) return { ok: false, reason: "expired" };
+  if (revoked.has(label)) return { ok: false, reason: "revoked" };
+  return { ok: true, label, expiresAt: Number(expires) * 1000 };
+}
+
+const parsePassRevoked = (value) => new Set(
+  String(value ?? "").split(/[\s,;]+/).filter(Boolean).map((label) => label.toLowerCase())
+);
+
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char]
 ));
 
-/// 中英文同时给:拒绝页面面对的是还没通过校验的访客,没法按账号偏好选语言。
+/// 中英文同时给:这些页面面对的是还没通过校验的访客,没法按账号偏好选语言。
 /// 页面不带脚本、不引外部资源,服务被拦的时候它自己也能完整显示。
-function noticePage({ address, hint }) {
+function pageShell(main) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -128,14 +175,24 @@ p { margin: 0 0 10px; overflow-wrap: anywhere; }
 </head>
 <body>
 <main>
-<h1>🔒 ${escapeHtml(translate("zh", vpnPromptKey))}<small>${escapeHtml(translate("en", vpnPromptKey))}</small></h1>
-<p>${escapeHtml(translate("zh", deniedKey))}</p>
-<p class="en">${escapeHtml(translate("en", deniedKey))}</p>
-${hint ? `<p class="hint">${escapeHtml(hint)}</p>\n` : ""}<p class="ip">IP: ${escapeHtml(address ?? "?")}</p>
+${main}
 </main>
 </body>
 </html>
 `;
+}
+
+function noticePage({ address, hint }) {
+  return pageShell(`<h1>🔒 ${escapeHtml(translate("zh", vpnPromptKey))}<small>${escapeHtml(translate("en", vpnPromptKey))}</small></h1>
+<p>${escapeHtml(translate("zh", deniedKey))}</p>
+<p class="en">${escapeHtml(translate("en", deniedKey))}</p>
+${hint ? `<p class="hint">${escapeHtml(hint)}</p>\n` : ""}<p class="ip">IP: ${escapeHtml(address ?? "?")}</p>`);
+}
+
+function passRejectedPage() {
+  return pageShell(`<h1>🔑 ${escapeHtml(translate("zh", passRejectedKey))}<small>${escapeHtml(translate("en", passRejectedKey))}</small></h1>
+<p>${escapeHtml(translate("zh", passRejectedHintKey))}</p>
+<p class="en">${escapeHtml(translate("en", passRejectedHintKey))}</p>`);
 }
 
 const identityOf = (req) => {
@@ -174,11 +231,36 @@ export function createNetworkPolicy(config = {}) {
   const log = config.log ?? ((line) => console.log(line));
   const rate = parseRateLimit(pick("rateLimit", "GROUP_RELAY_RATE_LIMIT"));
   const limiter = rate ? createRateLimiter(rate, clock) : null;
+  const passSecret = String(pick("passSecret", "GROUP_RELAY_PASS_SECRET") ?? "");
+  if (passSecret && passSecret.length < 32) {
+    throw new Error("GROUP_RELAY_PASS_SECRET must be at least 32 characters");
+  }
+  const passRevoked = parsePassRevoked(pick("passRevoked", "GROUP_RELAY_PASS_REVOKED"));
 
   const held = new Set();
   const seen = new Set();
   let logBudget = 0;
   let budgetResetAt = 0;
+
+  /// 每分钟最多 60 行:地址、身份、通行证尝试都由访客决定,被人刷也不能把日志灌满。
+  function emit(line) {
+    const now = clock();
+    if (now >= budgetResetAt) {
+      logBudget = 60;
+      budgetResetAt = now + 60_000;
+    }
+    if (logBudget <= 0) return;
+    logBudget -= 1;
+    log(line);
+  }
+
+  function passFrom(req) {
+    if (!passSecret) return null;
+    const cookie = /(?:^|;\s*)gr_pass=([^;\s]+)/.exec(req.headers.cookie ?? "");
+    if (!cookie) return null;
+    const result = verifyPass(cookie[1], { secret: passSecret, revoked: passRevoked, now: clock() });
+    return result.ok ? result : null;
+  }
 
   /// 回环对端 + CF-Connecting-IP = 隧道转来的外部请求;回环对端 + 无任何代理痕迹 = 本机;
   /// 回环对端 + 有代理痕迹却没有 CF-Connecting-IP = 认不出来源(见文件头)。
@@ -204,8 +286,10 @@ export function createNetworkPolicy(config = {}) {
       : { via: "local", address: normalizeAddress(peerAddress), country: null };
   }
 
-  function evaluate(connection) {
+  function evaluate(connection, req) {
     if (connection.via === "local") return { allowed: true, reason: "local" };
+    const pass = req ? passFrom(req) : null;
+    if (pass) return { allowed: true, reason: "pass", label: pass.label };
     if (!hasRules) return { allowed: true, reason: "no-rules" };
     if (connection.via === "unverified") return { allowed: false, reason: "unverified-proxy" };
     const family = connection.address && net.isIPv6(connection.address) ? "ipv6" : "ipv4";
@@ -224,18 +308,36 @@ export function createNetworkPolicy(config = {}) {
     if (seen.has(key)) return;
     seen.add(key);
     if (seen.size > 5_000) seen.delete(seen.values().next().value);
-    const now = clock();
-    if (now >= budgetResetAt) {
-      logBudget = 60;
-      budgetResetAt = now + 60_000;
-    }
-    if (logBudget <= 0) return;
-    logBudget -= 1;
     const outcome = verdict.allowed ? "allow" : mode === "enforce" ? "deny" : "would-deny";
-    log(
+    emit(
       `[network] first-seen ip=${connection.address ?? "-"} country=${connection.country ?? "-"} `
       + `via=${connection.via} identity=${identity} verdict=${outcome} reason=${verdict.reason}`
+      + (verdict.label ? ` pass=${verdict.label}` : "")
     );
+  }
+
+  /// 兑换通行证:校验通过就种一个 HttpOnly cookie 再跳回页面。链接放在 /api/ 下是有意的 ——
+  /// Service Worker 对所有导航请求都回缓存里的页面外壳,唯独放过 /api/ 开头的路径,
+  /// 而被拦的人手里恰恰是旧版 SW(新版 SW 文件本身也被拦着,更新不进来)。
+  function redeemPass(req, res, token, connection) {
+    const result = verifyPass(token, { secret: passSecret, revoked: passRevoked, now: clock() });
+    res.set("Cache-Control", "no-store");
+    if (!result.ok) {
+      emit(`[network] pass-rejected reason=${result.reason} ip=${connection.address ?? "-"}`);
+      res.status(403).type("html").send(passRejectedPage());
+      return;
+    }
+    const maxAge = Math.min(Math.floor((result.expiresAt - clock()) / 1000), 400 * 86_400);
+    const secure = req.get("x-forwarded-proto") === "https" || /"https"/.test(req.get("cf-visitor") ?? "");
+    res.append(
+      "Set-Cookie",
+      `${passCookieName}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`
+    );
+    emit(
+      `[network] pass-redeemed pass=${result.label} ip=${connection.address ?? "-"} `
+      + `country=${connection.country ?? "-"} identity=${identityOf(req)}`
+    );
+    res.redirect(302, "/app");
   }
 
   const localized = (req, key) => translate(localeFromAcceptLanguage(req.get("accept-language")) ?? "zh", key);
@@ -278,14 +380,16 @@ export function createNetworkPolicy(config = {}) {
     if (limiter && connection.via !== "local" && !isHealth) {
       const limited = limiter.hit(connection.address ?? connection.via);
       if (limited) {
-        if (limited.first) log(`[network] rate-limited ip=${connection.address ?? "-"} via=${connection.via}`);
+        if (limited.first) emit(`[network] rate-limited ip=${connection.address ?? "-"} via=${connection.via}`);
         res.status(429).set({ "Retry-After": String(limited.retryAfter), "Cache-Control": "no-store" })
           .json({ error: localized(req, rateLimitedKey), code: "rate_limited" });
         return;
       }
     }
     if (mode === "off") return next();
-    const verdict = evaluate(connection);
+    const redeem = passSecret && req.method === "GET" ? /^\/api\/pass\/([A-Za-z0-9._-]{1,200})$/.exec(req.path) : null;
+    if (redeem) return redeemPass(req, res, redeem[1], connection);
+    const verdict = evaluate(connection, req);
     if (connection.via !== "local") noteFirstSeen(req, connection, verdict);
     if (verdict.allowed || mode === "report" || isHealth) return next();
     deny(req, res, connection);

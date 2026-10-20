@@ -225,6 +225,8 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 | `GROUP_RELAY_NETWORK_HINT` | 空 | 追加在拒绝提示后面的一句话，比如告诉访客该怎么办 |
 | `GROUP_RELAY_NETWORK_DENY_HOLD_MS` | `25000` | 被拦的长轮询拖这么久再回 403，避免客户端失败后飞快重试 |
 | `GROUP_RELAY_RATE_LIMIT` | 关 | 每个来源地址限流，写成 `请求数/秒数`，例如 `600/10` |
+| `GROUP_RELAY_PASS_SECRET` | 空 | 通行证的签名密钥，至少 32 个字符；不设则通行证功能关闭 |
+| `GROUP_RELAY_PASS_REVOKED` | 空 | 被吊销的通行证标签，逗号分隔 |
 | `GROUP_RELAY_RESTRICT_DIRS` | 关 | 本机 agent 只能访问 `GROUP_RELAY_ALLOWED_DIRS` 里的目录 |
 | `GROUP_RELAY_ALLOWED_DIRS` | 空 | 允许访问的目录清单，按操作系统的路径分隔符分隔（Mac/Linux `:`，Windows `;`） |
 | `GROUP_RELAY_NO_DIR_LISTING` | 关 | 禁止把目录当文件发出（不提供目录结构） |
@@ -270,6 +272,23 @@ bash bin/zero-downtime-restart.sh          # 起备用 → 重启主 → 停备�
 还是会被拦。`GROUP_RELAY_NETWORK_HINT` 用来补一句「连上仍被拦怎么办」（比如把页面上的 IP 发给
 管理员）。如果某个 VPN 网关是全隧道、出口是公司统一的地址，让用户连上后访问一次，从 `first-seen`
 日志里读出那个出口地址，加进 `GROUP_RELAY_ALLOWED_CIDRS`，「连上 VPN 就能进」才真的成立。
+
+**通行证。** 家宽/移动网络的 IPv4 每天都在变，按地址加白名单追不上；按邮箱认人又等于没有校验
+（邮箱谁都能填，猜到就能进）。所以给需要的人发一条通行链接：
+
+```text
+GROUP_RELAY_PASS_SECRET=… node bin/issue-pass.js --label alice --days 90 --base https://relay.example.com
+```
+
+她用平时的浏览器点开一次，服务端校验签名后给这个浏览器种一个 HttpOnly cookie（`gr_pass`），
+之后不论来自哪个地址都放行，日志里记作 `reason=pass pass=alice`。
+
+- 链接就是凭证，只发给本人。没有 cookie 的别人照拦；同一个人换了浏览器或清了 cookie，再点一次链接即可。
+- 服务端不存任何东西：凭证 = 「标签.过期时间.HMAC 签名」。吊销一个人：把标签写进 `GROUP_RELAY_PASS_REVOKED`
+  再重启，已经发出去的 cookie 立刻失效；全部作废：换 `GROUP_RELAY_PASS_SECRET`。
+- 链接放在 `/api/pass/…` 下是有意的：Service Worker 对所有页面导航都回缓存的外壳，只放过 `/api/` 开头的路径，
+  而被拦的人手里恰好是更新不进来的旧版 SW。
+- 只管浏览器（包括桌面客户端里的网页部分）；桌面客户端后台的 AI 助手不带这个 cookie。
 
 ```text
 # 先观察，一两天后看日志里都有哪些国家和地址

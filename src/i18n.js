@@ -21,6 +21,8 @@ const dictionaries = {
     "这个服务只对内部成员开放，当前网络不在允许范围内。":
       "This service is open to internal members only, and your network is not on the allow list.",
     "请先连接公司 VPN 后重试": "Connect to the company VPN and try again",
+    "通行证无效或已过期": "This pass is invalid or has expired",
+    "请让管理员重新发一条通行链接。": "Ask the admin for a new pass link.",
     "请求过于频繁，请稍后再试。": "Too many requests. Please try again shortly.",
     "它的主人": "its owner",
     "没有接到这条任务（已过 {0} 分钟）。多半是执行端没在运行：客户端已退出、机器休眠，或本机 CLI 的登录/额度失效。请重发一次，或让 {1} 检查那台机器。":
