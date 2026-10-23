@@ -4181,7 +4181,9 @@ test("moved sends each old page to its place in RMP through a VPN-aware intersti
   assert.match(html, /var probeUrl = "https:\/\/rmp\.test\/favicon\.ico"/);
   assert.match(html, /mode: "no-cors"/);
   assert.match(html, /controller\.abort\(\); \}, 2500\)/);
-  assert.match(html, /location\.replace\(target\)/);
+  assert.match(html, /location\.replace\(destination\(\)\)/);
+  assert.match(html, /var loginUrl = "https:\/\/api\.test\/rmp-backend\/login\/bypass"/);
+  assert.match(html, /var emailDomains = \[\]/);
   // 不引任何外部资源:被拦或连不上 RMP 时它自己也得完整显示
   assert.doesNotMatch(html, /<(?:script|img|link|iframe|style)\b[^>]*\b(?:src|href)=/i);
 
@@ -4191,10 +4193,44 @@ test("moved sends each old page to its place in RMP through a VPN-aware intersti
   assert.match(css.headers.get("content-type"), /text\/css/);
 
   // 日志只有条数和原因,没有邀请 token 或新链接(它们是凭证)
-  assert.ok(lines.some((line) => /1 invite link\(s\) and 1 group\(s\) mapped/.test(line)), lines.join("\n"));
+  assert.ok(lines.some((line) => /1 invite link\(s\), 1 group\(s\) and 0 AI reconnect link\(s\) mapped/.test(line)), lines.join("\n"));
   assert.ok(lines.some((line) => /GROUP_RELAY_MOVED_INVITES: skipped 2 entries/.test(line)));
   assert.ok(lines.some((line) => /GROUP_RELAY_MOVED_GROUPS: skipped 1 value/.test(line)));
   assert.equal(lines.some((line) => line.includes(mappedInvite) || line.includes("fresh-invite")), false);
+});
+
+test("moved hands each migrated AI its own RMP reconnect link, others get the general notice", async (t) => {
+  const linksDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-ai-links-"));
+  t.after(() => fs.rm(linksDir, { recursive: true, force: true }));
+  const movedAiLinks = path.join(linksDir, "moved-ai-links.json");
+  await fs.writeFile(movedAiLinks, JSON.stringify({
+    "Zoe@Example.com:claude": "https://api.test/rmp-backend/api/v1/collab/links/ABCDEF123456",
+    "bad-entry": "https://api.test/x",
+    "zoe@example.com:codex": "not a link"
+  }));
+  const { base, lines } = await movedFixture(t, { movedAiLinks });
+  const asAi = (email, provider) => ({ "X-Relay-Email": email, "X-Relay-Provider": provider, "User-Agent": "node" });
+
+  const own = await fetch(`${base}/api/worker/wait`, { headers: asAi("zoe@example.com", "claude") });
+  assert.equal(own.status, 410);
+  const ownBody = await own.json();
+  assert.match(ownBody.error, /你的专属接入链接（只能用一次，几天内有效）：https:\/\/api\.test\/rmp-backend\/api\/v1\/collab\/links\/ABCDEF123456/);
+  assert.match(ownBody.error, /POST https:\/\/api\.test\/rmp-backend\/api\/v1\/collab\/links\/ABCDEF123456\/exchange/);
+  assert.match(ownBody.error, /"provider":"claude"/);
+  assert.equal(ownBody.aiMessage, ownBody.error.split("\n").slice(0, -1).join("\n").length ? ownBody.aiMessage : ownBody.aiMessage);
+  assert.match(ownBody.aiMessage, /ABCDEF123456/);
+
+  const text = await fetch(`${base}/api/worker/wait?format=text`, { headers: asAi("zoe@example.com", "claude") });
+  assert.match(await text.text(), /ABCDEF123456/);
+
+  for (const [email, provider] of [["zoe@example.com", "codex"], ["someone@example.com", "claude"]]) {
+    const other = await (await fetch(`${base}/api/worker/wait`, { headers: asAi(email, provider) })).json();
+    assert.doesNotMatch(other.error, /ABCDEF123456/);
+    assert.match(other.error, /点「重新连接」/);
+  }
+  assert.ok(lines.some((line) => /1 AI reconnect link\(s\) mapped/.test(line)), lines.join("\n"));
+  assert.ok(lines.some((line) => /gave the RMP reconnect link to zoe@example\.com:claude/.test(line)));
+  assert.equal(lines.some((line) => line.includes("ABCDEF123456")), false);
 });
 
 test("moved still starts when a mapping file is missing or malformed, and falls back to the chat list", async (t) => {

@@ -119,6 +119,22 @@ export function loadInviteMap(file, web, warn = () => {}) {
 }
 
 /// 已经迁过去的群 id。RMP 里群的 key 就是原来的群 id,不在名单里的群落到群聊列表。
+/// {"email:provider": RMP 重新连接链接};键统一小写,值必须是 http(s) 链接。
+export function loadAiLinks(file, warn = () => {}) {
+  const raw = readJson(file, "GROUP_RELAY_MOVED_AI_LINKS", warn);
+  const links = new Map();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw) warn("[cutover] GROUP_RELAY_MOVED_AI_LINKS must be a JSON object {\"email:provider\": link}; ignored");
+    return links;
+  }
+  for (const [identity, link] of Object.entries(raw)) {
+    if (typeof link === "string" && /^https?:\/\//.test(link) && identity.includes(":")) {
+      links.set(identity.trim().toLowerCase(), link);
+    }
+  }
+  return links;
+}
+
 export function loadMigratedGroups(file, warn = () => {}) {
   const groups = new Set();
   const raw = readJson(file, "GROUP_RELAY_MOVED_GROUPS", warn);
@@ -153,7 +169,7 @@ const bothInline = (key) => `${escapeHtml(translate("zh", key))} · ${escapeHtml
 /// 连不上时每 5 秒再悄悄探一次,连上 VPN 之后不用点就自己跳过去。
 /// 桌面客户端的窗口里不原地跳:窗口里挂着本机 AI 的原生接口,不能交给别的站点;RMP 的登录在内嵌浏览器里
 /// 也不可靠。给一个按钮在系统浏览器里打开(两个桌面端都把新窗口请求交给系统浏览器)。
-export function interstitialPage({ target, probeUrl }) {
+export function interstitialPage({ target, probeUrl, loginUrl = null, emailDomains = [] }) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -204,6 +220,32 @@ button, .button { display: inline-block; margin-top: 4px; padding: 9px 18px; bor
 (function () {
   var target = ${scriptString(target)};
   var probeUrl = ${scriptString(probeUrl)};
+  var loginUrl = ${scriptString(loginUrl ?? "")};
+  var emailDomains = ${JSON.stringify(emailDomains).replace(/</g, "\\u003c")};
+  // 旧页面在本机存着登录过的邮箱:带着它走 RMP 的邮箱登录,落地就是登录好的对应页面
+  function storedEmail() {
+    var keys = ["relay-account-v1"];
+    try {
+      for (var index = 0; index < localStorage.length; index += 1) {
+        var key = localStorage.key(index);
+        if (key && key.indexOf("relay:") === 0) keys.push(key);
+      }
+      for (var position = 0; position < keys.length; position += 1) {
+        var saved = JSON.parse(localStorage.getItem(keys[position]) || "null");
+        var email = saved && typeof saved.email === "string" ? saved.email.trim().toLowerCase() : "";
+        var domain = email.split("@")[1] || "";
+        if (email && emailDomains.indexOf(domain) >= 0) return email;
+      }
+    } catch (error) { return ""; }
+    return "";
+  }
+  function destination() {
+    var email = loginUrl ? storedEmail() : "";
+    if (!email) return target;
+    var parsed = new URL(target);
+    return loginUrl + "?email=" + encodeURIComponent(email)
+      + "&redirect=" + encodeURIComponent(parsed.pathname + parsed.search);
+  }
   var retryTimer = null;
   function show(id, visible) { document.getElementById(id).hidden = !visible; }
   var desktop = Boolean(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.relayNative)
@@ -236,7 +278,7 @@ button, .button { display: inline-block; margin-top: 4px; padding: 9px 18px; bor
     clearTimeout(retryTimer);
     if (!quiet) { show("checking", true); show("offline", false); }
     Promise.all([reachable(), cleanUp()]).then(function (results) { return results[0]; }).then(function (ok) {
-      if (ok) { location.replace(target); return; }
+      if (ok) { location.replace(destination()); return; }
       show("checking", false);
       show("offline", true);
       retryTimer = setTimeout(function () { attempt(true); }, 5000);
@@ -282,6 +324,9 @@ export function createCutover(config = {}) {
   const api = parseBaseUrl(pick("movedApi", "GROUP_RELAY_MOVED_API"), "GROUP_RELAY_MOVED_API");
   const invitesFile = String(pick("movedInvites", "GROUP_RELAY_MOVED_INVITES") ?? "").trim();
   const groupsFile = String(pick("movedGroups", "GROUP_RELAY_MOVED_GROUPS") ?? "").trim();
+  const aiLinksFile = String(pick("movedAiLinks", "GROUP_RELAY_MOVED_AI_LINKS") ?? "").trim();
+  const emailDomains = String(pick("movedEmailDomains", "GROUP_RELAY_MOVED_EMAIL_DOMAINS") ?? "")
+    .split(",").map((domain) => domain.trim().toLowerCase()).filter(Boolean);
   if (!web && (api || invitesFile || groupsFile)) {
     throw new Error(
       "GROUP_RELAY_MOVED_API, GROUP_RELAY_MOVED_INVITES and GROUP_RELAY_MOVED_GROUPS need GROUP_RELAY_MOVED_WEB; "
@@ -293,6 +338,8 @@ export function createCutover(config = {}) {
   const frozen = freezeRequested && !moved;
   const invites = moved && invitesFile ? loadInviteMap(invitesFile, web, log) : new Map();
   const groups = moved && groupsFile ? loadMigratedGroups(groupsFile, log) : new Set();
+  const aiLinks = moved && aiLinksFile ? loadAiLinks(aiLinksFile, log) : new Map();
+  const loginUrl = moved && api ? `${api}/login/bypass` : null;
 
   const chatUrl = moved ? `${web}/collab/chat` : null;
   const movedTo = moved ? { web, api } : null;
@@ -312,7 +359,7 @@ export function createCutover(config = {}) {
 
   if (moved) {
     log(`[cutover] moved to ${chatUrl}: pages redirect there, /api answers 410; `
-      + `${invites.size} invite link(s) and ${groups.size} group(s) mapped`);
+      + `${invites.size} invite link(s), ${groups.size} group(s) and ${aiLinks.size} AI reconnect link(s) mapped`);
   } else if (frozen) {
     log("[cutover] frozen: writes answer 503, reads still work, AI long polls get no new work");
   }
@@ -334,21 +381,46 @@ export function createCutover(config = {}) {
       + "新邀请要由你的主人连上 VPN、登录 RMP 后在浏览器里打开加入，再由主人在 RMP 里把你接进群。";
   }
 
+  /// 迁过去还没接上的 AI 各有一条专属的重新连接链接(主会话预先在 RMP 里按主人生成,一次性、几天内有效)。
+  /// 按请求里的 email + provider 找到它自己的那条,让它不用等主人就能接回 RMP。
+  function aiIdentity(req) {
+    const email = String(req.get("x-relay-email") ?? req.query?.email ?? "").trim().toLowerCase();
+    const provider = String(req.get("x-relay-provider") ?? req.query?.provider ?? "").trim().toLowerCase();
+    return email && provider ? `${email}:${provider}` : null;
+  }
+
+  function personalAiMessage(req) {
+    const identity = aiIdentity(req);
+    const link = identity ? aiLinks.get(identity) : null;
+    if (!link) return null;
+    log(`[cutover] gave the RMP reconnect link to ${identity}`);
+    return [
+      "Group Relay 已经迁移到 RMP（风控管理平台）的「AI 协作」，这台旧服务器不再收发消息。RMP 只能在公司 VPN 内访问。",
+      "你已经被迁过去了，所在的群和身份都保留，现在就可以自己接回去，不用等主人：",
+      `你的专属接入链接（只能用一次，几天内有效）：${link}`,
+      "1. 用 GET 打开这个链接，它会返回纯文本的接入说明，照着做；",
+      `2. 不用 MCP 也可以：POST ${link}/exchange，body {"clientInfo":"<你的客户端名>","provider":"${identity.split(":").pop()}"}，`
+      + "拿到令牌后按说明调 worker 接口（心跳、领任务、回复、追加、完成）。",
+      "接上以后照常接收和回答群里 @ 你的问题。不要再重试这台旧服务器。"
+    ].join("\n");
+  }
+
   /// error 是一整句话:老客户端(编译好的桌面端、各人电脑上没升级的 worker 和 MCP)只认这个字段,
   /// 原样显示或交给 AI,所以「去哪、怎么迁」必须写在里面;机器判断看 code。
   function movedBody(req) {
+    const forAi = isAiClient(req) ? (personalAiMessage(req) ?? aiMessage) : null;
     return {
-      error: isAiClient(req) ? `${aiMessage}\n${legacyStopNotice}` : translate(locale(req), movedKey, [chatUrl]),
+      error: forAi ? `${forAi}\n${legacyStopNotice}` : translate(locale(req), movedKey, [chatUrl]),
       code: "moved",
       movedTo,
       message: { zh: translate("zh", movedKey, [chatUrl]), en: translate("en", movedKey, [chatUrl]) },
-      aiMessage
+      aiMessage: forAi ?? aiMessage
     };
   }
 
   function sendMoved(req, res, { text = prefersText(req) } = {}) {
     res.status(410).set("Cache-Control", "no-store");
-    if (text) res.type("text/plain; charset=utf-8").send(`${aiMessage}${joinNote(req.path)}\n`);
+    if (text) res.type("text/plain; charset=utf-8").send(`${personalAiMessage(req) ?? aiMessage}${joinNote(req.path)}\n`);
     else res.json(movedBody(req));
   }
 
@@ -394,7 +466,7 @@ export function createCutover(config = {}) {
     const navigates = req.get("sec-fetch-mode") === "navigate" || (req.get("accept") ?? "").includes("text/html");
     if (!isPage && !(navigates && !agentUserAgents.test(req.get("user-agent") ?? ""))) return next();
     res.status(200).set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" })
-      .type("html").send(interstitialPage({ target: targetFor(pathname), probeUrl }));
+      .type("html").send(interstitialPage({ target: targetFor(pathname), probeUrl, loginUrl, emailDomains }));
   }
 
   function middleware(req, res, next) {
