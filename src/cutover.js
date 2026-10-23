@@ -31,9 +31,15 @@ const pageRoutes = /^\/(?:|app|index\.html|(?:group|join|transfer|web-login)\/[^
 /// 给 AI 的文字说明变成一张网页。这些 UA 都不是浏览器,浏览器的 UA 里不会出现它们。
 export const agentUserAgents = /claude|codex|cursor|curl|wget|python-requests|httpx|node-fetch|undici|go-http-client|okhttp|axios/i;
 
+/// 真浏览器打开网页时带 Sec-Fetch-Mode: navigate;嵌在 Claude、Cursor 等应用里的浏览器 UA 也带这些词,
+/// 不能只看 UA,否则人会看到给 AI 的纯文本。
+export const isBrowserNavigation = (req) => req.get("sec-fetch-mode") === "navigate"
+  && (req.get("accept") ?? "").includes("text/html");
+
 export const wantsAgentText = (req) => {
   if (req.query.format === "text") return true;
   if (req.query.format === "html") return false;
+  if (isBrowserNavigation(req)) return false;
   if (agentUserAgents.test(req.get("user-agent") ?? "")) return true;
   return !(req.get("accept") ?? "").includes("text/html");
 };
@@ -464,7 +470,8 @@ export function createCutover(config = {}) {
     const isPage = pageRoutes.test(pathname);
     if (isPage && wantsAgentText(req)) return sendMoved(req, res, { text: true });
     const navigates = req.get("sec-fetch-mode") === "navigate" || (req.get("accept") ?? "").includes("text/html");
-    if (!isPage && !(navigates && !agentUserAgents.test(req.get("user-agent") ?? ""))) return next();
+    const person = isBrowserNavigation(req) || !agentUserAgents.test(req.get("user-agent") ?? "");
+    if (!isPage && !(navigates && person)) return next();
     res.status(200).set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" })
       .type("html").send(interstitialPage({ target: targetFor(pathname), probeUrl, loginUrl, emailDomains }));
   }

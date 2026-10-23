@@ -4233,6 +4233,29 @@ test("moved hands each migrated AI its own RMP reconnect link, others get the ge
   assert.equal(lines.some((line) => line.includes("ABCDEF123456")), false);
 });
 
+test("moved treats browsers embedded in Claude or Cursor as people, not AI fetchers", async (t) => {
+  const { base } = await movedFixture(t);
+  const embedded = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/3.1623.1 Chrome/152.0.7977.167 Safari/537.36";
+  const navigation = { "User-Agent": embedded, Accept: "text/html,application/xhtml+xml", "Sec-Fetch-Mode": "navigate" };
+  // fetch 不让设 Sec-Fetch-*,用 http.get 原样发出浏览器的导航头
+  const { get } = await import("node:http");
+  const navigate = (pathname) => new Promise((resolve, reject) => {
+    get(`${base}${pathname}`, { headers: navigation }, (response) => {
+      response.resume();
+      response.on("end", () => resolve({ status: response.statusCode, type: response.headers["content-type"] }));
+    }).on("error", reject);
+  });
+  for (const pathname of ["/", `/group/${migratedGroup}`, "/an/old/bookmark"]) {
+    const page = await navigate(pathname);
+    assert.equal(page.status, 200, pathname);
+    assert.match(page.type, /text\/html/, pathname);
+  }
+  // 同样的 UA 不带浏览器导航头(抓取工具)仍然拿给 AI 的纯文本
+  const fetcher = await fetch(`${base}/`, { headers: { "User-Agent": embedded, Accept: "text/plain" } });
+  assert.equal(fetcher.status, 410);
+  assert.match(fetcher.headers.get("content-type"), /text\/plain/);
+});
+
 test("moved still starts when a mapping file is missing or malformed, and falls back to the chat list", async (t) => {
   const missing = await movedFixture(t, {
     movedInvites: path.join(os.tmpdir(), "group-relay-no-such-dir", "moved-invites.json"),
