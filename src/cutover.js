@@ -225,7 +225,6 @@ button, .button { display: inline-block; margin-top: 4px; padding: 9px 18px; bor
 <script>
 (function () {
   var target = ${scriptString(target)};
-  var probeUrl = ${scriptString(probeUrl)};
   var loginUrl = ${scriptString(loginUrl ?? "")};
   var emailDomains = ${JSON.stringify(emailDomains).replace(/</g, "\\u003c")};
   // 旧页面在本机存着登录过的邮箱:带着它走 RMP 的邮箱登录,落地就是登录好的对应页面
@@ -262,14 +261,6 @@ button, .button { display: inline-block; margin-top: 4px; padding: 9px 18px; bor
     show("desktop", true);
     return;
   }
-  function reachable() {
-    var controller = new AbortController();
-    var timeout = setTimeout(function () { controller.abort(); }, 2500);
-    return fetch(probeUrl + "?probe=" + Date.now(), {
-      mode: "no-cors", cache: "no-store", credentials: "omit", signal: controller.signal
-    }).then(function () { return true; }, function () { return false; })
-      .then(function (ok) { clearTimeout(timeout); return ok; });
-  }
   // 旧版 Service Worker 和它的页面外壳缓存在这个旧域名下已经没用了,每次经过这里都顺手清一遍
   function cleanUp() {
     var workers = navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then(function (list) {
@@ -280,18 +271,18 @@ button, .button { display: inline-block; margin-top: 4px; padding: 9px 18px; bor
     }) : null;
     return Promise.all([workers, shells]).catch(function () {});
   }
-  function attempt(quiet) {
+  // 公网页面里的脚本探测不了内网地址(浏览器的本地网络访问限制),整页跳转不受限:直接跳。
+  // 连不上 VPN 时浏览器会停在错误页;还停在这页说明跳转没走成,几秒后亮出 VPN 提示和手动入口。
+  function attempt() {
     clearTimeout(retryTimer);
-    if (!quiet) { show("checking", true); show("offline", false); }
-    Promise.all([reachable(), cleanUp()]).then(function (results) { return results[0]; }).then(function (ok) {
-      if (ok) { location.replace(destination()); return; }
-      show("checking", false);
-      show("offline", true);
-      retryTimer = setTimeout(function () { attempt(true); }, 5000);
-    });
+    var next = destination();
+    document.getElementById("target").href = next;
+    var settled = Promise.race([cleanUp(), new Promise(function (resolve) { setTimeout(resolve, 400); })]);
+    settled.then(function () { location.replace(next); });
+    retryTimer = setTimeout(function () { show("checking", false); show("offline", true); }, 4000);
   }
-  document.getElementById("retry").addEventListener("click", function () { attempt(false); });
-  attempt(false);
+  document.getElementById("retry").addEventListener("click", function () { attempt(); });
+  attempt();
 })();
 </script>
 </body>

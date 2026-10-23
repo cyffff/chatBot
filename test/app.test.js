@@ -4178,10 +4178,9 @@ test("moved sends each old page to its place in RMP through a VPN-aware intersti
   assert.match(html, /群聊已迁到 RMP。RMP 只能在公司 VPN 内访问，请先连接 VPN/);
   assert.match(html, /connect to the VPN first/);
   assert.match(html, /重试 · Retry/);
-  assert.match(html, /var probeUrl = "https:\/\/rmp\.test\/favicon\.ico"/);
-  assert.match(html, /mode: "no-cors"/);
-  assert.match(html, /controller\.abort\(\); \}, 2500\)/);
-  assert.match(html, /location\.replace\(destination\(\)\)/);
+  assert.match(html, /var next = destination\(\);/);
+  assert.match(html, /location\.replace\(next\)/);
+  assert.doesNotMatch(html, /no-cors/);
   assert.match(html, /var loginUrl = "https:\/\/api\.test\/rmp-backend\/login\/bypass"/);
   assert.match(html, /var emailDomains = \[\]/);
   // 不引任何外部资源:被拦或连不上 RMP 时它自己也得完整显示
