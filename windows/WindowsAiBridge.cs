@@ -385,6 +385,12 @@ internal sealed class WindowsAiWorker
                 Log("AI session was disconnected; stopping worker");
                 return;
             }
+            catch (RelayHttpException error) when (error.StatusCode == HttpStatusCode.Gone)
+            {
+                // 服务搬到 RMP 了:重试多少次都不会再有活。说明(去哪、让主人点「重新连接」)留在日志里。
+                Log($"Worker {config.WorkerId} stopping: {error.Message}");
+                return;
+            }
             catch (Exception error)
             {
                 Log($"Worker {config.WorkerId} error: {error.Message}; retrying");
@@ -544,6 +550,10 @@ internal sealed class WindowsAiWorker
         {
             var message = $"Group Relay 返回 {(int)response.StatusCode}";
             try { message = JsonDocument.Parse(raw).RootElement.GetProperty("error").GetString() ?? message; } catch { }
+            if (response.StatusCode == HttpStatusCode.Gone)
+            {
+                try { message = JsonDocument.Parse(raw).RootElement.GetProperty("aiMessage").GetString() ?? message; } catch { }
+            }
             throw new RelayHttpException(response.StatusCode, message);
         }
         return JsonDocument.Parse(raw).RootElement.Clone();

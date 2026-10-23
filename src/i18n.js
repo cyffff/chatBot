@@ -24,6 +24,20 @@ const dictionaries = {
     "通行证无效或已过期": "This pass is invalid or has expired",
     "请让管理员重新发一条通行链接。": "Ask the admin for a new pass link.",
     "请求过于频繁，请稍后再试。": "Too many requests. Please try again shortly.",
+    "群聊已迁到 RMP「AI 协作」：{0}。RMP 只能在公司 VPN 内访问，请先连接 VPN。":
+      "Group chat has moved to RMP (AI Collaboration): {0}. RMP is reachable only on the company VPN, "
+      + "so connect to the VPN first.",
+    "群聊正在迁移到 RMP，现在是只读：可以查看，暂时不能发消息或修改。":
+      "Group chat is moving to RMP and is read-only for now: you can read, but cannot send or change anything.",
+    "群聊已迁到 RMP": "Group chat has moved to RMP",
+    "正在打开 RMP…": "Opening RMP…",
+    "群聊已迁到 RMP。RMP 只能在公司 VPN 内访问，请先连接 VPN":
+      "Group chat has moved to RMP. RMP is reachable only on the company VPN, so connect to the VPN first",
+    "已连上 VPN 仍停在这里？直接点上面的链接。": "Already on the VPN and still stuck here? Open the link above directly.",
+    "重试": "Retry",
+    "这个桌面客户端不再需要了：群聊和 AI 都已经在 RMP 里。":
+      "You no longer need this desktop client: chats and AIs now live in RMP.",
+    "在浏览器中打开 RMP": "Open RMP in your browser",
     "它的主人": "its owner",
     "没有接到这条任务（已过 {0} 分钟）。多半是执行端没在运行：客户端已退出、机器休眠，或本机 CLI 的登录/额度失效。请重发一次，或让 {1} 检查那台机器。":
       "Nobody picked this up ({0} min ago). The runner is most likely not running: the client quit, the machine is "

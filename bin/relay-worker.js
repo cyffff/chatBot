@@ -69,10 +69,12 @@ async function relayRequest(config, pathname, options = {}) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const error = new Error(payload.error || `Relay returned ${response.status}`);
+        const error = new Error(
+          (payload.code === "moved" && payload.aiMessage) || payload.error || `Relay returned ${response.status}`
+        );
         error.code = payload.code;
-        // 4xx 重试一万次也不会变(不在群里了、身份失效),直接往上抛。
-        if (response.status < 500) throw error;
+        // 4xx 重试一万次也不会变(不在群里了、身份失效),直接往上抛。迁移冻结的 503 也一样。
+        if (response.status < 500 || payload.code === "frozen") throw error;
         lastError = error;
         continue;
       }
@@ -701,7 +703,9 @@ export async function runWorker({
       const membershipGone = reason === "invalid member token"
         || reason.includes("not a member of this group")
         || reason.includes("group not found");
-      if (membershipGone) {
+      // 服务搬到 RMP 了(410 + code=moved):这里永远不会再有活,停下并让注册表别再拉起它。
+      // reason 就是服务端给 AI 的那段话(去哪、让主人点「重新连接」),原样留在日志里。
+      if (membershipGone || error?.code === "moved") {
         log(`Worker ${config.sessionId ?? config.groupId} stopping: ${reason}`);
         await onMembershipGone?.(reason);
         return { handled, stopped: reason };

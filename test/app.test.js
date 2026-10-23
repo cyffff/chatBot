@@ -20,6 +20,7 @@ import {
   parseRateLimit,
   verifyPass
 } from "../src/network-policy.js";
+import { createCutover, parseBaseUrl, parseFlag } from "../src/cutover.js";
 import { markdownTableDefinition, splitMarkdownTableRow } from "../public/markdown.js";
 
 const execFileAsync = promisify(execFile);
@@ -68,7 +69,7 @@ async function execFileWithInput(file, args, input, options = {}) {
 
 async function fixture(t, options = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-"));
-  const { network, ...rest } = options;
+  const { network, cutover, ...rest } = options;
   const { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer, drainClients } = await createApp({
     dataDir,
     publicBaseUrl: "http://relay.test",
@@ -77,6 +78,8 @@ async function fixture(t, options = {}) {
     quietHoursEnabled: false,
     // 访问防火墙同理默认关,并且不读环境变量:开发者 shell 里碰巧设了 GROUP_RELAY_* 不该让测试变红。
     network: { env: {}, mode: "off", rateLimit: false, ...network },
+    // 搬迁开关同理:不读环境变量,默认两个都关。
+    cutover: { env: {}, log: () => {}, ...cutover },
     ...rest
   });
   const server = app.listen(0);
@@ -3973,6 +3976,474 @@ test("network pass is ignored when no secret is configured", async (t) => {
   // 没配密钥时兑换路径根本不存在,走普通的拦截;带 cookie 也没用
   assert.equal((await fetch(`${base}/api/pass/${forged}`, { headers: outsider })).status, 403);
   assert.equal((await fetch(`${base}/api/account`, { headers: { ...outsider, Cookie: `gr_pass=${forged}` } })).status, 403);
+});
+
+// ---- 搬到 RMP:冻结 / 已搬走两个开关 ----
+
+const browserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15";
+const browsing = { Accept: "text/html,application/xhtml+xml", "User-Agent": browserAgent };
+const migratedGroup = "6f0c1f9e-6b7a-4f43-9d55-3a1b2c3d4e5f";
+const unknownGroup = "0b1c2d3e-4f50-4a61-8b72-93a4b5c6d7e8";
+const mappedInvite = "oldInviteToken_mapped01";
+const foreignInvite = "oldInviteToken_foreign1";
+const rmpChat = "https://rmp.test/collab/chat";
+
+/// 跳转页把目标写在内联脚本里:var target = "<json>";
+const targetOf = async (response) => {
+  const html = await response.text();
+  return JSON.parse(/var target = ("(?:[^"\\]|\\.)*");/.exec(html)[1]);
+};
+
+async function movedFixture(t, cutover = {}) {
+  const mappings = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-moved-"));
+  t.after(() => fs.rm(mappings, { recursive: true, force: true }));
+  const movedInvites = path.join(mappings, "moved-invites.json");
+  const movedGroups = path.join(mappings, "moved-groups.json");
+  await fs.writeFile(movedInvites, JSON.stringify({
+    [mappedInvite]: "https://rmp.test/collab/join/fresh-invite",
+    // 别的环境导出来的:不在 RMP 网页同一个域名下,整条丢掉
+    [foreignInvite]: "https://other-env.test/collab/join/elsewhere",
+    "not a token!": "https://rmp.test/collab/join/whatever"
+  }));
+  await fs.writeFile(movedGroups, JSON.stringify([migratedGroup.toUpperCase(), "not-a-group"]));
+  const lines = [];
+  const context = await fixture(t, {
+    cutover: {
+      movedWeb: "https://rmp.test/",
+      movedApi: "https://api.test/rmp-backend/",
+      movedInvites,
+      movedGroups,
+      log: (line) => lines.push(line),
+      ...cutover
+    }
+  });
+  return { ...context, lines };
+}
+
+test("cutover switches are off by default and change nothing", async (t) => {
+  const { base } = await fixture(t);
+  const health = await json(base, "/health");
+  assert.equal(health.body.ok, true);
+  assert.equal("frozen" in health.body, false);
+  assert.equal("moved" in health.body, false);
+  const created = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Unchanged", email: "owner@example.com", displayName: "Owner" })
+  });
+  assert.equal(created.response.status, 201);
+  const worker = await fetch(`${base}/service-worker.js`);
+  assert.equal(await worker.text(), await fs.readFile("public/service-worker.js", "utf8"));
+  const page = await fetch(`${base}/group/${created.body.group.id}`, { headers: browsing });
+  assert.equal(page.status, 200);
+  assert.equal(await page.text(), await fs.readFile("public/index.html", "utf8"));
+  const invite = await fetch(`${base}/join/${created.body.group.inviteToken}`, { headers: { "User-Agent": "curl/8.7.1" } });
+  assert.equal(invite.status, 200);
+  assert.match(await invite.text(), /^Group Relay — AI 接入说明/);
+
+  // 和访问防火墙一样:没传配置就读环境变量,变量名就是部署时写进 drop-in 的那几个
+  assert.equal(createCutover({ env: {}, log: () => {} }).active, false);
+  assert.equal(createCutover({ env: { GROUP_RELAY_FREEZE: "1" }, log: () => {} }).frozen, true);
+  const fromEnv = createCutover({
+    env: { GROUP_RELAY_MOVED_WEB: "https://rmp.test/", GROUP_RELAY_MOVED_API: "https://api.test/rmp-backend/" },
+    log: () => {}
+  });
+  assert.deepEqual(fromEnv.movedTo, { web: "https://rmp.test", api: "https://api.test/rmp-backend" });
+});
+
+test("cutover settings refuse typos instead of silently doing nothing", () => {
+  assert.equal(parseFlag(undefined), false);
+  assert.equal(parseFlag(" On "), true);
+  assert.equal(parseFlag("0"), false);
+  assert.throws(() => parseFlag("frozen"), /Invalid GROUP_RELAY_FREEZE/);
+  assert.equal(parseBaseUrl("https://rmp.test/base//", "X"), "https://rmp.test/base");
+  assert.equal(parseBaseUrl("  ", "X"), null);
+  assert.throws(() => parseBaseUrl("rmp.test", "GROUP_RELAY_MOVED_WEB"), /Invalid GROUP_RELAY_MOVED_WEB/);
+  assert.throws(() => parseBaseUrl("ftp://rmp.test", "X"), /Invalid X/);
+  assert.throws(() => parseBaseUrl("https://rmp.test/?tab=chat", "X"), /without query/);
+  // 只配了 API 或映射文件却没配网页地址:什么都不会跳,当成配错
+  assert.throws(() => createCutover({ env: { GROUP_RELAY_MOVED_API: "https://api.test" } }), /need GROUP_RELAY_MOVED_WEB/);
+  assert.throws(() => createCutover({ env: { GROUP_RELAY_MOVED_GROUPS: "/tmp/groups.json" } }), /need GROUP_RELAY_MOVED_WEB/);
+});
+
+test("freeze turns writes away with 503, keeps reads and heartbeats, and gives AIs no new work", async (t) => {
+  const live = await fixture(t);
+  const created = await json(live.base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "Moving", email: "owner@example.com", displayName: "Owner" })
+  });
+  const joined = await json(live.base, `/api/invites/${created.body.group.inviteToken}/join`, {
+    method: "POST",
+    body: JSON.stringify({ email: "owner@example.com", name: "Claude", type: "ai", provider: "claude" })
+  });
+  const groupId = created.body.group.id;
+  const owner = asMember(created.body.member.email, created.body.member.provider);
+  const ai = asMember(joined.body.member.email, joined.body.member.provider);
+  const question = new FormData();
+  question.set("text", "@Claude 冻结前提的问题");
+  question.set("mentions", JSON.stringify([joined.body.member.id]));
+  const asked = await fetch(`${live.base}/api/groups/${groupId}/messages`, { method: "POST", headers: owner, body: question });
+  assert.equal(asked.status, 201);
+
+  // 冻结就是带着 GROUP_RELAY_FREEZE=1 重启同一份数据
+  const { base, sweepUnanswered } = await fixture(t, { dataDir: live.dataDir, cutover: { freeze: "1" } });
+
+  const create = await json(base, "/api/groups", {
+    method: "POST",
+    body: JSON.stringify({ name: "New", email: "someone@example.com", displayName: "Someone" })
+  });
+  assert.equal(create.response.status, 503);
+  assert.equal(create.body.code, "frozen");
+  assert.match(create.body.error, /只读/);
+  assert.match(create.body.message.zh, /只读/);
+  assert.match(create.body.message.en, /read-only/);
+  const english = await json(base, `/api/groups/${groupId}`, {
+    method: "DELETE",
+    headers: { ...owner, "Accept-Language": "en-GB,en;q=0.9" }
+  });
+  assert.equal(english.response.status, 503);
+  assert.match(english.body.error, /read-only/);
+  assert.equal((await json(base, "/api/account", {
+    method: "PATCH", headers: owner, body: JSON.stringify({ locale: "en" })
+  })).response.status, 503);
+  // AI 的写:错误文字就是给 AI 的那句(它只看得到 error)
+  const reply = new FormData();
+  reply.set("text", "冻结期间的回复");
+  const aiWrite = await fetch(`${base}/api/groups/${groupId}/messages`, { method: "POST", headers: ai, body: reply });
+  assert.equal(aiWrite.status, 503);
+  const aiBody = await aiWrite.json();
+  assert.equal(aiBody.error, aiBody.aiMessage);
+  assert.match(aiBody.aiMessage, /不要重试写入/);
+
+  // 读照常
+  const group = await json(base, `/api/groups/${groupId}`, { headers: owner });
+  assert.equal(group.response.status, 200);
+  const history = await json(base, `/api/groups/${groupId}/messages`, { headers: owner });
+  assert.deepEqual(history.body.messages.map((message) => message.text), ["@Claude 冻结前提的问题"]);
+  // 心跳只改内存,照常放行(拒掉它,装在各人电脑上的旧 worker 会每两秒重试一次)
+  const heartbeat = await json(base, `/api/groups/${groupId}/members/me/presence`, {
+    method: "POST", headers: ai, body: JSON.stringify({ status: "online", recoverInterrupted: true })
+  });
+  assert.equal(heartbeat.response.status, 200);
+
+  // AI 的长轮询:那条问题还在,但冻结期间不派出去;等满这一轮再空手回,不让 worker 空转
+  const started = Date.now();
+  const waited = await json(base, `/api/groups/${groupId}/messages/wait?routed=1&timeoutMs=1000`, { headers: ai });
+  assert.equal(waited.response.status, 200);
+  assert.deepEqual(waited.body.messages, []);
+  assert.equal(waited.body.cursor, null);
+  assert.ok(Date.now() - started >= 900, "an empty answer should still wait out the poll");
+  // 人的长轮询照常读到积压
+  const human = await json(base, `/api/groups/${groupId}/messages/wait?timeoutMs=1000`, { headers: owner });
+  assert.ok(human.body.messages.some((message) => message.text === "@Claude 冻结前提的问题"));
+
+  // 已经开着的网页靠 /health 知道要显示只读;Service Worker 不动
+  const health = await json(base, "/health");
+  assert.equal(health.body.frozen, true);
+  assert.equal("moved" in health.body, false);
+  assert.equal(await (await fetch(`${base}/service-worker.js`)).text(), await fs.readFile("public/service-worker.js", "utf8"));
+
+  // 看守不往冻住的记录里写兜底消息;同一时刻没冻结的实例是会写的
+  const later = Date.now() + 30 * 60_000;
+  assert.deepEqual(await sweepUnanswered(later), { prompted: 0, nudged: 0, gaveUp: 0 });
+  assert.equal((await live.sweepUnanswered(later)).prompted, 1);
+});
+
+test("moved sends each old page to its place in RMP through a VPN-aware interstitial", async (t) => {
+  const { base, lines } = await movedFixture(t);
+  const cases = [
+    ["/", rmpChat],
+    ["/app", rmpChat],
+    [`/group/${migratedGroup}`, `${rmpChat}/${migratedGroup}`],
+    [`/group/${migratedGroup.toUpperCase()}`, `${rmpChat}/${migratedGroup}`],
+    [`/group/${unknownGroup}`, rmpChat],
+    // query 丢掉:旧邀请链接尾巴上带着分享者的 owner/email
+    [`/join/${mappedInvite}?owner=Owner&email=owner%40example.com`, "https://rmp.test/collab/join/fresh-invite"],
+    [`/join/${foreignInvite}`, rmpChat],
+    ["/join/neverIssuedToken", rmpChat],
+    ["/transfer/someTransfer", rmpChat],
+    ["/web-login/someLogin", rmpChat],
+    ["/an/old/bookmark", rmpChat]
+  ];
+  for (const [pathname, target] of cases) {
+    const response = await fetch(`${base}${pathname}`, { headers: browsing, redirect: "manual" });
+    assert.equal(response.status, 200, pathname);
+    assert.equal(await targetOf(response), target, pathname);
+  }
+
+  const page = await fetch(`${base}/group/${migratedGroup}`, { headers: browsing });
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+  const html = await page.text();
+  assert.match(html, /群聊已迁到 RMP。RMP 只能在公司 VPN 内访问，请先连接 VPN/);
+  assert.match(html, /connect to the VPN first/);
+  assert.match(html, /重试 · Retry/);
+  assert.match(html, /var probeUrl = "https:\/\/rmp\.test\/favicon\.ico"/);
+  assert.match(html, /mode: "no-cors"/);
+  assert.match(html, /controller\.abort\(\); \}, 2500\)/);
+  assert.match(html, /location\.replace\(target\)/);
+  // 不引任何外部资源:被拦或连不上 RMP 时它自己也得完整显示
+  assert.doesNotMatch(html, /<(?:script|img|link|iframe|style)\b[^>]*\b(?:src|href)=/i);
+
+  // 静态资源照常(旧版 Service Worker 后台校验时还会来要)
+  const css = await fetch(`${base}/style.css`, { headers: { Accept: "text/css,*/*;q=0.1", "User-Agent": browserAgent } });
+  assert.equal(css.status, 200);
+  assert.match(css.headers.get("content-type"), /text\/css/);
+
+  // 日志只有条数和原因,没有邀请 token 或新链接(它们是凭证)
+  assert.ok(lines.some((line) => /1 invite link\(s\) and 1 group\(s\) mapped/.test(line)), lines.join("\n"));
+  assert.ok(lines.some((line) => /GROUP_RELAY_MOVED_INVITES: skipped 2 entries/.test(line)));
+  assert.ok(lines.some((line) => /GROUP_RELAY_MOVED_GROUPS: skipped 1 value/.test(line)));
+  assert.equal(lines.some((line) => line.includes(mappedInvite) || line.includes("fresh-invite")), false);
+});
+
+test("moved still starts when a mapping file is missing or malformed, and falls back to the chat list", async (t) => {
+  const missing = await movedFixture(t, {
+    movedInvites: path.join(os.tmpdir(), "group-relay-no-such-dir", "moved-invites.json"),
+    movedGroups: path.join(os.tmpdir(), "group-relay-no-such-dir", "moved-groups.json")
+  });
+  for (const pathname of [`/join/${mappedInvite}`, `/group/${migratedGroup}`]) {
+    assert.equal(await targetOf(await fetch(`${missing.base}${pathname}`, { headers: browsing })), rmpChat);
+  }
+  assert.ok(missing.lines.some((line) => /GROUP_RELAY_MOVED_INVITES not loaded \(ENOENT\)/.test(line)));
+  assert.ok(missing.lines.some((line) => /GROUP_RELAY_MOVED_GROUPS not loaded \(ENOENT\)/.test(line)));
+
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "group-relay-moved-bad-"));
+  t.after(() => fs.rm(scratch, { recursive: true, force: true }));
+  const wrongShape = path.join(scratch, "invites.json");
+  const notJson = path.join(scratch, "groups.json");
+  await fs.writeFile(wrongShape, JSON.stringify([mappedInvite]));
+  await fs.writeFile(notJson, "[\"6f0c1f9e-");
+  const malformed = await movedFixture(t, { movedInvites: wrongShape, movedGroups: notJson });
+  assert.equal(await targetOf(await fetch(`${malformed.base}/join/${mappedInvite}`, { headers: browsing })), rmpChat);
+  assert.equal(await targetOf(await fetch(`${malformed.base}/group/${migratedGroup}`, { headers: browsing })), rmpChat);
+  assert.ok(malformed.lines.some((line) => /must be a JSON object/.test(line)));
+  assert.ok(malformed.lines.some((line) => /GROUP_RELAY_MOVED_GROUPS not loaded \(SyntaxError\)/.test(line)));
+});
+
+test("moved retires the old offline shell: a new service worker that reopens every window", async (t) => {
+  const { base } = await movedFixture(t);
+  const response = await fetch(`${base}/service-worker.js`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /javascript/);
+  assert.match(response.headers.get("cache-control"), /no-cache/);
+  assert.match(response.headers.get("cache-control"), /no-store/);
+  const script = await response.text();
+  // 浏览器只在脚本逐字节变了时才装新版
+  assert.notEqual(script, await fs.readFile("public/service-worker.js", "utf8"));
+
+  // 在一个假的 Service Worker 全局里跑一遍:装上就接管,清缓存,注销自己,再按原地址重开每个窗口
+  const calls = [];
+  const listeners = {};
+  const windows = [
+    { url: "http://relay.test/group/abc?x=1", navigate: async (url) => { calls.push(["navigate", url]); } },
+    {
+      url: "http://relay.test/app",
+      navigate: async () => { throw new TypeError("not controlled"); },
+      postMessage: (message) => calls.push(["postMessage", message.type])
+    }
+  ];
+  const workerGlobal = {
+    addEventListener: (type, listener) => { listeners[type] = listener; },
+    skipWaiting: () => calls.push(["skipWaiting"]),
+    clients: {
+      claim: async () => calls.push(["claim"]),
+      matchAll: async (options) => {
+        calls.push(["matchAll", options.type, options.includeUncontrolled]);
+        return windows;
+      }
+    },
+    registration: { unregister: async () => calls.push(["unregister"]) }
+  };
+  const cacheStorage = {
+    keys: async () => ["group-relay-shell-v47"],
+    delete: async (key) => calls.push(["delete", key])
+  };
+  new Function("self", "caches", script)(workerGlobal, cacheStorage);
+  listeners.install({});
+  let activated;
+  listeners.activate({ waitUntil: (promise) => { activated = promise; } });
+  await activated;
+  assert.deepEqual(calls, [
+    ["skipWaiting"],
+    ["claim"],
+    ["delete", "group-relay-shell-v47"],
+    ["unregister"],
+    ["matchAll", "window", true],
+    ["navigate", "http://relay.test/group/abc?x=1"],
+    // 重开失败的窗口退回旧页面认识的「有新版本」提示
+    ["postMessage", "shell-updated"],
+    // 被替下来的旧版可能刚把校验到的文件写回缓存:再扫一遍
+    ["delete", "group-relay-shell-v47"]
+  ]);
+});
+
+test("moved answers every API call at once with a 410 that people and AIs can act on", async (t) => {
+  // 冻结和已搬走同时设:按已搬走处理
+  const { base } = await movedFixture(t, { freeze: "1" });
+  const person = await fetch(`${base}/api/account`, {
+    headers: { "X-Relay-Email": "owner@example.com", "Accept-Language": "en" }
+  });
+  assert.equal(person.status, 410);
+  assert.equal(person.headers.get("cache-control"), "no-store");
+  const body = await person.json();
+  assert.equal(body.code, "moved");
+  assert.deepEqual(body.movedTo, { web: "https://rmp.test", api: "https://api.test/rmp-backend" });
+  assert.match(body.error, /moved to RMP .*https:\/\/rmp\.test\/collab\/chat.*company VPN/);
+  assert.match(body.message.zh, /群聊已迁到 RMP「AI 协作」：https:\/\/rmp\.test\/collab\/chat。RMP 只能在公司 VPN 内访问/);
+  assert.match(body.message.en, /company VPN/);
+  for (const phrase of [
+    "https://rmp.test/collab/chat", "https://api.test/rmp-backend", "https://rmp.test/collab/ai",
+    "VPN", "我的 AI", "待连接", "重新连接", "一次性链接", "worker / MCP", "不要再重试"
+  ]) {
+    assert.ok(body.aiMessage.includes(phrase), phrase);
+  }
+
+  // AI:error 就是给它的那段话,外加一句让已经装在各人电脑上的旧 worker 自己停下的英文
+  const ai = asMember("owner@example.com", "claude");
+  const heartbeat = await json(base, `/api/groups/${migratedGroup}/members/me/presence`, {
+    method: "POST", headers: ai, body: JSON.stringify({ status: "online" })
+  });
+  assert.equal(heartbeat.response.status, 410);
+  assert.ok(heartbeat.body.error.startsWith(heartbeat.body.aiMessage));
+  assert.match(heartbeat.body.error, /not a member of this group/);
+  const write = await json(base, "/api/groups", {
+    method: "POST", body: JSON.stringify({ name: "Late", email: "late@example.com", displayName: "Late" })
+  });
+  assert.equal(write.response.status, 410);
+
+  // 要文字就给文字
+  for (const request of [
+    [`/api/groups/${migratedGroup}/messages`, { ...ai, Accept: "text/plain" }],
+    ["/api/account?format=text", { "X-Relay-Email": "owner@example.com" }]
+  ]) {
+    const text = await fetch(`${base}${request[0]}`, { headers: request[1] });
+    assert.equal(text.status, 410);
+    assert.match(text.headers.get("content-type"), /text\/plain/);
+    assert.equal(await text.text(), `${body.aiMessage}\n`);
+  }
+
+  // 长轮询、SSE 不挂着:每一次都立刻回(AI 第一眼就该看到去哪)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const started = Date.now();
+    const waited = await fetch(`${base}/api/groups/${migratedGroup}/messages/wait?routed=1&timeoutMs=25000`, { headers: ai });
+    assert.equal(waited.status, 410);
+    assert.equal((await waited.json()).code, "moved");
+    assert.ok(Date.now() - started < 1_000, `long poll ${attempt} hung for ${Date.now() - started}ms`);
+  }
+  const started = Date.now();
+  const events = await fetch(`${base}/api/groups/${migratedGroup}/events?email=owner%40example.com`);
+  assert.equal(events.status, 410);
+  await events.arrayBuffer();
+  assert.ok(Date.now() - started < 1_000);
+
+  // /health 照常,并且不能叫 movedTo:旧网页看到 movedTo 会把 RMP 当成新的 Group Relay 服务器切过去
+  const health = await json(base, "/health");
+  assert.equal(health.response.status, 200);
+  assert.deepEqual(health.body.moved, { web: "https://rmp.test", api: "https://api.test/rmp-backend" });
+  assert.equal("movedTo" in health.body, false);
+  assert.equal("frozen" in health.body, false);
+
+  // AI 用 curl 之类去抓旧链接:直接拿到能照着做的文字
+  const curl = { "User-Agent": "curl/8.7.1", Accept: "*/*" };
+  const fetchedInvite = await fetch(`${base}/join/${mappedInvite}?owner=Owner`, { headers: curl });
+  assert.equal(fetchedInvite.status, 410);
+  const inviteText = await fetchedInvite.text();
+  assert.ok(inviteText.startsWith(body.aiMessage));
+  assert.match(inviteText, /https:\/\/rmp\.test\/collab\/join\/fresh-invite/);
+  const fetchedRoot = await fetch(`${base}/`, { headers: curl });
+  assert.equal(fetchedRoot.status, 410);
+  assert.equal(await fetchedRoot.text(), `${body.aiMessage}\n`);
+});
+
+test("the firewall stays in front of the move, and pass links still let people through", async (t) => {
+  const secret = "s".repeat(40);
+  const { base } = await fixture(t, {
+    network: { mode: "enforce", allowedCidrs: "203.0.113.0/24", denyHoldMs: 0, passSecret: secret, log: () => {} },
+    cutover: { movedWeb: "https://rmp.test" }
+  });
+  const outsider = { "CF-Connecting-IP": "198.51.100.7" };
+  const turnedAway = await fetch(`${base}/api/account`, { headers: { ...outsider, "X-Relay-Email": "owner@example.com" } });
+  assert.equal(turnedAway.status, 403);
+  assert.equal((await turnedAway.json()).code, "network_denied");
+  const noticePage = await fetch(`${base}/group/${migratedGroup}`, { headers: { ...outsider, ...browsing } });
+  assert.equal(noticePage.status, 403);
+  assert.doesNotMatch(await noticePage.text(), /collab\/chat/);
+
+  const insider = { "CF-Connecting-IP": "203.0.113.9" };
+  assert.equal((await fetch(`${base}/api/account`, { headers: { ...insider, "X-Relay-Email": "owner@example.com" } })).status, 410);
+
+  const pass = issuePass({ secret, label: "visitor", days: 30 });
+  const redeemed = await fetch(`${base}/api/pass/${pass}`, { headers: outsider, redirect: "manual" });
+  assert.equal(redeemed.status, 302);
+  const cookie = redeemed.headers.get("set-cookie").split(";")[0];
+  const landed = await fetch(`${base}/app`, { headers: { ...outsider, ...browsing, Cookie: cookie } });
+  assert.equal(landed.status, 200);
+  assert.equal(await targetOf(landed), rmpChat);
+});
+
+test("worker, CLI and MCP stop and pass the move on instead of retrying forever", async (t) => {
+  const { base, dataDir } = await movedFixture(t);
+  const configFile = path.join(dataDir, "moved-session.json");
+  const workersFile = path.join(dataDir, "local-workers.json");
+  await fs.writeFile(configFile, JSON.stringify({
+    baseUrl: base,
+    groupId: migratedGroup,
+    email: "owner@example.com",
+    provider: "claude",
+    memberName: "Claude",
+    ownerName: "Owner",
+    sessionId: "moved-session"
+  }));
+  await fs.writeFile(workersFile, JSON.stringify({
+    version: 1,
+    workers: { "moved-session": { configFile, groupId: migratedGroup, provider: "claude", enabled: true } }
+  }));
+  const env = { ...process.env, GROUP_RELAY_AGENT_CONFIG: configFile, GROUP_RELAY_LOCAL_WORKERS: workersFile };
+
+  // 不带 --once:不自己停下来的话这条会一直跑到超时
+  const ran = await execFileAsync(process.execPath, [relayClient, "worker"], { env, timeout: 20_000 });
+  const result = JSON.parse(ran.stdout);
+  assert.match(result.stopped, /重新连接/);
+  assert.doesNotMatch(ran.stderr, /retrying/);
+  // 并且把本机注册表那条清掉,桌面端不会再把它拉起来
+  const registry = JSON.parse(await fs.readFile(workersFile, "utf8"));
+  assert.equal(registry.workers["moved-session"], undefined);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [relayClient, "listen"], { env, timeout: 20_000 }),
+    (error) => {
+      assert.match(error.stderr, /重新连接/);
+      assert.doesNotMatch(error.stderr, /retrying/);
+      return true;
+    }
+  );
+
+  // MCP 照样连上(启动就崩的话 AI 只看到「MCP 起不来」),每个工具都回那段迁移说明
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [mcpServer],
+    stderr: "ignore",
+    env: {
+      ...process.env,
+      GROUP_RELAY_URL: base,
+      GROUP_RELAY_GROUP_ID: migratedGroup,
+      GROUP_RELAY_EMAIL: "owner@example.com",
+      GROUP_RELAY_PROVIDER: "claude"
+    }
+  });
+  const client = new Client({ name: "group-relay-test", version: "1.0.0" });
+  await client.connect(transport);
+  t.after(() => client.close());
+  const started = Date.now();
+  const waited = await client.callTool({
+    name: "group_wait",
+    arguments: { expectedGroupId: migratedGroup, timeoutMs: 25_000 }
+  });
+  assert.equal(waited.isError, true);
+  assert.match(waited.content[0].text, /重新连接/);
+  assert.match(waited.content[0].text, /https:\/\/rmp\.test\/collab\/ai/);
+  assert.ok(Date.now() - started < 5_000);
 });
 
 // 公开仓库里不该出现真人身份和这台机器的细节。今天两次 git add -A 都差点(有一次真的)把

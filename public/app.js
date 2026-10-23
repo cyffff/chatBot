@@ -132,8 +132,45 @@ function hideNetworkDenied() {
   if (panel && !panel.hidden) panel.hidden = true;
 }
 
+/// 迁移期间服务端冻结写入(503 + code=frozen,或 /health 带 frozen)。读照常,所以不盖住页面,
+/// 只把输入框换成一条说明 —— 已经开着的标签页也靠这条知道为什么发不出去。
+function setReadOnly(readOnly) {
+  document.body.classList.toggle("read-only", readOnly);
+  let banner = document.querySelector("#read-only-banner");
+  if (!readOnly) {
+    if (banner) banner.hidden = true;
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("p");
+    banner.id = "read-only-banner";
+    banner.setAttribute("role", "status");
+    document.body.append(banner);
+  }
+  banner.textContent = t("只读：群聊正在迁移到 RMP，暂时不能发消息或修改。");
+  banner.hidden = false;
+}
+
+/// 群聊已经搬到 RMP(410 + code=moved,或 /health 带 moved)。旧版 Service Worker 会把导航拦下来
+/// 回缓存里的页面外壳,所以先注销它、清掉它的缓存,再按原地址重新打开:服务端回一张跳转页,
+/// 把人送到 RMP 里对应的群。这一步和服务端换上的退场版 Service Worker 谁先到都行。
+let leavingForRmp = false;
+async function leaveForRmp() {
+  if (leavingForRmp) return;
+  leavingForRmp = true;
+  const registrations = navigator.serviceWorker
+    ? await navigator.serviceWorker.getRegistrations().catch(() => [])
+    : [];
+  await Promise.all(registrations.map((registration) => registration.unregister().catch(() => false)));
+  const cacheNames = globalThis.caches ? await caches.keys().catch(() => []) : [];
+  await Promise.all(cacheNames.map((name) => caches.delete(name).catch(() => false)));
+  location.replace(`${location.pathname}${location.search}`);
+}
+
 function failedRequest(response, body) {
   if (response.status === 403 && body.code === "network_denied") showNetworkDenied(body);
+  if (response.status === 410 && body.code === "moved") void leaveForRmp();
+  if (response.status === 503 && body.code === "frozen") setReadOnly(true);
   return new Error(body.error || t("请求失败 ({0})", [response.status]));
 }
 
@@ -2597,6 +2634,12 @@ let followingMove = false;
 async function followServerMove() {
   if (followingMove) return;
   const health = await fetch("/health").then((response) => response.json()).catch(() => ({}));
+  // 搬到 RMP 和换一台 Group Relay 服务器是两回事:RMP 不说这套协议,不能当成新服务器去切。
+  if (health.moved) {
+    void leaveForRmp();
+    return;
+  }
+  if (typeof health.ok === "boolean") setReadOnly(health.frozen === true);
   const movedTo = normalizedServerUrl(health.movedTo);
   if (!movedTo || movedTo === location.origin) return;
   followingMove = true;

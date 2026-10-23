@@ -68,8 +68,13 @@ async function relay(path, options = {}) {
   if (!response) {
     throw new Error(`Relay network unavailable after retries: ${lastError?.message ?? "network error"}`);
   }
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Relay returned ${response.status}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    // 服务搬到 RMP 了(410 + code=moved):把「去哪、让主人点重新连接」那段话原样交给 AI。
+    const error = new Error((data.code === "moved" && data.aiMessage) || data.error || `Relay returned ${response.status}`);
+    error.code = data.code;
+    throw error;
+  }
   return data;
 }
 
@@ -333,9 +338,21 @@ server.tool(
   }
 );
 
-await reportPresence("online");
-setInterval(() => {
-  reportPresence().catch((error) => console.error(`Heartbeat error: ${error.message}`));
-}, 60_000).unref();
+/// 服务已经搬走时照样把 MCP 连上:启动就崩的话 AI 只看到「MCP 起不来」,每个工具调用回的那段迁移说明
+/// 它才看得到。心跳也就不必再打了。
+let moved = false;
+await reportPresence("online").catch((error) => {
+  if (error.code !== "moved") throw error;
+  moved = true;
+  console.error(error.message);
+});
+const heartbeat = setInterval(() => {
+  if (moved) return clearInterval(heartbeat);
+  reportPresence().catch((error) => {
+    moved = error.code === "moved";
+    console.error(`Heartbeat error: ${error.message}`);
+  });
+}, 60_000);
+heartbeat.unref();
 
 await server.connect(new StdioServerTransport());

@@ -89,9 +89,12 @@ private struct WorkerRegistry: Codable {
 
 private enum BridgeError: LocalizedError {
     case message(String)
+    /// 服务搬到 RMP 了(410 + code=moved):重试多少次都不会再有活。
+    case moved(String)
     var errorDescription: String? {
-        if case .message(let text) = self { return text }
-        return "Group Relay bridge error"
+        switch self {
+        case .message(let text), .moved(let text): return text
+        }
     }
 }
 
@@ -162,9 +165,10 @@ private final class RelayWorker {
                 /// 拉起来,于是变成永久重试 —— cursor-main 这条在日志里刷了六万多次。
                 /// 所以退出前把注册表里这条标成 enabled=false,让它别再被拉起来。
                 let reason = error.localizedDescription
-                let membershipGone = reason == "invalid member token"
+                var membershipGone = reason == "invalid member token"
                     || reason.contains("not a member of this group")
                     || reason.contains("group not found")
+                if case BridgeError.moved = error { membershipGone = true }
                 if membershipGone {
                     log("Worker \(config.sessionId ?? config.groupId) stopping: \(reason)")
                     disableSessionInRegistry()
@@ -224,6 +228,10 @@ private final class RelayWorker {
                 result = .failure(BridgeError.message("Relay returned no HTTP response")); return
             }
             let object = (try? JSONSerialization.jsonObject(with: data ?? Data())) as? [String: Any] ?? [:]
+            if response.statusCode == 410, object["code"] as? String == "moved" {
+                let text = object["aiMessage"] as? String ?? object["error"] as? String ?? "Group Relay has moved"
+                result = .failure(BridgeError.moved(text)); return
+            }
             guard (200..<300).contains(response.statusCode) else {
                 result = .failure(BridgeError.message(object["error"] as? String ?? "Relay returned \(response.statusCode)")); return
             }

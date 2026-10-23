@@ -8,6 +8,7 @@ import { z } from "zod";
 import { FileStore } from "./storage.js";
 import { localeFromAcceptLanguage, normalizeLocale, systemMessageKeys, translate } from "./i18n.js";
 import { createNetworkPolicy } from "./network-policy.js";
+import { createCutover, wantsAgentText } from "./cutover.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(here, "../public");
@@ -204,6 +205,10 @@ export async function createApp(options = {}) {
   /// 必须排在所有路由和静态文件之前:被拦的访客连页面外壳都不该拿到。
   const networkPolicy = createNetworkPolicy(options.network);
   app.use(networkPolicy.middleware);
+  /// 搬到 RMP 的冻结 / 已搬走开关排在防火墙后面、页面和接口前面:被拦的访客照旧看到防火墙那一页,
+  /// 放进来的才会被冻结或送走。两个都没设时它什么都不做。
+  const cutover = createCutover(options.cutover);
+  app.use(cutover.middleware);
   const subscribers = new Map();
   const waiters = new Map();
   /// 同一个 AI 身份可能同时挂着两个 worker(CLI 注册的 claude-main 和桌面 App 自建的
@@ -548,7 +553,10 @@ export async function createApp(options = {}) {
     capabilities: ["account-sync", "client-history"],
     // 搬迁地址只能由部署方通过环境变量设置。这里不开写接口:没有鉴权的服务上,
     // 一个「所有客户端自动跟随」的可写字段等于把全部客户端拱手让人。
-    ...(movedTo ? { movedTo } : {})
+    ...(movedTo ? { movedTo } : {}),
+    /// 不能叫 movedTo:旧网页看到 movedTo 会把这台服务器换成那个地址,而 RMP 不是 Group Relay。
+    ...(cutover.frozen ? { frozen: true } : {}),
+    ...(cutover.moved ? { moved: cutover.movedTo } : {})
   }));
 
   app.post("/api/accounts", async (req, res, next) => {
@@ -1337,7 +1345,8 @@ export async function createApp(options = {}) {
         return res.status(403).json({ error: "only AI members report presence" });
       }
       const { status, recoverInterrupted } = presenceSchema.parse(req.body);
-      if (status === "online" && recoverInterrupted) {
+      // 冻结期间心跳照收(只改内存),但不把占位改成失败 —— 那是往聊天记录里写。
+      if (status === "online" && recoverInterrupted && !cutover.frozen) {
         const interruptedKey = systemMessageKeys.interrupted;
         const interrupted = await store.failProcessingMessages(
           req.params.groupId,
@@ -1461,7 +1470,10 @@ export async function createApp(options = {}) {
       // 这一轮长轮询在线期间的改动都会走 message_updated 事件送到,所以轮询成功就等于
       // 追赶到了这个时刻:客户端把它存下来,断线重连时当 updatedSince 用。
       const syncedAt = new Date(Date.now() - 1_000).toISOString();
-      const existing = await store.readMessages(req.params.groupId, {
+      /// 冻结期间不给 AI 派活:它接了也回不了(写被拒)。游标原样带回,这些消息不算领过。
+      /// 照常等满这一轮再空手返回 —— 立刻返回会让 worker 原地空转。
+      const withholdWork = cutover.frozen && req.query.routed === "1";
+      const existing = withholdWork ? [] : await store.readMessages(req.params.groupId, {
         after: req.query.after,
         limit: req.query.limit ?? 100
       });
@@ -1732,17 +1744,8 @@ export async function createApp(options = {}) {
   });
 
   /// 同一个邀请链接两种用途:人用浏览器打开进群,AI 用 curl/fetch 抓到的是接入说明。
-  /// 靠 Accept 区分 —— 浏览器一定发 text/html,命令行工具发 */* 或什么都不发。
-  /// 认得出来的 AI 抓取工具:它们发的是浏览器式 Accept(text/html 在最前面),靠 Accept
-  /// 判断会把接入说明变成一张网页 —— AI 看到的就是「没有 API 文档、没有端点」,然后合理地
-  /// 拒绝接入。这些 UA 都不是浏览器,浏览器的 UA 里不会出现它们。
-  const agentUserAgents = /claude|codex|cursor|curl|wget|python-requests|httpx|node-fetch|undici|go-http-client|okhttp|axios/i;
-  const wantsAgentText = (req) => {
-    if (req.query.format === "text") return true;
-    if (req.query.format === "html") return false;
-    if (agentUserAgents.test(req.get("user-agent") ?? "")) return true;
-    return !(req.get("accept") ?? "").includes("text/html");
-  };
+  /// 靠 Accept 区分 —— 浏览器一定发 text/html,命令行工具发 */* 或什么都不发;认得出来的
+  /// AI 抓取工具按 UA 认(wantsAgentText,和搬迁跳转共用一份判断,见 src/cutover.js)。
 
   function aiOnboardingSheet({ origin, group, inviteToken, owner, email }) {
     const inviteUrl = `${origin}/join/${inviteToken}`;
@@ -1926,6 +1929,8 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
   const nudgedPlaceholders = new Set();
   const sweepUnanswered = async (now = Date.now()) => {
     const summary = { prompted: 0, nudged: 0, gaveUp: 0 };
+    // 冻结或已搬走:AI 不会再在这里回话,兜底消息只会往冻住的记录里写噪音。
+    if (cutover.active) return summary;
     for (const groupId of [...store.groupsById.keys()]) {
       const [messages, members] = await Promise.all([
         store.readMessages(groupId, { limit: 200 }).catch(() => []),
@@ -2018,5 +2023,14 @@ GROUP_RELAY_APPROVAL_REQUIRED: <不超过 200 字的摘要>
     return summary;
   };
 
-  return { app, store, sweepExpiredTokens, sweepUnanswered, movedTo, pushEverythingToNewServer, drainClients };
+  return {
+    app,
+    store,
+    sweepExpiredTokens,
+    sweepUnanswered,
+    movedTo,
+    pushEverythingToNewServer,
+    drainClients,
+    cutover: { frozen: cutover.frozen, moved: cutover.moved }
+  };
 }

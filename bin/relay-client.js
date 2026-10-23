@@ -205,7 +205,12 @@ async function request(config, pathname, options = {}) {
     throw new Error(`Relay network unavailable after retries: ${lastError?.message ?? "network error"}`);
   }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `Relay returned ${response.status}`);
+  if (!response.ok) {
+    // 搬到 RMP 之后,这个命令行多半是 AI 在跑:给它那段「去哪、让主人点重新连接」的话。
+    const error = new Error((body.code === "moved" && body.aiMessage) || body.error || `Relay returned ${response.status}`);
+    error.code = body.code;
+    throw error;
+  }
   return body;
 }
 
@@ -652,6 +657,10 @@ async function listen() {
       } catch (error) {
         if (error.message === "invalid member token") {
           console.error("This session was disconnected because it joined another group.");
+          return;
+        }
+        if (error.code === "moved") {
+          console.error(error.message);
           return;
         }
         console.error(`Listen error: ${error.message}; retrying...`);

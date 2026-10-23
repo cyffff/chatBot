@@ -1294,3 +1294,24 @@ aside li { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 .network-denied-card .network-denied-hint[hidden] { display: none; }
 .network-denied-card .network-denied-ip { color: #68736b; font-size: 13px; font-family: ui-monospace, Menlo, Consolas, monospace; }
 .network-denied-card button { margin-top: 8px; }
+
+/* 迁移冻结期:读照常,输入框换成一条只读说明(见 setReadOnly) */
+#read-only-banner {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 900;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 12px 16px;
+  border: 1px solid #f0d58a;
+  border-radius: 12px;
+  background: #fff7df;
+  color: #5c4400;
+  line-height: 1.5;
+  box-shadow: 0 8px 30px rgb(0 0 0 / 12%);
+}
+#read-only-banner[hidden] { display: none; }
+body.read-only #message-form { visibility: hidden; }
+body.read-only #toast { bottom: 96px; z-index: 901; }

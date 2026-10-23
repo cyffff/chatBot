@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
-const { app, store, movedTo, pushEverythingToNewServer, drainClients, sweepUnanswered } = await createApp();
+const { app, store, movedTo, pushEverythingToNewServer, drainClients, sweepUnanswered, cutover } = await createApp();
 
 if (store.migration) {
   const { accounts, groups, legacyTokens, rewrittenRecords } = store.migration;
@@ -74,7 +74,10 @@ const attachmentHours = Number(process.env.GROUP_RELAY_ATTACHMENT_RETENTION_HOUR
 
 // 服务端只是中转缓冲区。每小时跑一次:先把昨天及更早的 JSONL 压成 .gz,再回收过了保留期的
 // 消息、附件和已完结的审批/任务。长期副本在各人自己的客户端里。
+// 迁移冻结期间整个跳过:数据目录正在被原样导出,压缩和回收都会在导出途中改掉文件。
+if (cutover.frozen) console.log("[cutover] frozen: hourly archive/purge paused");
 const maintain = async () => {
+  if (cutover.frozen) return;
   try {
     const count = await store.archiveOldMessages();
     if (count) console.log(`Archived ${count} daily message file(s)`);

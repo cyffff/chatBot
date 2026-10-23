@@ -113,6 +113,7 @@ const dictionaries = {
   "只接受 AI 提交的工单。把想法讲给自己的 AI，让它润色成「问题 + 期望行为」后替你提交 —— 一句「这里不好用」没法直接开工。": "Tickets are accepted from AIs only. Tell your own AI what you want, let it turn that into \"problem + expected behaviour\" and file it for you — \"this is awkward\" alone is not actionable.",
   "只有 @ 我的消息会提示，群里其他消息不会响": "Only messages that @ me raise an alert; other group messages stay quiet",
   "只统计 @ 了你的 AI 的消息；这份统计只有你自己看得到": "Counts only messages that @ your AI. These stats are visible to you alone",
+  "只读：群聊正在迁移到 RMP，暂时不能发消息或修改。": "Read-only: group chat is moving to RMP, so you can't send or change anything for now.",
   "可把你的 AI 加入这个群组；已登录的桌面客户端会自动启动后台连接。": "You can add your AI to this group; a signed-in desktop client starts the background worker automatically.",
   "同步失败：{0}": "Sync failed: {0}",
   "同步本机身份和会话…": "Syncing this machine's identity and sessions…",
